@@ -1,12 +1,19 @@
 import { spawn } from "child_process";
 import { randomUUID } from "crypto";
 
+import { APPROVAL_SYSTEM_PROMPT } from "./approval";
+
 const CLAUDE_PATH = process.env.CLAUDE_PATH || "claude";
 const CLAUDE_MODEL = process.env.CLAUDE_MODEL || "claude-opus-4-6";
 const SESSION_TTL_MS = parseInt(process.env.SESSION_TTL_MS || "3600000");
 const MAX_TURNS = parseInt(process.env.MAX_TURNS || "10");
-const SYSTEM_PROMPT = process.env.SYSTEM_PROMPT || "";
+const USER_SYSTEM_PROMPT = process.env.SYSTEM_PROMPT || "";
 const TIMEOUT_MS = parseInt(process.env.TIMEOUT_MS || "180000");
+
+// Combine approval protocol with user's custom system prompt
+const SYSTEM_PROMPT = [APPROVAL_SYSTEM_PROMPT, USER_SYSTEM_PROMPT]
+  .filter(Boolean)
+  .join("\n\n");
 
 export interface Session {
   sessionId: string;
@@ -76,11 +83,9 @@ export function askClaude(
   ];
 
   if (session.isFirstTurn) {
-    // First turn: create a named session
+    // First turn: create a named session + inject approval system prompt
     args.push("--session-id", session.sessionId);
-    if (SYSTEM_PROMPT) {
-      args.push("--append-system-prompt", SYSTEM_PROMPT);
-    }
+    args.push("--append-system-prompt", SYSTEM_PROMPT);
   } else {
     // Subsequent turns: resume (OpenClaw uses resumeArgs with {sessionId} replacement)
     args.push("--resume", session.sessionId);

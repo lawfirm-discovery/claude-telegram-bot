@@ -1,5 +1,11 @@
-import { Bot } from "grammy";
+import { Bot, InlineKeyboard } from "grammy";
 import { askClaude, clearSession, getSessionStats } from "./claude";
+import {
+  detectApprovalRequest,
+  getApprovalEmoji,
+  getApprovalLabel,
+  type ApprovalRequest,
+} from "./approval";
 import { mkdtemp, writeFile, unlink } from "fs/promises";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -23,6 +29,12 @@ const bot = new Bot(BOT_TOKEN);
 // Pairing system (OpenClaw style)
 const pendingPairings = new Map<string, number>();
 const approvedUsers = new Set<number>(ALLOWED_USERS);
+
+// Pending approval requests: approvalId -> { chatId, request }
+const pendingApprovals = new Map<
+  string,
+  { chatId: string; request: ApprovalRequest }
+>();
 
 function generatePairingCode(): string {
   return Math.random().toString(36).substring(2, 8).toUpperCase();
@@ -98,6 +110,98 @@ bot.command("pair", async (ctx) => {
   approvedUsers.add(targetUserId);
   pendingPairings.delete(code);
   await ctx.reply(`✅ User ${targetUserId} approved.`);
+});
+
+// --- Approval callback handler ---
+bot.on("callback_query:data", async (ctx) => {
+  const data = ctx.callbackQuery.data;
+  const isApprove = data.startsWith("approve:");
+  const isReject = data.startsWith("reject:");
+
+  if (!isApprove && !isReject) return;
+
+  const approvalId = data.split(":")[1];
+  const pending = pendingApprovals.get(approvalId);
+
+  if (!pending) {
+    await ctx.answerCallbackQuery({ text: "Expired or already handled." });
+    return;
+  }
+
+  const { chatId, request } = pending;
+  pendingApprovals.delete(approvalId);
+
+  const emoji = getApprovalEmoji(request.type);
+  const label = getApprovalLabel(request.type);
+
+  if (isApprove) {
+    // Update button message
+    try {
+      await ctx.editMessageText(
+        `${emoji} **${label}** ✅ 승인됨\n\n\`\`\`\n${request.content}\n\`\`\``,
+        { parse_mode: "Markdown" }
+      );
+    } catch {
+      try {
+        await ctx.editMessageText(
+          `${emoji} ${label} ✅ 승인됨\n\n${request.content}`
+        );
+      } catch {}
+    }
+    await ctx.answerCallbackQuery({ text: "✅ 승인됨" });
+
+    console.log(`[Approval] APPROVED id=${approvalId} chat=${chatId}`);
+
+    // Send approval to Claude and get execution result
+    await ctx.replyWithChatAction("typing");
+    const typingInterval = setInterval(async () => {
+      try {
+        await ctx.replyWithChatAction("typing");
+      } catch {}
+    }, 4000);
+
+    try {
+      const response = await askClaude(chatId, "승인합니다. 진행해주세요.");
+      clearInterval(typingInterval);
+
+      // Check if there's another approval needed
+      const nextApproval = detectApprovalRequest(response);
+      if (nextApproval) {
+        await sendApprovalRequest(ctx, chatId, nextApproval, response);
+      } else {
+        await sendResponse(ctx, response);
+      }
+    } catch (error: any) {
+      clearInterval(typingInterval);
+      await ctx.reply(`⚠️ ${error.message}`);
+    }
+  } else {
+    // Rejected
+    try {
+      await ctx.editMessageText(
+        `${emoji} **${label}** ❌ 거절됨\n\n\`\`\`\n${request.content}\n\`\`\``,
+        { parse_mode: "Markdown" }
+      );
+    } catch {
+      try {
+        await ctx.editMessageText(
+          `${emoji} ${label} ❌ 거절됨\n\n${request.content}`
+        );
+      } catch {}
+    }
+    await ctx.answerCallbackQuery({ text: "❌ 거절됨" });
+
+    console.log(`[Approval] REJECTED id=${approvalId} chat=${chatId}`);
+
+    // Tell Claude it was rejected
+    try {
+      const response = await askClaude(
+        chatId,
+        "거절합니다. 실행하지 마세요."
+      );
+      await sendResponse(ctx, response);
+    } catch {}
+  }
 });
 
 // --- Helpers ---
@@ -176,12 +280,67 @@ async function handleMessage(
   try {
     const response = await askClaude(chatId, text, attachments);
     clearInterval(typingInterval);
-    await sendResponse(ctx, response);
+
+    // Check if Claude is requesting approval
+    const approval = detectApprovalRequest(response);
+    if (approval) {
+      await sendApprovalRequest(ctx, chatId, approval, response);
+    } else {
+      await sendResponse(ctx, response);
+    }
   } catch (error: any) {
     clearInterval(typingInterval);
     console.error(`[Bot] Error chat=${chatId}:`, error.message);
     await ctx.reply(`⚠️ ${error.message}`);
   }
+}
+
+// Send approval request with inline buttons
+async function sendApprovalRequest(
+  ctx: any,
+  chatId: string,
+  approval: ApprovalRequest,
+  fullResponse: string
+): Promise<void> {
+  const approvalId = Math.random().toString(36).substring(2, 10);
+  pendingApprovals.set(approvalId, { chatId, request: approval });
+
+  // Auto-expire after 10 minutes
+  setTimeout(() => pendingApprovals.delete(approvalId), 600_000);
+
+  const emoji = getApprovalEmoji(approval.type);
+  const label = getApprovalLabel(approval.type);
+
+  // Send the text before the marker
+  const beforeMarker = fullResponse.split(`[${approval.type.toUpperCase()}_START]`)[0].trim();
+  if (beforeMarker) {
+    await sendResponse(ctx, beforeMarker);
+  }
+
+  // Send approval card with buttons
+  const keyboard = new InlineKeyboard()
+    .text("✅ 승인 (Approve)", `approve:${approvalId}`)
+    .text("❌ 거절 (Reject)", `reject:${approvalId}`);
+
+  const approvalMsg =
+    `${emoji} **${label} - 승인 필요**\n\n` +
+    `\`\`\`\n${approval.content}\n\`\`\``;
+
+  try {
+    await ctx.reply(approvalMsg, {
+      parse_mode: "Markdown",
+      reply_markup: keyboard,
+    });
+  } catch {
+    await ctx.reply(
+      `${emoji} ${label} - 승인 필요\n\n${approval.content}`,
+      { reply_markup: keyboard }
+    );
+  }
+
+  console.log(
+    `[Approval] ${approval.type} request id=${approvalId} chat=${chatId}`
+  );
 }
 
 // --- Message handlers ---
