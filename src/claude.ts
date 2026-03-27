@@ -215,8 +215,27 @@ function parseClaudeOutput(raw: string): ParsedResult {
 }
 
 function extractResult(obj: any): ParsedResult {
+  let text = (obj.result ?? obj.text ?? obj.content ?? "").trim();
+
+  // When stop_reason is "max_turns_reached", Claude ran out of turns
+  // and may not have produced a text result. Inform the user.
+  if (
+    !text &&
+    (obj.stop_reason === "max_turns" ||
+      obj.stop_reason === "max_turns_reached")
+  ) {
+    text =
+      "⏳ 작업이 max-turns 한도에 도달했습니다. /new 로 새 대화를 시작하거나, 계속 진행하려면 메시지를 보내주세요.";
+  }
+
+  // When stop_reason is "end_turn" but result is empty,
+  // Claude likely used tools and didn't generate final text
+  if (!text && obj.stop_reason === "end_turn" && obj.num_turns > 1) {
+    text = "✅ 작업을 완료했습니다. 결과를 확인하시거나 추가 요청을 보내주세요.";
+  }
+
   return {
-    text: (obj.result ?? obj.text ?? obj.content ?? "").trim(),
+    text,
     sessionId:
       obj.session_id || obj.sessionId || obj.conversation_id || null,
     isError: obj.is_error === true,
