@@ -6,7 +6,7 @@ import { APPROVAL_SYSTEM_PROMPT } from "./approval";
 const CLAUDE_PATH = process.env.CLAUDE_PATH || "claude";
 const CLAUDE_MODEL = process.env.CLAUDE_MODEL || "claude-opus-4-6";
 const SESSION_TTL_MS = parseInt(process.env.SESSION_TTL_MS || "3600000");
-const MAX_TURNS = parseInt(process.env.MAX_TURNS || "10");
+const MAX_TURNS = parseInt(process.env.MAX_TURNS || "50");
 const USER_SYSTEM_PROMPT = process.env.SYSTEM_PROMPT || "";
 const TIMEOUT_MS = parseInt(process.env.TIMEOUT_MS || "180000");
 
