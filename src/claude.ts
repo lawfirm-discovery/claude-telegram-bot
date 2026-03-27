@@ -1,20 +1,12 @@
 import { spawn } from "child_process";
 import { randomUUID } from "crypto";
 
-export interface ClaudeResponse {
-  type: string;
-  subtype: string;
-  is_error: boolean;
-  result: string;
-  session_id: string;
-  total_cost_usd: number;
-  usage: {
-    input_tokens: number;
-    output_tokens: number;
-    cache_read_input_tokens?: number;
-    cache_creation_input_tokens?: number;
-  };
-}
+const CLAUDE_PATH = process.env.CLAUDE_PATH || "claude";
+const CLAUDE_MODEL = process.env.CLAUDE_MODEL || "claude-opus-4-6";
+const SESSION_TTL_MS = parseInt(process.env.SESSION_TTL_MS || "3600000");
+const MAX_TURNS = parseInt(process.env.MAX_TURNS || "10");
+const SYSTEM_PROMPT = process.env.SYSTEM_PROMPT || "";
+const TIMEOUT_MS = parseInt(process.env.TIMEOUT_MS || "180000");
 
 export interface Session {
   sessionId: string;
@@ -23,13 +15,6 @@ export interface Session {
 }
 
 const sessions = new Map<string, Session>();
-
-const CLAUDE_PATH = process.env.CLAUDE_PATH || "claude";
-const CLAUDE_MODEL = process.env.CLAUDE_MODEL || "claude-opus-4-6";
-const SESSION_TTL_MS = parseInt(process.env.SESSION_TTL_MS || "3600000");
-const MAX_TURNS = parseInt(process.env.MAX_TURNS || "5");
-const SYSTEM_PROMPT = process.env.SYSTEM_PROMPT || "";
-const TIMEOUT_MS = parseInt(process.env.TIMEOUT_MS || "180000");
 
 export function getSession(chatId: string): Session {
   const existing = sessions.get(chatId);
@@ -50,54 +35,54 @@ export function clearSession(chatId: string): void {
   sessions.delete(chatId);
 }
 
-export function getSessionStats(): {
-  active: number;
-  sessions: Map<string, Session>;
-} {
+export function getSessionStats(): { active: number } {
   const now = Date.now();
   for (const [key, session] of sessions) {
     if (now - session.lastActive >= SESSION_TTL_MS) {
       sessions.delete(key);
     }
   }
-  return { active: sessions.size, sessions };
+  return { active: sessions.size };
 }
 
-export async function askClaude(
+// OpenClaw-style batch execution: spawn claude -p, wait for exit, parse result
+export function askClaude(
   chatId: string,
   message: string,
   attachments?: string[]
 ): Promise<string> {
   const session = getSession(chatId);
 
-  // Build prompt with file attachments (OpenClaw style)
+  // Build prompt with attachments (OpenClaw style: append paths to prompt)
   let fullPrompt = message;
   if (attachments && attachments.length > 0) {
     fullPrompt = `${message}\n\n${attachments.join("\n")}`;
   }
 
-  // Build args matching OpenClaw's claude-cli backend
+  // Build args matching OpenClaw's claude-cli backend:
+  // args: ["-p", "--output-format", "json", "--permission-mode", "bypassPermissions"]
+  // resumeArgs: ["-p", "--output-format", "json", "--permission-mode", "bypassPermissions", "--resume", "{sessionId}"]
   const args: string[] = [
     "-p",
     fullPrompt,
     "--output-format",
     "json",
-    "--permission-mode",
-    "bypassPermissions",
     "--model",
     CLAUDE_MODEL,
     "--max-turns",
     String(MAX_TURNS),
+    "--permission-mode",
+    "bypassPermissions",
   ];
 
   if (session.isFirstTurn) {
-    // First turn: use --session-id to create a named session
+    // First turn: create a named session
     args.push("--session-id", session.sessionId);
     if (SYSTEM_PROMPT) {
       args.push("--append-system-prompt", SYSTEM_PROMPT);
     }
   } else {
-    // Subsequent turns: resume the existing session
+    // Subsequent turns: resume (OpenClaw uses resumeArgs with {sessionId} replacement)
     args.push("--resume", session.sessionId);
   }
 
@@ -105,6 +90,7 @@ export async function askClaude(
     const proc = spawn(CLAUDE_PATH, args, {
       env: { ...process.env, NO_COLOR: "1" },
       timeout: TIMEOUT_MS,
+      stdio: ["ignore", "pipe", "pipe"],
     });
 
     let stdout = "";
@@ -120,60 +106,52 @@ export async function askClaude(
 
     proc.on("close", (code: number | null) => {
       if (code !== 0) {
-        console.error(`[Claude] exit=${code} stderr=${stderr}`);
-        // On error, try fresh session next time
-        if (stderr.includes("session") || stderr.includes("resume")) {
+        console.error(`[Claude] exit=${code} stderr=${stderr.slice(0, 300)}`);
+        // Reset session on resume errors
+        if (
+          stderr.includes("session") ||
+          stderr.includes("resume") ||
+          stderr.includes("not found")
+        ) {
           session.isFirstTurn = true;
           session.sessionId = randomUUID();
         }
-        reject(
-          new Error(stderr.split("\n")[0] || `Claude exited with code ${code}`)
-        );
+        const errMsg =
+          stderr.split("\n").filter(Boolean)[0] ||
+          `Claude exited with code ${code}`;
+        reject(new Error(errMsg));
         return;
       }
 
       try {
-        // Parse response - handle both single JSON and NDJSON
-        let response: ClaudeResponse | null = null;
-        const lines = stdout.trim().split("\n");
+        // OpenClaw parseCliOutput: parse JSONL, look for type:"result"
+        const result = parseClaudeOutput(stdout);
 
-        for (const line of lines) {
-          try {
-            const parsed = JSON.parse(line);
-            if (parsed.type === "result") {
-              response = parsed;
-              break;
-            }
-          } catch {
-            // Skip non-JSON lines
-          }
-        }
-
-        if (!response) {
-          response = JSON.parse(stdout);
-        }
-
-        if (response!.is_error) {
-          reject(new Error(response!.result || "Unknown Claude error"));
+        if (result.isError) {
+          reject(new Error(result.text || "Unknown Claude error"));
           return;
         }
 
-        const resultText = response!.result || "";
-
-        // Mark session as resumed for future calls
+        // Update session for resume
         session.isFirstTurn = false;
-        session.sessionId = response!.session_id || session.sessionId;
+        if (result.sessionId) session.sessionId = result.sessionId;
         session.lastActive = Date.now();
 
-        const usage = response!.usage;
         console.log(
-          `[Claude] chat=${chatId} in=${usage?.input_tokens || 0} out=${usage?.output_tokens || 0} cache_read=${usage?.cache_read_input_tokens || 0} cost=$${(response!.total_cost_usd || 0).toFixed(4)}`
+          `[Claude] chat=${chatId} in=${result.inputTokens} out=${result.outputTokens} cost=$${result.cost.toFixed(4)}`
         );
 
-        resolve(resultText || "(empty response)");
-      } catch (e) {
-        console.error(`[Claude] parse error, stdout=${stdout.slice(0, 500)}`);
-        reject(new Error("Failed to parse Claude response"));
+        resolve(result.text || "(empty response)");
+      } catch (e: any) {
+        console.error(
+          `[Claude] Parse error: ${e.message} stdout=${stdout.slice(0, 300)}`
+        );
+        // Try to return raw text if JSON parsing fails
+        if (stdout.trim()) {
+          resolve(stdout.trim());
+        } else {
+          reject(new Error("Failed to parse Claude response"));
+        }
       }
     });
 
@@ -181,4 +159,64 @@ export async function askClaude(
       reject(new Error(`Failed to spawn Claude CLI: ${err.message}`));
     });
   });
+}
+
+// OpenClaw-compatible output parser
+// Handles both single JSON and JSONL (newline-delimited JSON) output
+interface ParsedResult {
+  text: string;
+  sessionId: string | null;
+  isError: boolean;
+  inputTokens: number;
+  outputTokens: number;
+  cost: number;
+}
+
+function parseClaudeOutput(raw: string): ParsedResult {
+  const trimmed = raw.trim();
+
+  // Try single JSON first
+  try {
+    const obj = JSON.parse(trimmed);
+    return extractResult(obj);
+  } catch {
+    // Not single JSON, try JSONL
+  }
+
+  // Parse JSONL: look for type:"result" line (OpenClaw's parseClaudeCliJsonlResult)
+  const lines = trimmed.split("\n");
+  for (const line of lines) {
+    try {
+      const obj = JSON.parse(line.trim());
+      if (obj.type === "result") {
+        return extractResult(obj);
+      }
+    } catch {
+      // Skip non-JSON lines
+    }
+  }
+
+  // Last resort: try last JSON line
+  for (let i = lines.length - 1; i >= 0; i--) {
+    try {
+      const obj = JSON.parse(lines[i].trim());
+      return extractResult(obj);
+    } catch {
+      continue;
+    }
+  }
+
+  throw new Error("No valid JSON result found in Claude output");
+}
+
+function extractResult(obj: any): ParsedResult {
+  return {
+    text: (obj.result ?? obj.text ?? obj.content ?? "").trim(),
+    sessionId:
+      obj.session_id || obj.sessionId || obj.conversation_id || null,
+    isError: obj.is_error === true,
+    inputTokens: obj.usage?.input_tokens || 0,
+    outputTokens: obj.usage?.output_tokens || 0,
+    cost: obj.total_cost_usd || 0,
+  };
 }

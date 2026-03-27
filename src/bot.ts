@@ -1,6 +1,6 @@
 import { Bot } from "grammy";
 import { askClaude, clearSession, getSessionStats } from "./claude";
-import { mkdtemp, writeFile, unlink, mkdir } from "fs/promises";
+import { mkdtemp, writeFile, unlink } from "fs/promises";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -14,117 +14,93 @@ const ALLOWED_USERS = process.env.ALLOWED_USERS
   ? process.env.ALLOWED_USERS.split(",").map((id) => parseInt(id.trim()))
   : [];
 
-// Group chat settings (OpenClaw style)
-const GROUP_MENTION_PATTERNS = (
-  process.env.GROUP_MENTION_PATTERNS || ""
-).split(",").filter(Boolean);
+const GROUP_MENTION_PATTERNS = (process.env.GROUP_MENTION_PATTERNS || "")
+  .split(",")
+  .filter(Boolean);
 
 const bot = new Bot(BOT_TOKEN);
 
 // Pairing system (OpenClaw style)
-const pendingPairings = new Map<string, number>(); // code -> userId
+const pendingPairings = new Map<string, number>();
 const approvedUsers = new Set<number>(ALLOWED_USERS);
 
 function generatePairingCode(): string {
   return Math.random().toString(36).substring(2, 8).toUpperCase();
 }
 
-// Access control middleware
+// --- Access control ---
 bot.use(async (ctx, next) => {
   const userId = ctx.from?.id;
   if (!userId) return;
 
-  // If no restrictions, allow all
   if (approvedUsers.size === 0 && ALLOWED_USERS.length === 0) {
     await next();
     return;
   }
-
-  // Check if user is approved
   if (approvedUsers.has(userId)) {
     await next();
     return;
   }
 
-  // Pairing flow for DMs
-  if (ctx.chat?.type === "private") {
+  // Pairing for DMs
+  if (ctx.chat?.type === "private" && ctx.message?.text) {
     const code = generatePairingCode();
     pendingPairings.set(code, userId);
-    console.log(
-      `[Pairing] Code ${code} for user ${userId} (@${ctx.from?.username})`
-    );
+    console.log(`[Pairing] Code ${code} for user ${userId}`);
     await ctx.reply(
-      `🔐 Pairing required.\n\nCode: \`${code}\`\n\nSend this code to the bot owner to get approved.`,
+      `🔐 Pairing required.\n\nCode: \`${code}\`\n\nSend to bot owner.`,
       { parse_mode: "Markdown" }
     );
-    // Auto-expire after 10 min
     setTimeout(() => pendingPairings.delete(code), 600_000);
     return;
   }
 });
 
-// /start command
+// --- Commands ---
 bot.command("start", async (ctx) => {
-  const userId = ctx.from?.id;
-  const model = process.env.CLAUDE_MODEL || "claude-opus-4-6";
   await ctx.reply(
     `🤖 Claude Telegram Bot\n\n` +
-      `Model: ${model}\n` +
-      `Your ID: ${userId}\n\n` +
-      `Commands:\n` +
+      `Model: ${process.env.CLAUDE_MODEL || "claude-opus-4-6"}\n` +
+      `Your ID: ${ctx.from?.id}\n\n` +
       `/new — New conversation\n` +
       `/model — Current model\n` +
       `/stats — Session stats\n` +
-      `/pair <code> — Approve a user (owner only)\n\n` +
-      `Send any message to chat with Claude.`
+      `/pair <code> — Approve user`
   );
 });
 
-// /new - clear session
 bot.command("new", async (ctx) => {
-  const chatId = ctx.chat.id.toString();
-  clearSession(chatId);
+  clearSession(ctx.chat.id.toString());
   await ctx.reply("🔄 New conversation started.");
 });
 
-// /model - show model
 bot.command("model", async (ctx) => {
-  const model = process.env.CLAUDE_MODEL || "claude-opus-4-6";
-  await ctx.reply(`Model: ${model}`);
+  await ctx.reply(`Model: ${process.env.CLAUDE_MODEL || "claude-opus-4-6"}`);
 });
 
-// /stats
 bot.command("stats", async (ctx) => {
-  const stats = getSessionStats();
-  await ctx.reply(`Active sessions: ${stats.active}`);
+  await ctx.reply(`Active sessions: ${getSessionStats().active}`);
 });
 
-// /pair <code> - approve a user (owner only)
 bot.command("pair", async (ctx) => {
-  const userId = ctx.from?.id;
-  if (ALLOWED_USERS.length > 0 && !ALLOWED_USERS.includes(userId!)) {
+  if (ALLOWED_USERS.length > 0 && !ALLOWED_USERS.includes(ctx.from?.id!))
     return;
-  }
-
   const code = ctx.match?.trim().toUpperCase();
   if (!code) {
     await ctx.reply("Usage: /pair <CODE>");
     return;
   }
-
   const targetUserId = pendingPairings.get(code);
   if (!targetUserId) {
     await ctx.reply("Invalid or expired code.");
     return;
   }
-
   approvedUsers.add(targetUserId);
   pendingPairings.delete(code);
   await ctx.reply(`✅ User ${targetUserId} approved.`);
-  console.log(`[Pairing] User ${targetUserId} approved by ${userId}`);
 });
 
-// Download a Telegram file to a temp path
+// --- Helpers ---
 async function downloadTelegramFile(
   fileId: string,
   extension: string
@@ -133,42 +109,18 @@ async function downloadTelegramFile(
   const fileUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`;
   const response = await fetch(fileUrl);
   const buffer = Buffer.from(await response.arrayBuffer());
-
   const dir = await mkdtemp(join(tmpdir(), "claude-tg-"));
   const filePath = join(dir, `file.${extension}`);
   await writeFile(filePath, buffer, { mode: 0o600 });
   return filePath;
 }
 
-// Clean up temp file
 async function cleanupFile(path: string): Promise<void> {
   try {
     await unlink(path);
   } catch {}
 }
 
-// Send a response, handling long messages and markdown fallback
-async function sendResponse(
-  ctx: any,
-  text: string,
-  replyToId?: number
-): Promise<void> {
-  const chunks = splitMessage(text, 4096);
-
-  for (const chunk of chunks) {
-    const opts: any = {};
-    if (replyToId) opts.reply_to_message_id = replyToId;
-
-    // Try Markdown first, fall back to plain text
-    try {
-      await ctx.reply(chunk, { ...opts, parse_mode: "Markdown" });
-    } catch {
-      await ctx.reply(chunk, opts);
-    }
-  }
-}
-
-// Check if bot is mentioned in group chat
 function isBotMentioned(text: string, botUsername: string): boolean {
   if (text.includes(`@${botUsername}`)) return true;
   for (const pattern of GROUP_MENTION_PATTERNS) {
@@ -177,69 +129,36 @@ function isBotMentioned(text: string, botUsername: string): boolean {
   return false;
 }
 
-// Handle text messages
-bot.on("message:text", async (ctx) => {
-  const chatId = ctx.chat.id.toString();
-  const text = ctx.message.text;
-
-  if (!text || text.startsWith("/")) return;
-
-  // In group chats, only respond when mentioned
-  if (ctx.chat.type !== "private") {
-    const botInfo = await bot.api.getMe();
-    if (!isBotMentioned(text, botInfo.username || "")) return;
+// Send response with Markdown fallback and auto-chunking
+async function sendResponse(ctx: any, text: string): Promise<void> {
+  const chunks = splitMessage(text, 4096);
+  for (const chunk of chunks) {
+    try {
+      await ctx.reply(chunk, { parse_mode: "Markdown" });
+    } catch {
+      await ctx.reply(chunk);
+    }
   }
+}
 
-  await handleMessage(ctx, chatId, text);
-});
-
-// Handle photos
-bot.on("message:photo", async (ctx) => {
-  const chatId = ctx.chat.id.toString();
-  const caption = ctx.message.caption || "이 이미지를 분석해줘";
-
-  const photo = ctx.message.photo[ctx.message.photo.length - 1];
-  let tmpPath: string | null = null;
-
-  try {
-    tmpPath = await downloadTelegramFile(photo.file_id, "jpg");
-    await handleMessage(ctx, chatId, caption, [tmpPath]);
-  } finally {
-    if (tmpPath) await cleanupFile(tmpPath);
+function splitMessage(text: string, maxLength: number): string[] {
+  const chunks: string[] = [];
+  let remaining = text;
+  while (remaining.length > 0) {
+    if (remaining.length <= maxLength) {
+      chunks.push(remaining);
+      break;
+    }
+    let i = remaining.lastIndexOf("\n", maxLength);
+    if (i < maxLength / 2) i = remaining.lastIndexOf(" ", maxLength);
+    if (i < maxLength / 2) i = maxLength;
+    chunks.push(remaining.substring(0, i));
+    remaining = remaining.substring(i).trimStart();
   }
-});
+  return chunks;
+}
 
-// Handle documents
-bot.on("message:document", async (ctx) => {
-  const chatId = ctx.chat.id.toString();
-  const doc = ctx.message.document;
-  const caption = ctx.message.caption || `이 파일을 분석해줘: ${doc.file_name}`;
-  const ext = doc.file_name?.split(".").pop() || "txt";
-
-  let tmpPath: string | null = null;
-
-  try {
-    tmpPath = await downloadTelegramFile(doc.file_id, ext);
-    await handleMessage(ctx, chatId, caption, [tmpPath]);
-  } finally {
-    if (tmpPath) await cleanupFile(tmpPath);
-  }
-});
-
-// Handle voice messages
-bot.on("message:voice", async (ctx) => {
-  const chatId = ctx.chat.id.toString();
-  let tmpPath: string | null = null;
-
-  try {
-    tmpPath = await downloadTelegramFile(ctx.message.voice.file_id, "ogg");
-    await handleMessage(ctx, chatId, "이 음성 메시지를 분석해줘", [tmpPath]);
-  } finally {
-    if (tmpPath) await cleanupFile(tmpPath);
-  }
-});
-
-// Core message handler
+// --- Core message handler (OpenClaw style: batch spawn, wait, reply) ---
 async function handleMessage(
   ctx: any,
   chatId: string,
@@ -257,7 +176,7 @@ async function handleMessage(
   try {
     const response = await askClaude(chatId, text, attachments);
     clearInterval(typingInterval);
-    await sendResponse(ctx, response, ctx.message?.message_id);
+    await sendResponse(ctx, response);
   } catch (error: any) {
     clearInterval(typingInterval);
     console.error(`[Bot] Error chat=${chatId}:`, error.message);
@@ -265,34 +184,51 @@ async function handleMessage(
   }
 }
 
-function splitMessage(text: string, maxLength: number): string[] {
-  const chunks: string[] = [];
-  let remaining = text;
+// --- Message handlers ---
+bot.on("message:text", async (ctx) => {
+  const text = ctx.message.text;
+  if (!text || text.startsWith("/")) return;
 
-  while (remaining.length > 0) {
-    if (remaining.length <= maxLength) {
-      chunks.push(remaining);
-      break;
-    }
-
-    // Split at newline, then space, then hard cut
-    let splitIndex = remaining.lastIndexOf("\n", maxLength);
-    if (splitIndex === -1 || splitIndex < maxLength / 2) {
-      splitIndex = remaining.lastIndexOf(" ", maxLength);
-    }
-    if (splitIndex === -1 || splitIndex < maxLength / 2) {
-      splitIndex = maxLength;
-    }
-
-    chunks.push(remaining.substring(0, splitIndex));
-    remaining = remaining.substring(splitIndex).trimStart();
+  // Group: only respond when mentioned
+  if (ctx.chat.type !== "private") {
+    const botInfo = await bot.api.getMe();
+    if (!isBotMentioned(text, botInfo.username || "")) return;
   }
 
-  return chunks;
-}
+  await handleMessage(ctx, ctx.chat.id.toString(), text);
+});
 
-// Error handling
-bot.catch((err) => {
+bot.on("message:photo", async (ctx) => {
+  const chatId = ctx.chat.id.toString();
+  const caption = ctx.message.caption || "이 이미지를 분석해줘";
+  const photo = ctx.message.photo[ctx.message.photo.length - 1];
+  const tmpPath = await downloadTelegramFile(photo.file_id, "jpg");
+  await handleMessage(ctx, chatId, caption, [tmpPath]);
+  setTimeout(() => cleanupFile(tmpPath), 120_000);
+});
+
+bot.on("message:document", async (ctx) => {
+  const chatId = ctx.chat.id.toString();
+  const doc = ctx.message.document;
+  const caption = ctx.message.caption || `이 파일을 분석해줘: ${doc.file_name}`;
+  const ext = doc.file_name?.split(".").pop() || "txt";
+  const tmpPath = await downloadTelegramFile(doc.file_id, ext);
+  await handleMessage(ctx, chatId, caption, [tmpPath]);
+  setTimeout(() => cleanupFile(tmpPath), 120_000);
+});
+
+bot.on("message:voice", async (ctx) => {
+  const chatId = ctx.chat.id.toString();
+  const tmpPath = await downloadTelegramFile(
+    ctx.message.voice.file_id,
+    "ogg"
+  );
+  await handleMessage(ctx, chatId, "이 음성 메시지를 분석해줘", [tmpPath]);
+  setTimeout(() => cleanupFile(tmpPath), 120_000);
+});
+
+// --- Error handler: send errors to Telegram ---
+bot.catch(async (err) => {
   console.error("[Bot] Unhandled error:", err.message);
 });
 
