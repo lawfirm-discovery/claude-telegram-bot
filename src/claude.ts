@@ -177,10 +177,30 @@ interface ParsedResult {
   cost: number;
 }
 
+// OpenClaw collectText: recursively extract text from nested JSON structures
+function collectText(value: any): string {
+  if (!value) return "";
+  if (typeof value === "string") return value;
+  if (Array.isArray(value))
+    return value.map((entry) => collectText(entry)).join("");
+  if (typeof value !== "object") return "";
+  if (typeof value.text === "string") return value.text;
+  if (typeof value.content === "string") return value.content;
+  if (Array.isArray(value.content))
+    return value.content.map((entry: any) => collectText(entry)).join("");
+  if (
+    typeof value.message === "object" &&
+    value.message !== null &&
+    !Array.isArray(value.message)
+  )
+    return collectText(value.message);
+  return "";
+}
+
 function parseClaudeOutput(raw: string): ParsedResult {
   const trimmed = raw.trim();
 
-  // Try single JSON first
+  // Try single JSON first (OpenClaw parseCliJson)
   try {
     const obj = JSON.parse(trimmed);
     return extractResult(obj);
@@ -188,11 +208,20 @@ function parseClaudeOutput(raw: string): ParsedResult {
     // Not single JSON, try JSONL
   }
 
-  // Parse JSONL: look for type:"result" line (OpenClaw's parseClaudeCliJsonlResult)
+  // Parse JSONL: look for type:"result" line (OpenClaw parseCliJsonl)
   const lines = trimmed.split("\n");
+  let fallbackSessionId: string | null = null;
+  let fallbackUsage: any = null;
+
   for (const line of lines) {
     try {
       const obj = JSON.parse(line.trim());
+      // Collect session ID from any line
+      if (!fallbackSessionId) {
+        fallbackSessionId =
+          obj.session_id || obj.sessionId || obj.conversation_id || null;
+      }
+      if (obj.usage) fallbackUsage = obj.usage;
       if (obj.type === "result") {
         return extractResult(obj);
       }
@@ -204,7 +233,7 @@ function parseClaudeOutput(raw: string): ParsedResult {
   // Last resort: try last JSON line
   for (let i = lines.length - 1; i >= 0; i--) {
     try {
-      const obj = JSON.parse(lines[i].trim());
+      const obj = JSON.parse(lines[i]!.trim());
       return extractResult(obj);
     } catch {
       continue;
@@ -215,10 +244,16 @@ function parseClaudeOutput(raw: string): ParsedResult {
 }
 
 function extractResult(obj: any): ParsedResult {
-  let text = (obj.result ?? obj.text ?? obj.content ?? "").trim();
+  // OpenClaw parseCliJson approach: try multiple fields with || (not ??)
+  // || falls through on empty strings, ?? does not
+  let text = (
+    collectText(obj.message) ||
+    collectText(obj.content) ||
+    collectText(obj.result) ||
+    collectText(obj)
+  ).trim();
 
   // When stop_reason is "max_turns_reached", Claude ran out of turns
-  // and may not have produced a text result. Inform the user.
   if (
     !text &&
     (obj.stop_reason === "max_turns" ||
@@ -228,16 +263,29 @@ function extractResult(obj: any): ParsedResult {
       "⏳ 작업이 max-turns 한도에 도달했습니다. /new 로 새 대화를 시작하거나, 계속 진행하려면 메시지를 보내주세요.";
   }
 
-  // When stop_reason is "end_turn" but result is empty,
-  // Claude likely used tools and didn't generate final text
-  if (!text && obj.stop_reason === "end_turn" && obj.num_turns > 1) {
+  // When result is empty but Claude clearly did work (tool use),
+  // provide a meaningful fallback (relaxed: any num_turns, any stop_reason)
+  if (!text && (obj.num_turns ?? 0) > 1) {
     text = "✅ 작업을 완료했습니다. 결과를 확인하시거나 추가 요청을 보내주세요.";
   }
 
+  // Final fallback: if still empty and there were output tokens, log for debugging
+  if (!text && (obj.usage?.output_tokens ?? 0) > 0) {
+    console.warn(
+      `[Claude] Empty result with ${obj.usage?.output_tokens} output tokens. ` +
+        `stop_reason=${obj.stop_reason} num_turns=${obj.num_turns} ` +
+        `keys=${Object.keys(obj).join(",")}`
+    );
+    text =
+      "⚠️ 응답이 생성되었으나 텍스트 추출에 실패했습니다. 다시 시도하거나 /new 로 새 대화를 시작해주세요.";
+  }
+
+  const sessionId =
+    obj.session_id || obj.sessionId || obj.conversation_id || null;
+
   return {
     text,
-    sessionId:
-      obj.session_id || obj.sessionId || obj.conversation_id || null,
+    sessionId,
     isError: obj.is_error === true,
     inputTokens: obj.usage?.input_tokens || 0,
     outputTokens: obj.usage?.output_tokens || 0,
