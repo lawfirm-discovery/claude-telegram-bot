@@ -40,6 +40,7 @@ const SESSION_EXPIRED_PATTERNS = [
   "no such session",
   "conversation not found",
   "session id not found",
+  "already in use",
 ];
 
 const RATE_LIMIT_PATTERNS = [
