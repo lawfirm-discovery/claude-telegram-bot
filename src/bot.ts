@@ -1,5 +1,5 @@
 import { Bot, InlineKeyboard } from "grammy";
-import { askClaude, clearSession, getSessionStats } from "./claude";
+import { askClaude, clearSession, getSessionStats, killActiveProcesses } from "./claude";
 import {
   detectApprovalRequest,
   getApprovalEmoji,
@@ -348,10 +348,9 @@ bot.on("message:text", async (ctx) => {
   const text = ctx.message.text;
   if (!text || text.startsWith("/")) return;
 
-  // Group: only respond when mentioned
+  // Group: only respond when mentioned (use cached bot info)
   if (ctx.chat.type !== "private") {
-    const botInfo = await bot.api.getMe();
-    if (!isBotMentioned(text, botInfo.username || "")) return;
+    if (!isBotMentioned(text, ctx.me.username)) return;
   }
 
   await handleMessage(ctx, ctx.chat.id.toString(), text);
@@ -360,7 +359,9 @@ bot.on("message:text", async (ctx) => {
 bot.on("message:photo", async (ctx) => {
   const chatId = ctx.chat.id.toString();
   const caption = ctx.message.caption || "이 이미지를 분석해줘";
-  const photo = ctx.message.photo[ctx.message.photo.length - 1];
+  const photos = ctx.message.photo;
+  const photo = photos[photos.length - 1];
+  if (!photo) return;
   const tmpPath = await downloadTelegramFile(photo.file_id, "jpg");
   await handleMessage(ctx, chatId, caption, [tmpPath]);
   setTimeout(() => cleanupFile(tmpPath), 120_000);

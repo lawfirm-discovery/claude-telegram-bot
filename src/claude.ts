@@ -1,6 +1,7 @@
-import { spawn } from "child_process";
+import { spawn, type ChildProcess } from "child_process";
 import { randomUUID } from "crypto";
 import { join, dirname } from "path";
+import { readFileSync, writeFileSync, renameSync } from "fs";
 
 import { APPROVAL_SYSTEM_PROMPT } from "./approval";
 
@@ -9,12 +10,31 @@ const CLAUDE_MODEL = process.env.CLAUDE_MODEL || "claude-opus-4-6";
 const SESSION_TTL_MS = parseInt(process.env.SESSION_TTL_MS || "3600000");
 const MAX_TURNS = parseInt(process.env.MAX_TURNS || "50");
 const USER_SYSTEM_PROMPT = process.env.SYSTEM_PROMPT || "";
-const TIMEOUT_MS = parseInt(process.env.TIMEOUT_MS || "0"); // 0 = no timeout
+const TIMEOUT_MS = parseInt(process.env.TIMEOUT_MS || "300000"); // 5 min default
+const MAX_PROMPT_ARG_CHARS = 100_000; // Switch to stdin above this
 
 // Combine approval protocol with user's custom system prompt
 const SYSTEM_PROMPT = [APPROVAL_SYSTEM_PROMPT, USER_SYSTEM_PROMPT]
   .filter(Boolean)
   .join("\n\n");
+
+// --- Session expired detection (OpenClaw patterns) ---
+const SESSION_EXPIRED_PATTERNS = [
+  "session not found",
+  "session does not exist",
+  "session expired",
+  "session invalid",
+  "invalid session",
+  "no such session",
+  "conversation not found",
+];
+
+function isSessionExpiredError(text: string): boolean {
+  const lower = text.toLowerCase();
+  return SESSION_EXPIRED_PATTERNS.some((p) => lower.includes(p));
+}
+
+// --- Types ---
 
 export interface Session {
   sessionId: string;
@@ -28,23 +48,18 @@ const sessions = new Map<string, Session>();
 
 function loadSessions(): void {
   try {
-    const file = Bun.file(SESSION_FILE);
-    // Bun.file().size is 0 for non-existent files
-    if (file.size > 0) {
-      const data: Record<string, Session> = JSON.parse(
-        require("fs").readFileSync(SESSION_FILE, "utf-8")
-      );
-      const now = Date.now();
-      let loaded = 0;
-      for (const [key, session] of Object.entries(data)) {
-        if (now - session.lastActive < SESSION_TTL_MS) {
-          sessions.set(key, session);
-          loaded++;
-        }
+    const raw = readFileSync(SESSION_FILE, "utf-8");
+    const data: Record<string, Session> = JSON.parse(raw);
+    const now = Date.now();
+    let loaded = 0;
+    for (const [key, session] of Object.entries(data)) {
+      if (now - session.lastActive < SESSION_TTL_MS) {
+        sessions.set(key, session);
+        loaded++;
       }
-      if (loaded > 0) {
-        console.log(`[Sessions] Restored ${loaded} session(s) from disk.`);
-      }
+    }
+    if (loaded > 0) {
+      console.log(`[Sessions] Restored ${loaded} session(s) from disk.`);
     }
   } catch {
     // First run or corrupt file - start fresh
@@ -57,7 +72,10 @@ function saveSessions(): void {
     for (const [key, session] of sessions) {
       obj[key] = session;
     }
-    Bun.write(SESSION_FILE, JSON.stringify(obj));
+    // Atomic write: write to temp then rename
+    const tmp = SESSION_FILE + ".tmp";
+    writeFileSync(tmp, JSON.stringify(obj));
+    renameSync(tmp, SESSION_FILE);
   } catch (e: any) {
     console.error(`[Sessions] Failed to save: ${e.message}`);
   }
@@ -97,25 +115,69 @@ export function getSessionStats(): { active: number } {
   return { active: sessions.size };
 }
 
-// Spawn claude -p with stream-json --verbose, wait for exit, parse all JSONL
+// --- Per-chat request queue (OpenClaw KeyedAsyncQueue pattern) ---
+// Serializes Claude calls per chatId to prevent concurrent session access
+
+const chatQueues = new Map<string, Promise<void>>();
+
+function enqueueForChat<T>(chatId: string, task: () => Promise<T>): Promise<T> {
+  const prev = chatQueues.get(chatId) ?? Promise.resolve();
+  const next = prev.catch(() => {}).then(task);
+  const tail = next.then(
+    () => {},
+    () => {}
+  );
+  chatQueues.set(chatId, tail);
+  tail.finally(() => {
+    if (chatQueues.get(chatId) === tail) {
+      chatQueues.delete(chatId);
+    }
+  });
+  return next;
+}
+
+// --- Active process tracking (for graceful shutdown) ---
+
+const activeProcesses = new Set<ChildProcess>();
+
+export function killActiveProcesses(): void {
+  for (const proc of activeProcesses) {
+    try {
+      proc.kill("SIGTERM");
+    } catch {}
+  }
+  activeProcesses.clear();
+}
+
+// --- Main API ---
+
 export function askClaude(
+  chatId: string,
+  message: string,
+  attachments?: string[]
+): Promise<string> {
+  // Serialize requests per chat to prevent concurrent session corruption
+  return enqueueForChat(chatId, () =>
+    runClaude(chatId, message, attachments)
+  );
+}
+
+function runClaude(
   chatId: string,
   message: string,
   attachments?: string[]
 ): Promise<string> {
   const session = getSession(chatId);
 
-  // Build prompt with attachments (OpenClaw style: append paths to prompt)
+  // Build prompt with attachments
   let fullPrompt = message;
   if (attachments && attachments.length > 0) {
     fullPrompt = `${message}\n\n${attachments.join("\n")}`;
   }
 
-  // Use stream-json --verbose to capture ALL assistant messages (not just final result)
-  // This prevents empty responses when Claude ends with tool use and no final text
+  // Build args: use stream-json --verbose to capture all assistant messages
   const args: string[] = [
     "-p",
-    fullPrompt,
     "--output-format",
     "stream-json",
     "--verbose",
@@ -134,33 +196,91 @@ export function askClaude(
     args.push("--resume", session.sessionId);
   }
 
+  // Prompt input: arg for short prompts, stdin for long (OpenClaw resolvePromptInput)
+  const useStdin = fullPrompt.length > MAX_PROMPT_ARG_CHARS;
+  if (!useStdin) {
+    // Insert prompt right after "-p"
+    args.splice(1, 0, fullPrompt);
+  }
+
   return new Promise((resolve, reject) => {
     const proc = spawn(CLAUDE_PATH, args, {
       env: { ...process.env, NO_COLOR: "1" },
-      timeout: TIMEOUT_MS,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: [useStdin ? "pipe" : "ignore", "pipe", "pipe"],
     });
+
+    activeProcesses.add(proc);
+
+    // Write long prompts to stdin then close (OpenClaw pattern)
+    if (useStdin && proc.stdin) {
+      proc.stdin.write(fullPrompt);
+      proc.stdin.end();
+    }
 
     let stdout = "";
     let stderr = "";
+    let lastOutputTime = Date.now();
 
-    proc.stdout.on("data", (data: Buffer) => {
+    proc.stdout!.on("data", (data: Buffer) => {
       stdout += data.toString();
+      lastOutputTime = Date.now();
     });
 
-    proc.stderr.on("data", (data: Buffer) => {
+    proc.stderr!.on("data", (data: Buffer) => {
       stderr += data.toString();
+      lastOutputTime = Date.now();
     });
+
+    // Manual timeout (spawn() doesn't support timeout option)
+    let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
+    let noOutputTimer: ReturnType<typeof setInterval> | null = null;
+
+    const killProc = (reason: string) => {
+      console.warn(`[Claude] Killing process: ${reason} chat=${chatId}`);
+      try {
+        proc.kill("SIGTERM");
+        // Force kill after 5s if still alive
+        setTimeout(() => {
+          try {
+            proc.kill("SIGKILL");
+          } catch {}
+        }, 5000);
+      } catch {}
+    };
+
+    if (TIMEOUT_MS > 0) {
+      // Overall timeout
+      timeoutTimer = setTimeout(() => {
+        killProc(`overall timeout (${TIMEOUT_MS}ms)`);
+      }, TIMEOUT_MS);
+
+      // No-output timeout: kill if no stdout/stderr for 3 minutes
+      // (OpenClaw: 80% of overall for fresh, 30% for resume, min 1-3 min)
+      const noOutputMs = session.isFirstTurn
+        ? Math.min(TIMEOUT_MS * 0.8, 600_000)
+        : Math.min(TIMEOUT_MS * 0.3, 180_000);
+
+      noOutputTimer = setInterval(() => {
+        if (Date.now() - lastOutputTime > noOutputMs) {
+          killProc(`no output for ${Math.round(noOutputMs / 1000)}s`);
+        }
+      }, 10_000);
+    }
+
+    const cleanup = () => {
+      activeProcesses.delete(proc);
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      if (noOutputTimer) clearInterval(noOutputTimer);
+    };
 
     proc.on("close", (code: number | null) => {
+      cleanup();
+
       if (code !== 0) {
         console.error(`[Claude] exit=${code} stderr=${stderr.slice(0, 300)}`);
-        // Reset session on resume errors
-        if (
-          stderr.includes("session") ||
-          stderr.includes("resume") ||
-          stderr.includes("not found")
-        ) {
+        // Reset session on session-expired errors (OpenClaw specific patterns)
+        if (isSessionExpiredError(stderr)) {
+          console.log(`[Claude] Session expired, resetting for chat=${chatId}`);
           session.isFirstTurn = true;
           session.sessionId = randomUUID();
           saveSessions();
@@ -197,7 +317,6 @@ export function askClaude(
         console.error(
           `[Claude] Parse error: ${e.message} stdout=${stdout.slice(0, 500)}`
         );
-        // Try to return raw text if JSON parsing fails
         if (stdout.trim()) {
           resolve(stdout.trim().slice(0, 4000));
         } else {
@@ -207,6 +326,7 @@ export function askClaude(
     });
 
     proc.on("error", (err: Error) => {
+      cleanup();
       reject(new Error(`Failed to spawn Claude CLI: ${err.message}`));
     });
   });
@@ -236,7 +356,6 @@ function extractAssistantText(content: any[]): string {
 }
 
 // Parse stream-json --verbose JSONL output
-// Collects text from ALL assistant messages, not just the final result field
 function parseStreamJsonOutput(raw: string): ParsedResult {
   const lines = raw.trim().split("\n");
 
@@ -250,7 +369,6 @@ function parseStreamJsonOutput(raw: string): ParsedResult {
   let stopReason = "";
   let numTurns = 0;
 
-  // Collect text from all assistant messages (in order)
   const assistantTexts: string[] = [];
 
   for (const line of lines) {
@@ -261,13 +379,11 @@ function parseStreamJsonOutput(raw: string): ParsedResult {
       continue;
     }
 
-    // Track session ID from any event
     if (!sessionId && obj.session_id) {
       sessionId = obj.session_id;
     }
 
     if (obj.type === "assistant" && obj.message?.content) {
-      // Extract text from assistant message content blocks
       const text = extractAssistantText(obj.message.content);
       if (text) {
         assistantTexts.push(text);
@@ -275,7 +391,6 @@ function parseStreamJsonOutput(raw: string): ParsedResult {
     }
 
     if (obj.type === "result") {
-      // Final result event - has aggregated usage and cost
       resultText = (typeof obj.result === "string" ? obj.result : "").trim();
       isError = obj.is_error === true;
       stopReason = obj.stop_reason || "";
@@ -291,17 +406,13 @@ function parseStreamJsonOutput(raw: string): ParsedResult {
     }
   }
 
-  // Priority: result field > longest assistant text > all assistant texts joined
+  // Priority: result field > longest assistant text > all joined
   let text = resultText;
 
   if (!text && assistantTexts.length > 0) {
-    // result was empty but we have assistant message texts
-    // Pick the LONGEST text (most likely the actual analysis, not "let me check...")
     const longest = assistantTexts.reduce((a, b) =>
       a.length >= b.length ? a : b
     );
-    // If the longest text is substantial (>100 chars), use it alone
-    // Otherwise join all texts to avoid losing context
     if (longest.length > 100) {
       text = longest;
     } else {
@@ -314,7 +425,6 @@ function parseStreamJsonOutput(raw: string): ParsedResult {
     );
   }
 
-  // Fallback messages for edge cases
   if (
     !text &&
     (stopReason === "max_turns" || stopReason === "max_turns_reached")

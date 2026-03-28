@@ -1,4 +1,5 @@
 import { bot } from "./src/bot";
+import { killActiveProcesses } from "./src/claude";
 
 console.log("Starting Claude Telegram Bot...");
 console.log(`Model: ${process.env.CLAUDE_MODEL || "claude-opus-4-6"}`);
@@ -16,6 +17,7 @@ bot.start({
 // Graceful shutdown
 const shutdown = () => {
   console.log("\nShutting down...");
+  killActiveProcesses();
   bot.stop();
   process.exit(0);
 };
