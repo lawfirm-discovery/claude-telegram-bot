@@ -244,16 +244,26 @@ function parseStreamJsonOutput(raw: string): ParsedResult {
     }
   }
 
-  // Priority: result field > last assistant text > all assistant texts joined
+  // Priority: result field > longest assistant text > all assistant texts joined
   let text = resultText;
 
   if (!text && assistantTexts.length > 0) {
     // result was empty but we have assistant message texts
-    // Use the LAST assistant text (most likely the final response)
-    text = assistantTexts[assistantTexts.length - 1]!;
+    // Pick the LONGEST text (most likely the actual analysis, not "let me check...")
+    const longest = assistantTexts.reduce((a, b) =>
+      a.length >= b.length ? a : b
+    );
+    // If the longest text is substantial (>100 chars), use it alone
+    // Otherwise join all texts to avoid losing context
+    if (longest.length > 100) {
+      text = longest;
+    } else {
+      text = assistantTexts.join("\n\n");
+    }
     console.log(
-      `[Claude] Using last assistant text (result was empty). ` +
-        `${assistantTexts.length} assistant messages found.`
+      `[Claude] Using assistant text (result was empty). ` +
+        `${assistantTexts.length} msgs, picked ${text.length} chars ` +
+        `(longest=${longest.length}).`
     );
   }
 
