@@ -1,5 +1,6 @@
 import { spawn } from "child_process";
 import { randomUUID } from "crypto";
+import { join, dirname } from "path";
 
 import { APPROVAL_SYSTEM_PROMPT } from "./approval";
 
@@ -21,7 +22,49 @@ export interface Session {
   lastActive: number;
 }
 
+// --- Persistent session storage (survives pm2 restart) ---
+const SESSION_FILE = join(dirname(import.meta.dir), "sessions.json");
 const sessions = new Map<string, Session>();
+
+function loadSessions(): void {
+  try {
+    const file = Bun.file(SESSION_FILE);
+    // Bun.file().size is 0 for non-existent files
+    if (file.size > 0) {
+      const data: Record<string, Session> = JSON.parse(
+        require("fs").readFileSync(SESSION_FILE, "utf-8")
+      );
+      const now = Date.now();
+      let loaded = 0;
+      for (const [key, session] of Object.entries(data)) {
+        if (now - session.lastActive < SESSION_TTL_MS) {
+          sessions.set(key, session);
+          loaded++;
+        }
+      }
+      if (loaded > 0) {
+        console.log(`[Sessions] Restored ${loaded} session(s) from disk.`);
+      }
+    }
+  } catch {
+    // First run or corrupt file - start fresh
+  }
+}
+
+function saveSessions(): void {
+  try {
+    const obj: Record<string, Session> = {};
+    for (const [key, session] of sessions) {
+      obj[key] = session;
+    }
+    Bun.write(SESSION_FILE, JSON.stringify(obj));
+  } catch (e: any) {
+    console.error(`[Sessions] Failed to save: ${e.message}`);
+  }
+}
+
+// Load sessions on startup
+loadSessions();
 
 export function getSession(chatId: string): Session {
   const existing = sessions.get(chatId);
@@ -35,11 +78,13 @@ export function getSession(chatId: string): Session {
     lastActive: Date.now(),
   };
   sessions.set(chatId, session);
+  saveSessions();
   return session;
 }
 
 export function clearSession(chatId: string): void {
   sessions.delete(chatId);
+  saveSessions();
 }
 
 export function getSessionStats(): { active: number } {
@@ -118,6 +163,7 @@ export function askClaude(
         ) {
           session.isFirstTurn = true;
           session.sessionId = randomUUID();
+          saveSessions();
         }
         const errMsg =
           stderr.split("\n").filter(Boolean)[0] ||
@@ -134,10 +180,11 @@ export function askClaude(
           return;
         }
 
-        // Update session for resume
+        // Update session for resume and persist to disk
         session.isFirstTurn = false;
         if (result.sessionId) session.sessionId = result.sessionId;
         session.lastActive = Date.now();
+        saveSessions();
 
         console.log(
           `[Claude] chat=${chatId} in=${result.inputTokens} out=${result.outputTokens}` +
