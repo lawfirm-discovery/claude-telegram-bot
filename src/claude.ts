@@ -8,7 +8,8 @@ import { APPROVAL_SYSTEM_PROMPT } from "./approval";
 const CLAUDE_PATH = process.env.CLAUDE_PATH || "claude";
 const CLAUDE_MODEL = process.env.CLAUDE_MODEL || "claude-opus-4-6";
 const SESSION_TTL_MS = parseInt(process.env.SESSION_TTL_MS || "3600000");
-const MAX_TURNS = parseInt(process.env.MAX_TURNS || "50");
+// MAX_TURNS: 0 or unset = no limit (CLI default). OpenClaw doesn't send --max-turns.
+const MAX_TURNS = parseInt(process.env.MAX_TURNS || "0");
 const USER_SYSTEM_PROMPT = process.env.SYSTEM_PROMPT || "";
 const TIMEOUT_MS = parseInt(process.env.TIMEOUT_MS || "300000"); // 5 min default
 const MAX_PROMPT_ARG_CHARS = 100_000;
@@ -332,7 +333,7 @@ function executeClaudeCli(
     baseArgs.push("--resume", session.sessionId);
   } else {
     baseArgs.push("--model", CLAUDE_MODEL);
-    baseArgs.push("--max-turns", String(MAX_TURNS));
+    if (MAX_TURNS > 0) baseArgs.push("--max-turns", String(MAX_TURNS));
     baseArgs.push("--session-id", session.sessionId);
     if (SYSTEM_PROMPT) {
       baseArgs.push("--append-system-prompt", SYSTEM_PROMPT);
