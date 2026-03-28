@@ -52,7 +52,7 @@ export function getSessionStats(): { active: number } {
   return { active: sessions.size };
 }
 
-// OpenClaw-style batch execution: spawn claude -p, wait for exit, parse result
+// Spawn claude -p with stream-json --verbose, wait for exit, parse all JSONL
 export function askClaude(
   chatId: string,
   message: string,
@@ -66,14 +66,14 @@ export function askClaude(
     fullPrompt = `${message}\n\n${attachments.join("\n")}`;
   }
 
-  // Build args matching OpenClaw's claude-cli backend:
-  // args: ["-p", "--output-format", "json", "--permission-mode", "bypassPermissions"]
-  // resumeArgs: ["-p", "--output-format", "json", "--permission-mode", "bypassPermissions", "--resume", "{sessionId}"]
+  // Use stream-json --verbose to capture ALL assistant messages (not just final result)
+  // This prevents empty responses when Claude ends with tool use and no final text
   const args: string[] = [
     "-p",
     fullPrompt,
     "--output-format",
-    "json",
+    "stream-json",
+    "--verbose",
     "--model",
     CLAUDE_MODEL,
     "--max-turns",
@@ -83,11 +83,9 @@ export function askClaude(
   ];
 
   if (session.isFirstTurn) {
-    // First turn: create a named session + inject approval system prompt
     args.push("--session-id", session.sessionId);
     args.push("--append-system-prompt", SYSTEM_PROMPT);
   } else {
-    // Subsequent turns: resume (OpenClaw uses resumeArgs with {sessionId} replacement)
     args.push("--resume", session.sessionId);
   }
 
@@ -129,8 +127,7 @@ export function askClaude(
       }
 
       try {
-        // OpenClaw parseCliOutput: parse JSONL, look for type:"result"
-        const result = parseClaudeOutput(stdout);
+        const result = parseStreamJsonOutput(stdout);
 
         if (result.isError) {
           reject(new Error(result.text || "Unknown Claude error"));
@@ -143,17 +140,19 @@ export function askClaude(
         session.lastActive = Date.now();
 
         console.log(
-          `[Claude] chat=${chatId} in=${result.inputTokens} out=${result.outputTokens} cost=$${result.cost.toFixed(4)}`
+          `[Claude] chat=${chatId} in=${result.inputTokens} out=${result.outputTokens}` +
+            ` ${result.cacheRead ? `cache_read=${result.cacheRead} ` : ""}` +
+            `cost=$${result.cost.toFixed(4)}`
         );
 
         resolve(result.text || "(empty response)");
       } catch (e: any) {
         console.error(
-          `[Claude] Parse error: ${e.message} stdout=${stdout.slice(0, 300)}`
+          `[Claude] Parse error: ${e.message} stdout=${stdout.slice(0, 500)}`
         );
         // Try to return raw text if JSON parsing fails
         if (stdout.trim()) {
-          resolve(stdout.trim());
+          resolve(stdout.trim().slice(0, 4000));
         } else {
           reject(new Error("Failed to parse Claude response"));
         }
@@ -166,129 +165,128 @@ export function askClaude(
   });
 }
 
-// OpenClaw-compatible output parser
-// Handles both single JSON and JSONL (newline-delimited JSON) output
+// --- Stream-JSON JSONL Parser ---
+
 interface ParsedResult {
   text: string;
   sessionId: string | null;
   isError: boolean;
   inputTokens: number;
   outputTokens: number;
+  cacheRead: number;
   cost: number;
 }
 
-// OpenClaw collectText: recursively extract text from nested JSON structures
-function collectText(value: any): string {
-  if (!value) return "";
-  if (typeof value === "string") return value;
-  if (Array.isArray(value))
-    return value.map((entry) => collectText(entry)).join("");
-  if (typeof value !== "object") return "";
-  if (typeof value.text === "string") return value.text;
-  if (typeof value.content === "string") return value.content;
-  if (Array.isArray(value.content))
-    return value.content.map((entry: any) => collectText(entry)).join("");
-  if (
-    typeof value.message === "object" &&
-    value.message !== null &&
-    !Array.isArray(value.message)
-  )
-    return collectText(value.message);
-  return "";
-}
-
-function parseClaudeOutput(raw: string): ParsedResult {
-  const trimmed = raw.trim();
-
-  // Try single JSON first (OpenClaw parseCliJson)
-  try {
-    const obj = JSON.parse(trimmed);
-    return extractResult(obj);
-  } catch {
-    // Not single JSON, try JSONL
-  }
-
-  // Parse JSONL: look for type:"result" line (OpenClaw parseCliJsonl)
-  const lines = trimmed.split("\n");
-  let fallbackSessionId: string | null = null;
-  let fallbackUsage: any = null;
-
-  for (const line of lines) {
-    try {
-      const obj = JSON.parse(line.trim());
-      // Collect session ID from any line
-      if (!fallbackSessionId) {
-        fallbackSessionId =
-          obj.session_id || obj.sessionId || obj.conversation_id || null;
-      }
-      if (obj.usage) fallbackUsage = obj.usage;
-      if (obj.type === "result") {
-        return extractResult(obj);
-      }
-    } catch {
-      // Skip non-JSON lines
+// Extract text blocks from assistant message content array
+function extractAssistantText(content: any[]): string {
+  const textParts: string[] = [];
+  for (const block of content) {
+    if (block && typeof block.text === "string") {
+      textParts.push(block.text);
     }
   }
+  return textParts.join("\n");
+}
 
-  // Last resort: try last JSON line
-  for (let i = lines.length - 1; i >= 0; i--) {
+// Parse stream-json --verbose JSONL output
+// Collects text from ALL assistant messages, not just the final result field
+function parseStreamJsonOutput(raw: string): ParsedResult {
+  const lines = raw.trim().split("\n");
+
+  let sessionId: string | null = null;
+  let isError = false;
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let cacheRead = 0;
+  let cost = 0;
+  let resultText = "";
+  let stopReason = "";
+  let numTurns = 0;
+
+  // Collect text from all assistant messages (in order)
+  const assistantTexts: string[] = [];
+
+  for (const line of lines) {
+    let obj: any;
     try {
-      const obj = JSON.parse(lines[i]!.trim());
-      return extractResult(obj);
+      obj = JSON.parse(line.trim());
     } catch {
       continue;
     }
+
+    // Track session ID from any event
+    if (!sessionId && obj.session_id) {
+      sessionId = obj.session_id;
+    }
+
+    if (obj.type === "assistant" && obj.message?.content) {
+      // Extract text from assistant message content blocks
+      const text = extractAssistantText(obj.message.content);
+      if (text) {
+        assistantTexts.push(text);
+      }
+    }
+
+    if (obj.type === "result") {
+      // Final result event - has aggregated usage and cost
+      resultText = (typeof obj.result === "string" ? obj.result : "").trim();
+      isError = obj.is_error === true;
+      stopReason = obj.stop_reason || "";
+      numTurns = obj.num_turns || 0;
+      cost = obj.total_cost_usd || 0;
+      sessionId = obj.session_id || sessionId;
+
+      if (obj.usage) {
+        inputTokens = obj.usage.input_tokens || 0;
+        outputTokens = obj.usage.output_tokens || 0;
+        cacheRead = obj.usage.cache_read_input_tokens || 0;
+      }
+    }
   }
 
-  throw new Error("No valid JSON result found in Claude output");
-}
+  // Priority: result field > last assistant text > all assistant texts joined
+  let text = resultText;
 
-function extractResult(obj: any): ParsedResult {
-  // OpenClaw parseCliJson approach: try multiple fields with || (not ??)
-  // || falls through on empty strings, ?? does not
-  let text = (
-    collectText(obj.message) ||
-    collectText(obj.content) ||
-    collectText(obj.result) ||
-    collectText(obj)
-  ).trim();
+  if (!text && assistantTexts.length > 0) {
+    // result was empty but we have assistant message texts
+    // Use the LAST assistant text (most likely the final response)
+    text = assistantTexts[assistantTexts.length - 1]!;
+    console.log(
+      `[Claude] Using last assistant text (result was empty). ` +
+        `${assistantTexts.length} assistant messages found.`
+    );
+  }
 
-  // When stop_reason is "max_turns_reached", Claude ran out of turns
+  // Fallback messages for edge cases
   if (
     !text &&
-    (obj.stop_reason === "max_turns" ||
-      obj.stop_reason === "max_turns_reached")
+    (stopReason === "max_turns" || stopReason === "max_turns_reached")
   ) {
     text =
       "⏳ 작업이 max-turns 한도에 도달했습니다. /new 로 새 대화를 시작하거나, 계속 진행하려면 메시지를 보내주세요.";
   }
 
-  // When result is empty but Claude clearly did work (tool use),
-  // provide a meaningful fallback (relaxed: any num_turns, any stop_reason)
-  if (!text && (obj.num_turns ?? 0) > 1) {
+  if (!text && numTurns > 1) {
     text = "✅ 작업을 완료했습니다. 결과를 확인하시거나 추가 요청을 보내주세요.";
   }
 
-  // Final fallback: if still empty and there were output tokens, log for debugging
-  if (!text && (obj.usage?.output_tokens ?? 0) > 0) {
+  if (!text && outputTokens > 0) {
     console.warn(
-      `[Claude] Empty result with ${obj.usage?.output_tokens} output tokens. ` +
-        `stop_reason=${obj.stop_reason} num_turns=${obj.num_turns} ` +
-        `keys=${Object.keys(obj).join(",")}`
+      `[Claude] Empty result with ${outputTokens} output tokens. ` +
+        `stop_reason=${stopReason} num_turns=${numTurns} ` +
+        `assistant_texts=${assistantTexts.length}`
     );
     text =
       "⚠️ 응답이 생성되었으나 텍스트 추출에 실패했습니다. 다시 시도하거나 /new 로 새 대화를 시작해주세요.";
   }
 
-  const sessionId =
-    obj.session_id || obj.sessionId || obj.conversation_id || null;
-
   return {
     text,
     sessionId,
-    isError: obj.is_error === true,
-    inputTokens: obj.usage?.input_tokens || 0,
-    outputTokens: obj.usage?.output_tokens || 0,
-    cost: obj.total_cost_usd || 0,
+    isError,
+    inputTokens,
+    outputTokens,
+    cacheRead,
+    cost,
   };
 }
