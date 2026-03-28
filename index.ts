@@ -1,7 +1,7 @@
 import { bot } from "./src/bot";
 
 console.log("Starting Claude Telegram Bot...");
-console.log(`Model: ${process.env.CLAUDE_MODEL || "claude-sonnet-4-6"}`);
+console.log(`Model: ${process.env.CLAUDE_MODEL || "claude-opus-4-6"}`);
 console.log(
   `Allowed users: ${process.env.ALLOWED_USERS || "all (no restriction)"}`
 );
