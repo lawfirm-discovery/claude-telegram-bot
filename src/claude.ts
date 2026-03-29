@@ -11,7 +11,7 @@ const SESSION_TTL_MS = parseInt(process.env.SESSION_TTL_MS || "3600000");
 // MAX_TURNS: 0 or unset = no limit (CLI default). OpenClaw doesn't send --max-turns.
 const MAX_TURNS = parseInt(process.env.MAX_TURNS || "0");
 const USER_SYSTEM_PROMPT = process.env.SYSTEM_PROMPT || "";
-const TIMEOUT_MS = parseInt(process.env.TIMEOUT_MS || "300000"); // 5 min default
+const TIMEOUT_MS = parseInt(process.env.TIMEOUT_MS || "900000"); // 15 min default
 const MAX_PROMPT_ARG_CHARS = 100_000;
 const DEBOUNCE_MS = parseInt(process.env.DEBOUNCE_MS || "1500"); // message batching window
 
@@ -382,7 +382,12 @@ function executeClaudeCli(
     let overallTimer: ReturnType<typeof setTimeout> | null = null;
     let noOutputTimer: ReturnType<typeof setInterval> | null = null;
 
+    let killedByWatchdog = false;
+    let killReason = "";
+
     const killProc = (reason: string) => {
+      killedByWatchdog = true;
+      killReason = reason;
       console.warn(`[Claude] Kill: ${reason} chat=${chatId}`);
       try {
         proc.kill("SIGKILL");
@@ -415,6 +420,20 @@ function executeClaudeCli(
 
     proc.on("close", (code: number | null) => {
       cleanup();
+
+      // code === null means killed by signal (SIGKILL from watchdog)
+      if (code === null) {
+        console.error(`[Claude] exit=null (signal) chat=${chatId} killedByWatchdog=${killedByWatchdog} reason=${killReason}`);
+        // Reset session so next attempt starts fresh (avoid "session already in use")
+        session.isFirstTurn = true;
+        session.sessionId = randomUUID();
+        saveSessions();
+        const msg = killedByWatchdog
+          ? `⏱ Claude 응답 시간 초과 (${killReason}). 다시 시도해주세요.`
+          : "Claude 프로세스가 예기치 않게 종료되었습니다. 다시 시도해주세요.";
+        reject(new Error(msg));
+        return;
+      }
 
       if (code !== 0) {
         console.error(`[Claude] exit=${code} stderr=${stderr.slice(0, 300)}`);
