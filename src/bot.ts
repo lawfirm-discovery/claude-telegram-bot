@@ -6,6 +6,7 @@ import {
   getApprovalLabel,
   type ApprovalRequest,
 } from "./approval";
+import { escapeHtml, markdownToTelegramHtml, splitMessage } from "./format";
 import { mkdtemp, writeFile, unlink } from "fs/promises";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -60,8 +61,8 @@ bot.use(async (ctx, next) => {
     pendingPairings.set(code, userId);
     console.log(`[Pairing] Code ${code} for user ${userId}`);
     await ctx.reply(
-      `🔐 Pairing required.\n\nCode: \`${code}\`\n\nSend to bot owner.`,
-      { parse_mode: "Markdown" }
+      `🔐 Pairing required.\n\nCode: <code>${code}</code>\n\nSend to bot owner.`,
+      { parse_mode: "HTML" }
     );
     setTimeout(() => pendingPairings.delete(code), 600_000);
     return;
@@ -135,11 +136,11 @@ bot.on("callback_query:data", async (ctx) => {
   const label = getApprovalLabel(request.type);
 
   if (isApprove) {
-    // Update button message
+    // Update button message (HTML mode, OpenClaw style)
     try {
       await ctx.editMessageText(
-        `${emoji} **${label}** ✅ 승인됨\n\n\`\`\`\n${request.content}\n\`\`\``,
-        { parse_mode: "Markdown" }
+        `${emoji} <b>${label}</b> ✅ 승인됨\n\n<pre><code>${escapeHtmlForApproval(request.content)}</code></pre>`,
+        { parse_mode: "HTML" }
       );
     } catch {
       try {
@@ -179,8 +180,8 @@ bot.on("callback_query:data", async (ctx) => {
     // Rejected
     try {
       await ctx.editMessageText(
-        `${emoji} **${label}** ❌ 거절됨\n\n\`\`\`\n${request.content}\n\`\`\``,
-        { parse_mode: "Markdown" }
+        `${emoji} <b>${label}</b> ❌ 거절됨\n\n<pre><code>${escapeHtmlForApproval(request.content)}</code></pre>`,
+        { parse_mode: "HTML" }
       );
     } catch {
       try {
@@ -225,6 +226,11 @@ async function cleanupFile(path: string): Promise<void> {
   } catch {}
 }
 
+// Escape HTML for approval card content (inside <pre><code>)
+function escapeHtmlForApproval(text: string): string {
+  return escapeHtml(text);
+}
+
 function isBotMentioned(text: string, botUsername: string): boolean {
   if (text.includes(`@${botUsername}`)) return true;
   for (const pattern of GROUP_MENTION_PATTERNS) {
@@ -233,42 +239,48 @@ function isBotMentioned(text: string, botUsername: string): boolean {
   return false;
 }
 
-// Send response with Markdown fallback and auto-chunking
+// OpenClaw style: send response as HTML with auto-chunking, fallback to plain text
 async function sendResponse(ctx: any, text: string): Promise<void> {
-  const chunks = splitMessage(text, 4096);
+  // Chunk raw markdown first, then convert each chunk to HTML
+  const chunks = splitMessage(text);
   for (const chunk of chunks) {
+    const html = markdownToTelegramHtml(chunk);
     try {
-      await ctx.reply(chunk, { parse_mode: "Markdown" });
+      await ctx.reply(html, { parse_mode: "HTML" });
     } catch {
+      // Fallback: plain text (no formatting)
       await ctx.reply(chunk);
     }
   }
 }
 
-function splitMessage(text: string, maxLength: number): string[] {
-  const chunks: string[] = [];
-  let remaining = text;
-  while (remaining.length > 0) {
-    if (remaining.length <= maxLength) {
-      chunks.push(remaining);
-      break;
-    }
-    let i = remaining.lastIndexOf("\n", maxLength);
-    if (i < maxLength / 2) i = remaining.lastIndexOf(" ", maxLength);
-    if (i < maxLength / 2) i = maxLength;
-    chunks.push(remaining.substring(0, i));
-    remaining = remaining.substring(i).trimStart();
+// --- OpenClaw ack reaction helpers ---
+async function addAckReaction(ctx: any): Promise<boolean> {
+  try {
+    await ctx.react("👀");
+    return true;
+  } catch {
+    return false;
   }
-  return chunks;
 }
 
-// --- Core message handler (OpenClaw style: batch spawn, wait, reply) ---
+async function removeAckReaction(ctx: any): Promise<void> {
+  try {
+    // Remove reaction by setting empty array
+    await bot.api.setMessageReaction(ctx.chat.id, ctx.message.message_id, []);
+  } catch {}
+}
+
+// --- Core message handler (OpenClaw style: ack → typing → spawn → reply → remove ack) ---
 async function handleMessage(
   ctx: any,
   chatId: string,
   text: string,
   attachments?: string[]
 ): Promise<void> {
+  // OpenClaw: ack reaction immediately
+  const didAck = await addAckReaction(ctx);
+
   // Typing indicator
   await ctx.replyWithChatAction("typing");
   const typingInterval = setInterval(async () => {
@@ -281,6 +293,9 @@ async function handleMessage(
     const response = await askClaude(chatId, text, attachments);
     clearInterval(typingInterval);
 
+    // Remove ack reaction after reply (OpenClaw: removeAckAfterReply)
+    if (didAck) await removeAckReaction(ctx);
+
     // Check if Claude is requesting approval
     const approval = detectApprovalRequest(response);
     if (approval) {
@@ -290,6 +305,7 @@ async function handleMessage(
     }
   } catch (error: any) {
     clearInterval(typingInterval);
+    if (didAck) await removeAckReaction(ctx);
     console.error(`[Bot] Error chat=${chatId}:`, error.message);
     await ctx.reply(`⚠️ ${error.message}`);
   }
@@ -323,12 +339,12 @@ async function sendApprovalRequest(
     .text("❌ 거절 (Reject)", `reject:${approvalId}`);
 
   const approvalMsg =
-    `${emoji} **${label} - 승인 필요**\n\n` +
-    `\`\`\`\n${approval.content}\n\`\`\``;
+    `${emoji} <b>${label} - 승인 필요</b>\n\n` +
+    `<pre><code>${escapeHtmlForApproval(approval.content)}</code></pre>`;
 
   try {
     await ctx.reply(approvalMsg, {
-      parse_mode: "Markdown",
+      parse_mode: "HTML",
       reply_markup: keyboard,
     });
   } catch {
