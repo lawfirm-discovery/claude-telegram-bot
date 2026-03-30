@@ -9,8 +9,8 @@
 
 | 서버 | SSH | 봇 Username | 토큰 |
 |------|-----|-------------|------|
-| A4500 | `ssh -p 2223 angrylawyer@182.227.106.181` | @a4500_claude_style_bot | `8500781396:AAFl0I9JmFvkJAdAWKoRAbGSebtxmKsl8r0` |
-| 3060 | `ssh -p 2225 angrylawyer@100.66.165.128` | @b3060_claude_style_bot | `7973593116:AAEwHG6sAQiTLa7WzFp4Ip2BLxIerM_XIuA` |
+| A4500 | `ssh -p 2223 angrylawyer@182.227.106.181` | @a4500_claude_style_bot | (BotFather에서 발급) |
+| 3060 | `ssh -p 2225 angrylawyer@100.66.165.128` | @b3060_claude_style_bot | (BotFather에서 발급) |
 
 ---
 
@@ -64,7 +64,7 @@ nano .env
 ### A4500 .env
 
 ```env
-TELEGRAM_BOT_TOKEN=8500781396:AAFl0I9JmFvkJAdAWKoRAbGSebtxmKsl8r0
+TELEGRAM_BOT_TOKEN=your_a4500_bot_token_here
 ALLOWED_USERS=62649819
 CLAUDE_PATH=/home/angrylawyer/.local/bin/claude
 CLAUDE_MODEL=claude-opus-4-6
@@ -79,7 +79,7 @@ GROUP_MENTION_PATTERNS=대답해
 ### 3060 .env
 
 ```env
-TELEGRAM_BOT_TOKEN=7973593116:AAEwHG6sAQiTLa7WzFp4Ip2BLxIerM_XIuA
+TELEGRAM_BOT_TOKEN=your_3060_bot_token_here
 ALLOWED_USERS=62649819
 CLAUDE_PATH=/home/angrylawyer/.local/bin/claude
 CLAUDE_MODEL=claude-opus-4-6
