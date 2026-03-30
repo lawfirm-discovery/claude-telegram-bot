@@ -11,7 +11,7 @@ const SESSION_TTL_MS = parseInt(process.env.SESSION_TTL_MS || "3600000");
 // MAX_TURNS: 0 or unset = no limit (CLI default). OpenClaw doesn't send --max-turns.
 const MAX_TURNS = parseInt(process.env.MAX_TURNS || "0");
 const USER_SYSTEM_PROMPT = process.env.SYSTEM_PROMPT || "";
-const TIMEOUT_MS = parseInt(process.env.TIMEOUT_MS || "900000"); // 15 min default
+const TIMEOUT_MS = parseInt(process.env.TIMEOUT_MS || "1200000"); // 20 min default
 const MAX_PROMPT_ARG_CHARS = 100_000;
 const DEBOUNCE_MS = parseInt(process.env.DEBOUNCE_MS || "1500"); // message batching window
 
@@ -400,10 +400,10 @@ function executeClaudeCli(
         TIMEOUT_MS
       );
 
-      // OpenClaw: fresh=80% of overall (min 180s, max 600s), resume=30% (min 60s, max 180s)
+      // OpenClaw-aligned: fresh=80% of overall (min 300s, max 900s), resume=50% (min 180s, max 600s)
       const noOutputMs = useResume
-        ? Math.max(60_000, Math.min(TIMEOUT_MS * 0.3, 180_000))
-        : Math.max(180_000, Math.min(TIMEOUT_MS * 0.8, 600_000));
+        ? Math.max(180_000, Math.min(TIMEOUT_MS * 0.5, 600_000))
+        : Math.max(300_000, Math.min(TIMEOUT_MS * 0.8, 900_000));
 
       noOutputTimer = setInterval(() => {
         if (Date.now() - lastOutputTime > noOutputMs) {
