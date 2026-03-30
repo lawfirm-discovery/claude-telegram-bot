@@ -324,6 +324,7 @@ function executeClaudeCli(
 
   const baseArgs: string[] = [
     "-p",
+    "--verbose",
     "--output-format",
     "stream-json",
     "--permission-mode",
