@@ -8,19 +8,18 @@ import { APPROVAL_SYSTEM_PROMPT } from "./approval";
 const CLAUDE_PATH = process.env.CLAUDE_PATH || "claude";
 const CLAUDE_MODEL = process.env.CLAUDE_MODEL || "claude-opus-4-6";
 const SESSION_TTL_MS = parseInt(process.env.SESSION_TTL_MS || "3600000");
-// MAX_TURNS: 0 or unset = no limit (CLI default). OpenClaw doesn't send --max-turns.
 const MAX_TURNS = parseInt(process.env.MAX_TURNS || "0");
 const USER_SYSTEM_PROMPT = process.env.SYSTEM_PROMPT || "";
-const TIMEOUT_MS = parseInt(process.env.TIMEOUT_MS || "1200000"); // 20 min default
+const TIMEOUT_MS = parseInt(process.env.TIMEOUT_MS || "1800000"); // 30 min default
 const MAX_PROMPT_ARG_CHARS = 100_000;
-const DEBOUNCE_MS = parseInt(process.env.DEBOUNCE_MS || "1500"); // message batching window
+const DEBOUNCE_MS = parseInt(process.env.DEBOUNCE_MS || "1500");
 
 const SYSTEM_PROMPT = [APPROVAL_SYSTEM_PROMPT, USER_SYSTEM_PROMPT]
   .filter(Boolean)
   .join("\n\n");
 
 // ═══════════════════════════════════════════════════════════════
-// Error classification (OpenClaw classifyFailoverReason pattern)
+// Error classification
 // ═══════════════════════════════════════════════════════════════
 
 type FailoverReason =
@@ -32,55 +31,19 @@ type FailoverReason =
   | "billing";
 
 const SESSION_EXPIRED_PATTERNS = [
-  "session not found",
-  "session does not exist",
-  "session expired",
-  "session invalid",
-  "invalid session",
-  "no such session",
-  "conversation not found",
-  "session id not found",
-  "already in use",
+  "session not found", "session does not exist", "session expired",
+  "session invalid", "invalid session", "no such session",
+  "conversation not found", "session id not found", "already in use",
 ];
-
-const RATE_LIMIT_PATTERNS = [
-  "rate_limit",
-  "rate limit",
-  "429",
-  "quota exceeded",
-  "too many requests",
-  "tokens per minute",
-];
-
-const OVERLOADED_PATTERNS = [
-  "overloaded",
-  "high demand",
-  "service_unavailable",
-  "capacity",
-];
-
-const TIMEOUT_PATTERNS = [
-  "timeout",
-  "timed out",
-  "econnrefused",
-  "econnreset",
-  "socket hang up",
-  "fetch failed",
-];
-
-const AUTH_PATTERNS = [
-  "invalid_api_key",
-  "unauthorized",
-  "api_key_revoked",
-  "permission_error",
-];
-
+const RATE_LIMIT_PATTERNS = ["rate_limit", "rate limit", "429", "quota exceeded", "too many requests", "tokens per minute"];
+const OVERLOADED_PATTERNS = ["overloaded", "high demand", "service_unavailable", "capacity"];
+const TIMEOUT_PATTERNS = ["timeout", "timed out", "econnrefused", "econnreset", "socket hang up", "fetch failed"];
+const AUTH_PATTERNS = ["invalid_api_key", "unauthorized", "api_key_revoked", "permission_error"];
 const BILLING_PATTERNS = ["payment required", "402", "insufficient credits"];
 
 function classifyError(text: string): FailoverReason | null {
   const lower = text.toLowerCase();
-  const check = (patterns: string[]) =>
-    patterns.some((p) => lower.includes(p));
+  const check = (patterns: string[]) => patterns.some((p) => lower.includes(p));
   if (check(SESSION_EXPIRED_PATTERNS)) return "session_expired";
   if (check(BILLING_PATTERNS)) return "billing";
   if (check(RATE_LIMIT_PATTERNS)) return "rate_limit";
@@ -91,7 +54,7 @@ function classifyError(text: string): FailoverReason | null {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Session management (persistent, survives pm2 restart)
+// Session management
 // ═══════════════════════════════════════════════════════════════
 
 export interface Session {
@@ -105,21 +68,14 @@ const sessions = new Map<string, Session>();
 
 function loadSessions(): void {
   try {
-    const data: Record<string, Session> = JSON.parse(
-      readFileSync(SESSION_FILE, "utf-8")
-    );
+    const data: Record<string, Session> = JSON.parse(readFileSync(SESSION_FILE, "utf-8"));
     const now = Date.now();
     let loaded = 0;
     for (const [key, session] of Object.entries(data)) {
-      if (now - session.lastActive < SESSION_TTL_MS) {
-        sessions.set(key, session);
-        loaded++;
-      }
+      if (now - session.lastActive < SESSION_TTL_MS) { sessions.set(key, session); loaded++; }
     }
     if (loaded > 0) console.log(`[Sessions] Restored ${loaded} session(s).`);
-  } catch {
-    /* first run or corrupt */
-  }
+  } catch { /* first run or corrupt */ }
 }
 
 function saveSessions(): void {
@@ -129,9 +85,7 @@ function saveSessions(): void {
     const tmp = SESSION_FILE + ".tmp";
     writeFileSync(tmp, JSON.stringify(obj));
     renameSync(tmp, SESSION_FILE);
-  } catch (e: any) {
-    console.error(`[Sessions] Save failed: ${e.message}`);
-  }
+  } catch (e: any) { console.error(`[Sessions] Save failed: ${e.message}`); }
 }
 
 loadSessions();
@@ -142,56 +96,39 @@ export function getSession(chatId: string): Session {
     existing.lastActive = Date.now();
     return existing;
   }
-  const session: Session = {
-    sessionId: randomUUID(),
-    isFirstTurn: true,
-    lastActive: Date.now(),
-  };
+  const session: Session = { sessionId: randomUUID(), isFirstTurn: true, lastActive: Date.now() };
   sessions.set(chatId, session);
   saveSessions();
   return session;
 }
 
-export function clearSession(chatId: string): void {
-  sessions.delete(chatId);
-  saveSessions();
-}
+export function clearSession(chatId: string): void { sessions.delete(chatId); saveSessions(); }
 
 export function getSessionStats(): { active: number } {
   const now = Date.now();
   for (const [key] of sessions) {
-    if (now - sessions.get(key)!.lastActive >= SESSION_TTL_MS)
-      sessions.delete(key);
+    if (now - sessions.get(key)!.lastActive >= SESSION_TTL_MS) sessions.delete(key);
   }
   return { active: sessions.size };
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Per-chat request queue (OpenClaw KeyedAsyncQueue)
+// Per-chat request queue
 // ═══════════════════════════════════════════════════════════════
 
 const chatQueues = new Map<string, Promise<void>>();
 
-function enqueueForChat<T>(
-  chatId: string,
-  task: () => Promise<T>
-): Promise<T> {
+function enqueueForChat<T>(chatId: string, task: () => Promise<T>): Promise<T> {
   const prev = chatQueues.get(chatId) ?? Promise.resolve();
   const next = prev.catch(() => {}).then(task);
-  const tail = next.then(
-    () => {},
-    () => {}
-  );
+  const tail = next.then(() => {}, () => {});
   chatQueues.set(chatId, tail);
-  tail.finally(() => {
-    if (chatQueues.get(chatId) === tail) chatQueues.delete(chatId);
-  });
+  tail.finally(() => { if (chatQueues.get(chatId) === tail) chatQueues.delete(chatId); });
   return next;
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Message debouncer (OpenClaw createInboundDebouncer)
-// Batches rapid messages into a single prompt
+// Message debouncer
 // ═══════════════════════════════════════════════════════════════
 
 interface PendingMessage {
@@ -201,47 +138,28 @@ interface PendingMessage {
   reject: (e: Error) => void;
 }
 
-const debounceBuffers = new Map<
-  string,
-  { messages: PendingMessage[]; timer: ReturnType<typeof setTimeout> }
->();
+const debounceBuffers = new Map<string, { messages: PendingMessage[]; timer: ReturnType<typeof setTimeout> }>();
 
 function flushDebounce(chatId: string): void {
   const buf = debounceBuffers.get(chatId);
   if (!buf || buf.messages.length === 0) return;
   debounceBuffers.delete(chatId);
-
   const messages = buf.messages;
-  // Combine texts, collect all attachments
   const combinedText = messages.map((m) => m.text).join("\n\n");
   const allAttachments = messages.flatMap((m) => m.attachments ?? []);
-
-  // All promises resolve/reject together
   enqueueForChat(chatId, () => runClaude(chatId, combinedText, allAttachments))
     .then((result) => messages.forEach((m) => m.resolve(result)))
     .catch((err) => messages.forEach((m) => m.reject(err)));
 }
 
-export function askClaude(
-  chatId: string,
-  message: string,
-  attachments?: string[]
-): Promise<string> {
-  // Skip debounce for messages with attachments (OpenClaw policy)
+export function askClaude(chatId: string, message: string, attachments?: string[]): Promise<string> {
   if ((attachments && attachments.length > 0) || DEBOUNCE_MS <= 0) {
-    return enqueueForChat(chatId, () =>
-      runClaude(chatId, message, attachments)
-    );
+    return enqueueForChat(chatId, () => runClaude(chatId, message, attachments));
   }
-
   return new Promise((resolve, reject) => {
     let buf = debounceBuffers.get(chatId);
-    if (!buf) {
-      buf = { messages: [], timer: null as any };
-      debounceBuffers.set(chatId, buf);
-    } else {
-      clearTimeout(buf.timer);
-    }
+    if (!buf) { buf = { messages: [], timer: null as any }; debounceBuffers.set(chatId, buf); }
+    else { clearTimeout(buf.timer); }
     buf.messages.push({ text: message, attachments, resolve, reject });
     buf.timer = setTimeout(() => flushDebounce(chatId), DEBOUNCE_MS);
   });
@@ -254,82 +172,96 @@ export function askClaude(
 const activeProcesses = new Set<ChildProcess>();
 
 export function killActiveProcesses(): void {
-  for (const proc of activeProcesses) {
-    try {
-      proc.kill("SIGTERM");
-    } catch {}
-  }
+  for (const proc of activeProcesses) { try { proc.kill("SIGTERM"); } catch {} }
   activeProcesses.clear();
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Core CLI execution (OpenClaw executeCliWithSession)
+// Stream-JSON event types from Claude CLI
 // ═══════════════════════════════════════════════════════════════
 
-function runClaude(
-  chatId: string,
-  message: string,
-  attachments?: string[]
-): Promise<string> {
-  return runClaudeWithRetry(chatId, message, attachments);
+interface StreamEvent {
+  type: string;
+  subtype?: string;
+  session_id?: string;
+  message?: any;
+  tool?: string;
+  // result fields
+  result?: string;
+  is_error?: boolean;
+  stop_reason?: string;
+  num_turns?: number;
+  total_cost_usd?: number;
+  usage?: any;
+  duration_ms?: number;
 }
 
-// Session-expired auto-retry (OpenClaw pattern: retry once without session)
-async function runClaudeWithRetry(
+// ═══════════════════════════════════════════════════════════════
+// Progress callback for real-time status updates to Telegram
+// ═══════════════════════════════════════════════════════════════
+
+export interface ProgressInfo {
+  type: "tool_use" | "tool_result" | "thinking" | "text_chunk";
+  toolName?: string;
+  text?: string;
+  turnNumber: number;
+}
+
+// Exported so bot.ts can pass an onProgress callback
+export type OnProgress = (info: ProgressInfo) => void;
+
+// Overload askClaude to accept onProgress
+export function askClaudeWithProgress(
   chatId: string,
   message: string,
-  attachments?: string[]
+  attachments?: string[],
+  onProgress?: OnProgress
+): Promise<string> {
+  if ((attachments && attachments.length > 0) || DEBOUNCE_MS <= 0) {
+    return enqueueForChat(chatId, () => runClaude(chatId, message, attachments, onProgress));
+  }
+  // Debounced path doesn't support progress (rare)
+  return askClaude(chatId, message, attachments);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Core CLI execution with stream-json parsing
+// ═══════════════════════════════════════════════════════════════
+
+function runClaude(chatId: string, message: string, attachments?: string[], onProgress?: OnProgress): Promise<string> {
+  return runClaudeWithRetry(chatId, message, attachments, onProgress);
+}
+
+async function runClaudeWithRetry(
+  chatId: string, message: string, attachments?: string[], onProgress?: OnProgress
 ): Promise<string> {
   try {
-    return await executeClaudeCli(chatId, message, attachments);
+    return await executeClaudeCli(chatId, message, attachments, onProgress);
   } catch (err: any) {
     const reason = classifyError(err.message || "");
     if (reason === "session_expired") {
-      console.log(
-        `[Claude] Session expired for chat=${chatId}, retrying with fresh session`
-      );
+      console.log(`[Claude] Session expired for chat=${chatId}, retrying with fresh session`);
       const session = sessions.get(chatId);
-      if (session) {
-        session.isFirstTurn = true;
-        session.sessionId = randomUUID();
-        saveSessions();
-      }
-      return await executeClaudeCli(chatId, message, attachments);
+      if (session) { session.isFirstTurn = true; session.sessionId = randomUUID(); saveSessions(); }
+      return await executeClaudeCli(chatId, message, attachments, onProgress);
     }
-    // Annotate error with classification for bot.ts
     if (reason) err.failoverReason = reason;
     throw err;
   }
 }
 
 function executeClaudeCli(
-  chatId: string,
-  message: string,
-  attachments?: string[]
+  chatId: string, message: string, attachments?: string[], onProgress?: OnProgress
 ): Promise<string> {
   const session = getSession(chatId);
 
-  // Build prompt (OpenClaw appendImagePathsToPrompt)
   let fullPrompt = message;
   if (attachments && attachments.length > 0) {
     fullPrompt = `${message.trimEnd()}\n\n${attachments.join("\n")}`;
   }
 
-  // --- Build args (OpenClaw buildCliArgs) ---
-  // Fresh: -p <prompt> --output-format json --permission-mode bypassPermissions
-  //        --model <model> --max-turns <n> --session-id <uuid> --append-system-prompt <sp>
-  // Resume: -p <prompt> --output-format json --permission-mode bypassPermissions
-  //         --resume <sessionId>
   const useResume = !session.isFirstTurn;
-
-  const baseArgs: string[] = [
-    "-p",
-    "--verbose",
-    "--output-format",
-    "stream-json",
-    "--permission-mode",
-    "bypassPermissions",
-  ];
+  const baseArgs: string[] = ["-p", "--verbose", "--output-format", "stream-json", "--permission-mode", "bypassPermissions"];
 
   if (useResume) {
     baseArgs.push("--resume", session.sessionId);
@@ -337,19 +269,13 @@ function executeClaudeCli(
     baseArgs.push("--model", CLAUDE_MODEL);
     if (MAX_TURNS > 0) baseArgs.push("--max-turns", String(MAX_TURNS));
     baseArgs.push("--session-id", session.sessionId);
-    if (SYSTEM_PROMPT) {
-      baseArgs.push("--append-system-prompt", SYSTEM_PROMPT);
-    }
+    if (SYSTEM_PROMPT) baseArgs.push("--append-system-prompt", SYSTEM_PROMPT);
   }
 
-  // Prompt input: arg for short, stdin for long (OpenClaw resolvePromptInput)
   const useStdin = fullPrompt.length > MAX_PROMPT_ARG_CHARS;
-  if (!useStdin) {
-    baseArgs.splice(1, 0, fullPrompt); // insert after "-p"
-  }
+  if (!useStdin) baseArgs.splice(1, 0, fullPrompt);
 
   return new Promise((resolve, reject) => {
-    // OpenClaw: always pipe stdin (write empty + close when not using stdin for prompt)
     const proc = spawn(CLAUDE_PATH, baseArgs, {
       env: { ...process.env, NO_COLOR: "1", TELEGRAM_BOT_TOKEN: "" },
       stdio: ["pipe", "pipe", "pipe"],
@@ -357,32 +283,96 @@ function executeClaudeCli(
 
     activeProcesses.add(proc);
 
-    // OpenClaw: always write to stdin then close
     if (proc.stdin) {
-      if (useStdin) {
-        proc.stdin.write(fullPrompt);
-      }
+      if (useStdin) proc.stdin.write(fullPrompt);
       proc.stdin.end();
     }
 
-    let stdout = "";
+    // ── Stream-JSON 실시간 파싱 ──
+    // stdout을 줄 단위로 파싱하여:
+    // 1. 활성 이벤트마다 lastActivityTime 갱신 (스마트 watchdog)
+    // 2. tool_use 이벤트를 onProgress 콜백으로 전달 (텔레그램 진행 상황)
+    // 3. result 이벤트를 직접 파싱하여 최종 결과 추출
+
+    let rawStdout = "";
     let stderr = "";
-    let lastOutputTime = Date.now();
+    let lastActivityTime = Date.now();
+    let lineBuffer = "";
+    let turnNumber = 0;
+    let resultEvent: StreamEvent | null = null;
+
+    const processLine = (line: string) => {
+      if (!line.trim()) return;
+      lastActivityTime = Date.now();
+
+      try {
+        const event: StreamEvent = JSON.parse(line);
+
+        if (event.type === "system" && event.subtype === "init") {
+          // 세션 초기화 확인
+          if (event.session_id) {
+            session.sessionId = event.session_id;
+          }
+        }
+
+        if (event.type === "assistant") {
+          turnNumber++;
+          // tool_use 감지
+          const msg = event.message;
+          if (msg && typeof msg === "object") {
+            const content = Array.isArray(msg.content) ? msg.content : [];
+            for (const block of content) {
+              if (block?.type === "tool_use" && block?.name) {
+                console.log(`[Claude] 🔧 Tool: ${block.name} (turn ${turnNumber}) chat=${chatId}`);
+                onProgress?.({ type: "tool_use", toolName: block.name, turnNumber });
+              }
+              if (block?.type === "text" && block?.text) {
+                // 최종 텍스트 청크 (진행 상황에서는 보내지 않음, result에서 추출)
+              }
+            }
+          }
+        }
+
+        if (event.type === "user") {
+          // 도구 결과 반환 — Claude가 다음 단계 진행 중
+          onProgress?.({ type: "tool_result", turnNumber });
+        }
+
+        if (event.type === "result") {
+          resultEvent = event;
+        }
+      } catch {
+        // JSON 파싱 실패 — partial line, 무시
+      }
+    };
 
     proc.stdout!.on("data", (data: Buffer) => {
-      stdout += data.toString();
-      lastOutputTime = Date.now();
+      const chunk = data.toString();
+      rawStdout += chunk;
+      lastActivityTime = Date.now();
+
+      // 줄 단위 파싱 (partial line 처리)
+      lineBuffer += chunk;
+      const lines = lineBuffer.split("\n");
+      lineBuffer = lines.pop() || ""; // 마지막 불완전한 줄은 버퍼에 보관
+      for (const line of lines) {
+        processLine(line);
+      }
     });
 
     proc.stderr!.on("data", (data: Buffer) => {
       stderr += data.toString();
-      lastOutputTime = Date.now();
+      lastActivityTime = Date.now();
     });
 
-    // --- Timeout watchdog (OpenClaw createProcessSupervisor) ---
-    let overallTimer: ReturnType<typeof setTimeout> | null = null;
-    let noOutputTimer: ReturnType<typeof setInterval> | null = null;
+    // ── Timeout watchdog ──
+    // stream-json 이벤트 기반 활성 추적:
+    // - 이벤트가 오면 lastActivityTime 갱신
+    // - 도구 실행 중에도 assistant/user 이벤트가 발생하므로 활성 상태 감지 가능
+    // - 단, Bash 도구가 장시간 실행될 경우 (flutter build ~100s) 중간 이벤트 없음
+    //   → overall timeout만으로 보호 (TIMEOUT_MS)
 
+    let overallTimer: ReturnType<typeof setTimeout> | null = null;
     let killedByWatchdog = false;
     let killReason = "";
 
@@ -390,82 +380,76 @@ function executeClaudeCli(
       killedByWatchdog = true;
       killReason = reason;
       console.warn(`[Claude] Kill: ${reason} chat=${chatId}`);
-      try {
-        proc.kill("SIGKILL");
-      } catch {}
+      try { proc.kill("SIGKILL"); } catch {}
     };
 
     if (TIMEOUT_MS > 0) {
-      overallTimer = setTimeout(
-        () => killProc(`overall timeout (${TIMEOUT_MS}ms)`),
-        TIMEOUT_MS
-      );
-
-      // no-output watchdog 비활성화
-      // stream-json + --verbose에서도 도구 실행(flutter build, git push 등) 중
-      // 수십 분간 stdout이 없을 수 있음. overall timeout만으로 보호.
-      // noOutputTimer는 사용하지 않음.
+      overallTimer = setTimeout(() => killProc(`overall timeout (${TIMEOUT_MS}ms)`), TIMEOUT_MS);
     }
 
     const cleanup = () => {
       activeProcesses.delete(proc);
       if (overallTimer) clearTimeout(overallTimer);
-      if (noOutputTimer) clearInterval(noOutputTimer);
     };
 
     proc.on("close", (code: number | null) => {
       cleanup();
 
-      // code === null means killed by signal (SIGKILL from watchdog)
+      // 남은 버퍼 처리
+      if (lineBuffer.trim()) processLine(lineBuffer);
+
       if (code === null) {
         console.error(`[Claude] exit=null (signal) chat=${chatId} killedByWatchdog=${killedByWatchdog} reason=${killReason}`);
-        // Reset session so next attempt starts fresh (avoid "session already in use")
         session.isFirstTurn = true;
         session.sessionId = randomUUID();
         saveSessions();
-        const msg = killedByWatchdog
-          ? `⏱ Claude 응답 시간 초과 (${killReason}). 다시 시도해주세요.`
-          : "Claude 프로세스가 예기치 않게 종료되었습니다. 다시 시도해주세요.";
-        reject(new Error(msg));
+        reject(new Error(
+          killedByWatchdog
+            ? `⏱ Claude 응답 시간 초과 (${killReason}). 다시 시도해주세요.`
+            : "Claude 프로세스가 예기치 않게 종료되었습니다. 다시 시도해주세요."
+        ));
         return;
       }
 
       if (code !== 0) {
         console.error(`[Claude] exit=${code} stderr=${stderr.slice(0, 300)}`);
-        const errMsg =
-          stderr.split("\n").filter(Boolean)[0] ||
-          `Claude exited with code ${code}`;
-        reject(new Error(errMsg));
+        reject(new Error(stderr.split("\n").filter(Boolean)[0] || `Claude exited with code ${code}`));
         return;
       }
 
       try {
-        const result = parseCliJson(stdout);
+        // result 이벤트가 실시간 파싱으로 이미 잡혔으면 그것 사용
+        // 없으면 전체 stdout에서 fallback 파싱
+        const result = resultEvent
+          ? parseResultEvent(resultEvent)
+          : parseCliJson(rawStdout);
 
         if (result.isError) {
           reject(new Error(result.text || "Unknown Claude error"));
           return;
         }
 
-        // Update session
         session.isFirstTurn = false;
         if (result.sessionId) session.sessionId = result.sessionId;
         session.lastActive = Date.now();
         saveSessions();
 
         console.log(
-          `[Claude] chat=${chatId} in=${result.inputTokens} out=${result.outputTokens}` +
-            `${result.cacheRead ? ` cache_read=${result.cacheRead}` : ""}` +
-            ` cost=$${result.cost.toFixed(4)}`
+          `[Claude] chat=${chatId} turns=${turnNumber} in=${result.inputTokens} out=${result.outputTokens}` +
+          `${result.cacheRead ? ` cache_read=${result.cacheRead}` : ""}` +
+          ` cost=$${result.cost.toFixed(4)}` +
+          ` duration=${result.durationMs ? Math.round(result.durationMs / 1000) + "s" : "?"}`
         );
 
         resolve(result.text || "(empty response)");
       } catch (e: any) {
-        console.error(
-          `[Claude] Parse error: ${e.message} stdout=${stdout.slice(0, 500)}`
-        );
-        if (stdout.trim()) {
-          resolve(stdout.trim().slice(0, 4000));
+        console.error(`[Claude] Parse error: ${e.message} stdout_len=${rawStdout.length}`);
+        // Fallback: 마지막 assistant 텍스트 추출 시도
+        const fallback = extractLastAssistantText(rawStdout);
+        if (fallback) {
+          resolve(fallback);
+        } else if (rawStdout.trim()) {
+          resolve(rawStdout.trim().slice(0, 4000));
         } else {
           reject(new Error("Failed to parse Claude response"));
         }
@@ -480,7 +464,7 @@ function executeClaudeCli(
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Output parser (OpenClaw parseCliJson + collectText)
+// Output parsing
 // ═══════════════════════════════════════════════════════════════
 
 interface ParsedResult {
@@ -491,9 +475,9 @@ interface ParsedResult {
   outputTokens: number;
   cacheRead: number;
   cost: number;
+  durationMs: number;
 }
 
-// OpenClaw collectText: recursively extract text from nested JSON
 function collectText(value: any): string {
   if (!value) return "";
   if (typeof value === "string") return value;
@@ -501,123 +485,126 @@ function collectText(value: any): string {
   if (typeof value !== "object") return "";
   if (typeof value.text === "string") return value.text;
   if (typeof value.content === "string") return value.content;
-  if (Array.isArray(value.content))
-    return value.content.map(collectText).join("");
-  if (value.message && typeof value.message === "object")
-    return collectText(value.message);
+  if (Array.isArray(value.content)) return value.content.map(collectText).join("");
+  if (value.message && typeof value.message === "object") return collectText(value.message);
   return "";
 }
 
-// OpenClaw pickSessionId
 function pickSessionId(parsed: any): string | null {
-  for (const field of [
-    "session_id",
-    "sessionId",
-    "conversation_id",
-    "conversationId",
-  ]) {
+  for (const field of ["session_id", "sessionId", "conversation_id", "conversationId"]) {
     const val = parsed[field];
     if (typeof val === "string" && val.trim()) return val.trim();
   }
   return null;
 }
 
-// OpenClaw toUsage
-function toUsage(raw: any): {
-  input: number;
-  output: number;
-  cacheRead: number;
-} {
-  const pick = (key: string) =>
-    typeof raw[key] === "number" && raw[key] > 0 ? raw[key] : 0;
+function toUsage(raw: any): { input: number; output: number; cacheRead: number } {
+  const pick = (key: string) => typeof raw[key] === "number" && raw[key] > 0 ? raw[key] : 0;
   return {
     input: pick("input_tokens") || pick("inputTokens"),
     output: pick("output_tokens") || pick("outputTokens"),
-    cacheRead:
-      pick("cache_read_input_tokens") ||
-      pick("cached_input_tokens") ||
-      pick("cacheRead"),
+    cacheRead: pick("cache_read_input_tokens") || pick("cached_input_tokens") || pick("cacheRead"),
   };
 }
 
-// OpenClaw parseCliJson: parse single JSON, extract text via collectText
+// result 이벤트에서 직접 파싱 (stream-json 실시간 파싱 결과)
+function parseResultEvent(event: StreamEvent): ParsedResult {
+  const text = (
+    collectText(event.result) ||
+    collectText(event.message) ||
+    collectText(event)
+  ).trim();
+
+  const sessionId = pickSessionId(event);
+  const usage = event.usage ? toUsage(event.usage) : { input: 0, output: 0, cacheRead: 0 };
+
+  let finalText = text;
+  if (!finalText && (event.stop_reason === "max_turns" || event.stop_reason === "max_turns_reached")) {
+    finalText = "⏳ 작업이 max-turns 한도에 도달했습니다. 계속 진행하려면 메시지를 보내주세요.";
+  }
+  if (!finalText && (event.num_turns ?? 0) > 1) {
+    finalText = "✅ 작업을 완료했습니다. 결과를 확인하시거나 추가 요청을 보내주세요.";
+  }
+
+  return {
+    text: finalText,
+    sessionId,
+    isError: event.is_error === true,
+    inputTokens: usage.input,
+    outputTokens: usage.output,
+    cacheRead: usage.cacheRead,
+    cost: event.total_cost_usd || 0,
+    durationMs: event.duration_ms || 0,
+  };
+}
+
+// 전체 stdout에서 fallback 파싱 (실시간 파싱 실패 시)
 function parseCliJson(raw: string): ParsedResult {
   const trimmed = raw.trim();
   if (!trimmed) throw new Error("Empty CLI output");
 
   let parsed: any;
-
-  // Try single JSON first
   try {
     parsed = JSON.parse(trimmed);
   } catch {
-    // Try JSONL: find type="result" line
     const lines = trimmed.split("\n");
+    // type="result" 줄 찾기
     for (const line of lines) {
       try {
         const obj = JSON.parse(line.trim());
-        if (obj.type === "result") {
-          parsed = obj;
-          break;
-        }
-      } catch {
-        continue;
-      }
+        if (obj.type === "result") { parsed = obj; break; }
+      } catch { continue; }
     }
-    // Last line fallback
+    // 마지막 줄 fallback
     if (!parsed) {
       for (let i = lines.length - 1; i >= 0; i--) {
-        try {
-          parsed = JSON.parse(lines[i]!.trim());
-          break;
-        } catch {
-          continue;
-        }
+        try { parsed = JSON.parse(lines[i]!.trim()); break; } catch { continue; }
       }
     }
   }
 
   if (!parsed) throw new Error("No valid JSON in CLI output");
 
-  // OpenClaw text extraction: message → content → result → whole object
   let text = (
-    collectText(parsed.message) ||
-    collectText(parsed.content) ||
-    collectText(parsed.result) ||
-    collectText(parsed)
+    collectText(parsed.message) || collectText(parsed.content) ||
+    collectText(parsed.result) || collectText(parsed)
   ).trim();
 
   const sessionId = pickSessionId(parsed);
   const usage = parsed.usage ? toUsage(parsed.usage) : { input: 0, output: 0, cacheRead: 0 };
 
-  // Fallback messages
-  if (
-    !text &&
-    (parsed.stop_reason === "max_turns" ||
-      parsed.stop_reason === "max_turns_reached")
-  ) {
-    text =
-      "⏳ 작업이 max-turns 한도에 도달했습니다. 계속 진행하려면 메시지를 보내주세요.";
+  if (!text && (parsed.stop_reason === "max_turns" || parsed.stop_reason === "max_turns_reached")) {
+    text = "⏳ 작업이 max-turns 한도에 도달했습니다. 계속 진행하려면 메시지를 보내주세요.";
   }
-
   if (!text && (parsed.num_turns ?? 0) > 1) {
     text = "✅ 작업을 완료했습니다. 결과를 확인하시거나 추가 요청을 보내주세요.";
   }
 
-  if (!text && usage.output > 0) {
-    console.warn(
-      `[Claude] Empty result with ${usage.output} output tokens, ` +
-        `stop=${parsed.stop_reason} turns=${parsed.num_turns}`
-    );
-  }
-
   return {
-    text,
-    sessionId,
+    text, sessionId,
     isError: parsed.is_error === true,
-    inputTokens: usage.input,
-    outputTokens: usage.output,
-    cacheRead: usage.cacheRead,
-    cost: parsed.total_cost_usd || 0,
+    inputTokens: usage.input, outputTokens: usage.output,
+    cacheRead: usage.cacheRead, cost: parsed.total_cost_usd || 0,
+    durationMs: parsed.duration_ms || 0,
   };
+}
+
+// stdout에서 마지막 assistant 텍스트 블록 추출 (파싱 실패 시 최후 수단)
+function extractLastAssistantText(raw: string): string | null {
+  const lines = raw.trim().split("\n");
+  let lastText = "";
+  for (const line of lines) {
+    try {
+      const obj = JSON.parse(line.trim());
+      if (obj.type === "assistant" && obj.message?.content) {
+        const content = Array.isArray(obj.message.content) ? obj.message.content : [];
+        for (const block of content) {
+          if (block?.type === "text" && block?.text) {
+            lastText = block.text;
+          }
+        }
+      }
+    } catch { continue; }
+  }
+  return lastText || null;
 }

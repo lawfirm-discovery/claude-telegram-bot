@@ -1,5 +1,5 @@
 import { Bot, InlineKeyboard } from "grammy";
-import { askClaude, clearSession, getSessionStats, killActiveProcesses } from "./claude";
+import { askClaude, askClaudeWithProgress, clearSession, getSessionStats, killActiveProcesses, type ProgressInfo } from "./claude";
 import {
   detectApprovalRequest,
   getApprovalEmoji,
@@ -162,7 +162,7 @@ bot.on("callback_query:data", async (ctx) => {
     }, 4000);
 
     try {
-      const response = await askClaude(chatId, "승인합니다. 진행해주세요.");
+      const response = await askClaudeWithProgress(chatId, "승인합니다. 진행해주세요.");
       clearInterval(typingInterval);
 
       // Check if there's another approval needed
@@ -271,32 +271,78 @@ async function removeAckReaction(ctx: any): Promise<void> {
   } catch {}
 }
 
-// --- Core message handler (OpenClaw style: ack → typing → spawn → reply → remove ack) ---
+// --- Core message handler with real-time progress ---
 async function handleMessage(
   ctx: any,
   chatId: string,
   text: string,
   attachments?: string[]
 ): Promise<void> {
-  // OpenClaw: ack reaction immediately
   const didAck = await addAckReaction(ctx);
 
-  // Typing indicator
   await ctx.replyWithChatAction("typing");
   const typingInterval = setInterval(async () => {
-    try {
-      await ctx.replyWithChatAction("typing");
-    } catch {}
+    try { await ctx.replyWithChatAction("typing"); } catch {}
   }, 4000);
 
-  try {
-    const response = await askClaude(chatId, text, attachments);
-    clearInterval(typingInterval);
+  // 진행 상황 메시지 (도구 사용 시 실시간 업데이트)
+  let progressMsgId: number | null = null;
+  let lastProgressText = "";
+  let toolHistory: string[] = [];
+  let progressThrottleTimer: ReturnType<typeof setTimeout> | null = null;
+  const PROGRESS_THROTTLE_MS = 3000; // 3초마다 최대 1번 업데이트
 
-    // Remove ack reaction after reply (OpenClaw: removeAckAfterReply)
+  const updateProgressMessage = async (newText: string) => {
+    if (newText === lastProgressText) return;
+    lastProgressText = newText;
+    try {
+      if (progressMsgId) {
+        await bot.api.editMessageText(ctx.chat.id, progressMsgId, newText);
+      } else {
+        const msg = await ctx.reply(newText);
+        progressMsgId = msg.message_id;
+      }
+    } catch {
+      // edit 실패 시 무시 (동일 텍스트, 메시지 삭제됨 등)
+    }
+  };
+
+  const TOOL_EMOJI: Record<string, string> = {
+    Read: "📖", Write: "✍️", Edit: "✏️", Bash: "💻", Grep: "🔍",
+    Glob: "📂", Agent: "🤖", TaskCreate: "📋", TaskUpdate: "✅",
+    WebSearch: "🌐", WebFetch: "🌐",
+  };
+
+  const onProgress = (info: ProgressInfo) => {
+    if (info.type === "tool_use" && info.toolName) {
+      const emoji = TOOL_EMOJI[info.toolName] || "🔧";
+      toolHistory.push(`${emoji} ${info.toolName}`);
+      // 최근 5개만 표시
+      const recent = toolHistory.slice(-5);
+      const progressText = `⏳ 작업 중... (turn ${info.turnNumber})\n${recent.join(" → ")}`;
+
+      // 쓰로틀링: 3초마다 최대 1번 업데이트
+      if (!progressThrottleTimer) {
+        progressThrottleTimer = setTimeout(() => {
+          progressThrottleTimer = null;
+          updateProgressMessage(progressText);
+        }, PROGRESS_THROTTLE_MS);
+      }
+    }
+  };
+
+  try {
+    const response = await askClaudeWithProgress(chatId, text, attachments, onProgress);
+    clearInterval(typingInterval);
+    if (progressThrottleTimer) clearTimeout(progressThrottleTimer);
+
+    // 진행 상황 메시지 삭제
+    if (progressMsgId) {
+      try { await bot.api.deleteMessage(ctx.chat.id, progressMsgId); } catch {}
+    }
+
     if (didAck) await removeAckReaction(ctx);
 
-    // Check if Claude is requesting approval
     const approval = detectApprovalRequest(response);
     if (approval) {
       await sendApprovalRequest(ctx, chatId, approval, response);
@@ -305,6 +351,10 @@ async function handleMessage(
     }
   } catch (error: any) {
     clearInterval(typingInterval);
+    if (progressThrottleTimer) clearTimeout(progressThrottleTimer);
+    if (progressMsgId) {
+      try { await bot.api.deleteMessage(ctx.chat.id, progressMsgId); } catch {}
+    }
     if (didAck) await removeAckReaction(ctx);
     console.error(`[Bot] Error chat=${chatId}:`, error.message);
     await ctx.reply(`⚠️ ${error.message}`);
