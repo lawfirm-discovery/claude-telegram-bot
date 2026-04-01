@@ -338,7 +338,7 @@ function executeClaudeCli(
   if (USE_BARE_MODE) baseArgs.push("--bare");
   if (ALLOWED_TOOLS) baseArgs.push("--tools", ALLOWED_TOOLS);
 
-  if (MAX_TURNS > 0) baseArgs.push("--max-turns", String(MAX_TURNS));
+  // NOTE: --max-turns는 CLI에 존재하지 않음. 턴 제한은 stream-json 이벤트로 봇에서 직접 수행
 
   if (useResume) {
     baseArgs.push("--resume", session.sessionId);
@@ -395,6 +395,14 @@ function executeClaudeCli(
 
         if (event.type === "assistant") {
           turnNumber++;
+
+          // 턴 제한 (--max-turns가 CLI에 없으므로 봇에서 직접 제한)
+          if (MAX_TURNS > 0 && turnNumber > MAX_TURNS) {
+            console.warn(`[Claude] Max turns reached (${MAX_TURNS}) chat=${chatId}, killing process`);
+            killProc(`max turns reached (${MAX_TURNS})`);
+            return;
+          }
+
           // tool_use 감지
           const msg = event.message;
           if (msg && typeof msg === "object") {
