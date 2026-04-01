@@ -17,7 +17,7 @@ const TIMEOUT_MS = parseInt(process.env.TIMEOUT_MS || "2700000"); // 45 min defa
 const INACTIVITY_TIMEOUT_MS = parseInt(process.env.INACTIVITY_TIMEOUT_MS || "600000"); // 10 min no-output kill
 const MAX_PROMPT_ARG_CHARS = 100_000;
 const DEBOUNCE_MS = parseInt(process.env.DEBOUNCE_MS || "1500");
-const ALLOWED_TOOLS = process.env.ALLOWED_TOOLS || "Bash,Edit,Read,Write,Glob,Grep,Agent,WebFetch,WebSearch";
+const ALLOWED_TOOLS = process.env.ALLOWED_TOOLS || ""; // 빈 값이면 --tools 미전달 (모든 도구 + MCP 도구 사용 가능)
 const USE_BARE_MODE = process.env.USE_BARE_MODE === "true"; // default: false (--bare disables OAuth)
 
 const SYSTEM_PROMPT = [APPROVAL_SYSTEM_PROMPT, USER_SYSTEM_PROMPT]
