@@ -401,18 +401,10 @@ function executeClaudeCli(
         TIMEOUT_MS
       );
 
-      // no-output 타임아웃: 도구 실행(빌드, 코드 생성) 중 stdout이 장시간 없을 수 있으므로 넉넉히
-      // fresh: overall의 80% (min 600s, max 1500s)
-      // resume: overall의 60% (min 600s, max 1200s)
-      const noOutputMs = useResume
-        ? Math.max(600_000, Math.min(TIMEOUT_MS * 0.6, 1_200_000))
-        : Math.max(600_000, Math.min(TIMEOUT_MS * 0.8, 1_500_000));
-
-      noOutputTimer = setInterval(() => {
-        if (Date.now() - lastOutputTime > noOutputMs) {
-          killProc(`no output for ${Math.round(noOutputMs / 1000)}s`);
-        }
-      }, 10_000);
+      // no-output watchdog 비활성화
+      // stream-json + --verbose에서도 도구 실행(flutter build, git push 등) 중
+      // 수십 분간 stdout이 없을 수 있음. overall timeout만으로 보호.
+      // noOutputTimer는 사용하지 않음.
     }
 
     const cleanup = () => {
