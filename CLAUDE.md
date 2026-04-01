@@ -1,3 +1,242 @@
+# Claude Code 글로벌 규칙
+
+## 사용자 정보
+
+- **이름:** 천호성 (Hosung Chun)
+- **호칭:** 호성
+- **타임존:** Asia/Seoul (GMT+9)
+- **Telegram:** @legalmonster
+
+---
+
+## 핵심 원칙
+
+- **정확성 > 창의성**: 읽기 쉽고 유지보수 쉬운 솔루션 우선
+- **최소 변경 원칙**: 필요한 만큼만 변경, 인접 코드 리팩토링 자제
+- **기존 패턴 따르기**: 새 추상화/의존성 도입 전 프로젝트 컨벤션 우선
+- **검증 필수**: "될 것 같다"는 안 됨. 테스트/빌드/린트로 증명
+- **불확실하면 명시**: 검증 못 한 부분은 솔직히 말하고 안전한 다음 단계 제안
+- **수정 전 반드시 읽기**: 코드를 읽지 않고 수정 제안 금지. 기존 코드를 먼저 이해할 것
+- **야심찬 작업 허용**: 사용자가 요청한 큰 작업을 거부하지 말 것. 범위 판단은 사용자에게 위임
+
+---
+
+## 응답 스타일
+
+- **간결하고 핵심적으로** — 결과와 영향 먼저, 프로세스 설명 나중에
+- **구체적 참조** — 파일 경로, 명령어, 에러 메시지 포함
+- **대량 로그 금지** — 요약 후 증거 위치 안내
+- **질문은 정말 막혔을 때만** — 하나만, 추천 기본값과 함께
+- **링크는 항상 클릭 가능하게** — URL에 꺾쇠(`<>`) 금지
+
+---
+
+## 작업 흐름
+
+### 🚨 설계 → 승인 → 구현 (필수 프로세스)
+1. **설계**: 작업 요청 받으면 먼저 변경 범위, 영향 파일, 접근 방식을 설계
+2. **사용자 승인**: 설계안을 사용자에게 제시하고 **승인을 받은 후에만** 코드 수정 시작
+3. **구현**: 승인된 설계대로 구현
+4. **검증**: 빌드/린트/테스트 통과 확인
+5. **커밋 & 푸시**: 검증 통과 후 커밋 & 푸시 (에러 시 자동 수정 시도)
+- 단순 수정(오타, 1줄 변경, 명확한 버그픽스)은 바로 구현 가능
+- 3단계 이상, 멀티파일, 아키텍처 결정 작업은 반드시 Plan Mode 사용
+- 새 정보가 계획을 무효화하면 → 중단, 계획 업데이트 후 재개
+
+### 멀티서버 작업 규칙
+- **rtx6000 = 중앙 개발 서버**: 개발 서비스(Frontend, Spring, FastAPI)를 실행하는 유일한 서버
+- **다른 서버(A4500, 3060 등)**: 코드 수정 & 푸시만 담당, 서비스 실행 금지
+- **다른 서버 작업 절차**:
+  1. `git pull origin dev-hs-rtx6000-new` — 최신 코드 가져오기
+  2. 코드 수정 & 빌드 검증 (로컬에서 빌드 에러 없는지만 확인)
+  3. `git push origin dev-hs-rtx6000-new` — rtx6000에 변경 전달
+  4. rtx6000이 1분마다 자동 pull → 서비스 자동 반영 (HMR/DevTools/reload)
+- **서비스 재시작 필요 시**: rtx6000 봇(@rtx6000_claude_style_bot)에게 요청
+- **절대 금지**: 다른 서버에서 `pm2 start`, `systemctl start`, `bootRun` 등 서비스 직접 실행
+
+### 점진적 작업 (리스크 최소화)
+- 얇은 수직 슬라이스 선호
+- 구현 → 테스트 → 검증 → 확장 순서
+- 가능하면 feature flag, config 스위치, 안전 기본값 뒤에 숨기기
+
+### 검증 후 완료
+- 증거 없이 완료 선언 금지
+- 테스트, 린트, 타입체크, 빌드, 로그 또는 수동 재현
+- 기준: "시니어 엔지니어가 이 diff와 검증을 승인할까?"
+
+---
+
+## 에러 처리 & 복구
+
+### Stop-the-Line 규칙
+예상치 못한 상황(테스트 실패, 빌드 에러, 동작 변경) 발생 시:
+1. 기능 추가 중단
+2. 증거 보존 (에러 출력, 재현 단계)
+3. 진단 후 재계획
+
+### 트리아지 순서
+1. 재현 → 2. 실패 계층 파악 → 3. 최소 실패 케이스 → 4. 근본 원인 수정 → 5. 회귀 방지 → 6. E2E 검증
+
+### 안전 폴백
+- "안전 기본값 + 경고" > 부분 동작
+- 조용한 실패 대신 actionable 에러 반환
+- 광범위 리팩토링을 "수정"으로 위장 금지
+
+---
+
+## 엔지니어링 모범 사례
+
+### 과도한 엔지니어링 금지
+- **과도한 추상화 금지**: 1회성 작업에 helper/utility/wrapper 만들지 말 것
+- **불필요한 추가 금지**: 버그 수정에 주변 코드 정리 끼워넣지 말 것
+- **불필요한 에러 핸들링 금지**: 일어날 수 없는 시나리오에 에러 처리 넣지 말 것
+- **호환성 핵 금지**: 안 쓰는 코드는 그냥 삭제
+- **파일 생성 최소화**: 새 파일 만들기보다 기존 파일 편집 선호
+
+### API / 인터페이스
+- 안정적 인터페이스 중심 설계
+- 코드 경로 복제보다 optional 파라미터 추가
+- 에러 시맨틱 일관성 유지
+
+### 테스팅
+- 버그를 잡았을 최소 테스트 추가
+- 순수 로직 → unit, DB/네트워크 → integration, 핵심 플로우만 E2E
+
+### 보안 & 프라이버시
+- 코드, 로그, 채팅에 비밀 정보 노출 금지
+- 사용자 입력 = 신뢰 불가
+- 최소 권한 원칙
+
+---
+
+## Git & 변경 관리
+
+- 커밋은 원자적, 설명 가능하게
+- 명시 요청 없이 히스토리 재작성 금지
+- 포맷팅 변경과 동작 변경 분리
+
+### 커밋 & 푸시 절차 (필수)
+1. `git diff` / `git status`로 의도한 변경만 포함 확인
+2. 빌드 검증
+3. 린트/타입체크
+4. 테스트
+5. 관련 파일만 `git add` → 원자적 커밋 메시지
+6. 에러 없음 → 바로 푸시 / 에러 → 자동 수정 시도 / 수정 불가 → 보고
+7. 푸시 후 변경 요약 보고
+
+---
+
+## 리걸몬스터 프로젝트 규칙
+
+### 🚨 절대 규칙 (위반 금지)
+- **`ddl-auto`는 반드시 `validate`** — 절대로 `update`로 변경 금지
+- **포트 3000 사용 금지** — Docker open-webui 점유 중
+- **JAR 빌드(`bootJar`) 금지** — `bootRun` 사용
+- **세 레포 모두 `dev-hs-rtx6000-new` 브랜치** — 다른 브랜치 checkout 금지
+
+### 🚨 응답 필수 포함 (Response Footer) — 예외 없음!
+리걸몬스터 관련 **모든** 응답 끝에 아래 2줄 필수:
+```
+---
+🔗 테스트 서버: http://100.108.86.92:3011
+📌 브랜치: `dev-hs-rtx6000-new`
+```
+
+### 서버 & 환경
+| 항목 | 값 |
+|------|-----|
+| 테스트 서버 | http://100.108.86.92:3011 |
+| 기존 테섭 | https://test.legalmonster.co.kr |
+| Flutter 웹 앱 | http://100.108.86.92:8088 |
+| Spring | /home/angrylawyer/lemon-api-server-spring (systemd: lemon-spring-api) |
+| Frontend | /home/angrylawyer/lemon-front (pm2: lemon-front-dev) |
+| FastAPI | /home/angrylawyer/lemon-ai-server-FastAPI (pm2: lemon-fastapi) |
+| Flutter | /home/angrylawyer/lemon_flutter |
+| 작업 브랜치 | `dev-hs-rtx6000-new` (모든 저장소) |
+| Config Vault | http://100.117.168.53:8070 (bot:lemon2024!) |
+
+### 빌드 & 실행
+```bash
+# Spring 실행
+sudo systemctl restart lemon-spring-api
+
+# Frontend (pm2)
+pm2 restart lemon-front-dev
+
+# FastAPI
+pm2 restart lemon-fastapi
+
+# Flutter 웹 빌드 (~100초)
+cd /home/angrylawyer/lemon_flutter && /home/angrylawyer/flutter/bin/flutter build web --release --no-wasm-dry-run
+```
+
+### Gradle 빌드 환경변수
+```bash
+LEMON_FORK_JAVAC=true LEMON_JAVAC_XMX=24g
+```
+
+### nginx 프록시 설정
+| 경로 | 대상 |
+|------|------|
+| :3011 → | localhost:3001 (Frontend) |
+| :3011/api → | localhost:8080 (Spring) |
+| :3011/globallaw-api → | 100.117.168.53:8090 |
+
+### 표준 포트 (변경 금지!)
+| 서비스 | 포트 |
+|--------|------|
+| nginx 외부 | 3011 |
+| Frontend (pm2) | 3001 |
+| Spring | 8080 |
+| FastAPI | 8001 |
+| Docker open-webui | 3000 (사용 금지!) |
+
+### 브랜치 & Pull 소스
+| 저장소 | 작업 브랜치 | pull 소스 |
+|--------|------------|-----------|
+| FastAPI | `dev-hs-rtx6000-new` | `master` |
+| Frontend | `dev-hs-rtx6000-new` | `dev` |
+| Spring | `dev-hs-rtx6000-new` | `dev` |
+
+### Config Vault (API 키 저장소)
+```bash
+# 값 조회
+curl -u "bot:lemon2024!" http://100.117.168.53:8070/api/value/KEY_NAME
+
+# 서버별 환경변수
+curl -u "bot:lemon2024!" http://100.117.168.53:8070/api/env/SERVER_NAME
+```
+
+---
+
+## UI/UX 작업 체크리스트
+
+### 모달
+- 데스크탑: backdrop blur (`backdropFilter: 'blur(4px)'`)
+- 모바일: 전체화면 (`fullScreen={isMobile}`)
+- z-index 문제 시: `createPortal` + `zIndex: 1400`
+
+### 반응형
+- 글자: `fontSize: { xs: '0.875rem', md: '1rem' }`
+- 패딩: `p: { xs: 1, sm: 1.5, md: 2 }`
+- 테이블: `whiteSpace: 'nowrap'` + `minWidth`
+
+### 페이지 높이
+- 채팅 레일 높이: 50px (`ERP_BOTTOM_CHAT_RAIL_HEIGHT_PX`)
+- `pb` 중복 적용 금지
+- 방법: `height: calc(100vh - 64px - 50px)` 또는 `flex: 1` + `pb: { xs: 8, md: 2 }`
+
+---
+
+## 안전 수칙
+
+- 비밀 데이터 외부 유출 금지
+- 파괴적 명령 실행 전 확인
+- 불확실하면 물어보기
+
+---
+
+## Bun 프로젝트 규칙
 
 Default to using Bun instead of Node.js.
 
