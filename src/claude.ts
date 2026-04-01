@@ -11,7 +11,8 @@ const CLAUDE_LIGHT_MODEL = process.env.CLAUDE_LIGHT_MODEL || "claude-sonnet-4-6"
 const CLAUDE_EFFORT = process.env.CLAUDE_EFFORT || "medium"; // low | medium | high | max
 const ENABLE_MODEL_ROUTING = process.env.ENABLE_MODEL_ROUTING !== "false"; // default: true
 const SESSION_TTL_MS = parseInt(process.env.SESSION_TTL_MS || "3600000");
-const MAX_TURNS = parseInt(process.env.MAX_TURNS || "50");
+const MAX_TURNS = parseInt(process.env.MAX_TURNS || "200"); // 안전망 (진짜 runaway만 차단)
+const MAX_BUDGET_USD = parseFloat(process.env.MAX_BUDGET_USD || "5"); // 세션당 비용 한도
 const USER_SYSTEM_PROMPT = process.env.SYSTEM_PROMPT || "";
 const TIMEOUT_MS = parseInt(process.env.TIMEOUT_MS || "2700000"); // 45 min default
 const INACTIVITY_TIMEOUT_MS = parseInt(process.env.INACTIVITY_TIMEOUT_MS || "600000"); // 10 min no-output kill
@@ -337,8 +338,9 @@ function executeClaudeCli(
 
   if (USE_BARE_MODE) baseArgs.push("--bare");
   if (ALLOWED_TOOLS) baseArgs.push("--tools", ALLOWED_TOOLS);
+  if (MAX_BUDGET_USD > 0) baseArgs.push("--max-budget-usd", String(MAX_BUDGET_USD));
 
-  // NOTE: --max-turns는 CLI에 존재하지 않음. 턴 제한은 stream-json 이벤트로 봇에서 직접 수행
+  // NOTE: --max-turns는 CLI에 존재하지 않음. 턴 제한은 stream-json 이벤트로 봇에서 직접 수행 (안전망)
 
   if (useResume) {
     baseArgs.push("--resume", session.sessionId);
