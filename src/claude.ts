@@ -351,7 +351,7 @@ function executeClaudeCli(
   return new Promise((resolve, reject) => {
     // OpenClaw: always pipe stdin (write empty + close when not using stdin for prompt)
     const proc = spawn(CLAUDE_PATH, baseArgs, {
-      env: { ...process.env, NO_COLOR: "1" },
+      env: { ...process.env, NO_COLOR: "1", TELEGRAM_BOT_TOKEN: "" },
       stdio: ["pipe", "pipe", "pipe"],
     });
 
@@ -401,10 +401,12 @@ function executeClaudeCli(
         TIMEOUT_MS
       );
 
-      // OpenClaw-aligned: fresh=80% of overall (min 300s, max 900s), resume=50% (min 180s, max 600s)
+      // no-output 타임아웃: 도구 실행(빌드, 코드 생성) 중 stdout이 장시간 없을 수 있으므로 넉넉히
+      // fresh: overall의 80% (min 600s, max 1500s)
+      // resume: overall의 60% (min 600s, max 1200s)
       const noOutputMs = useResume
-        ? Math.max(180_000, Math.min(TIMEOUT_MS * 0.5, 600_000))
-        : Math.max(300_000, Math.min(TIMEOUT_MS * 0.8, 900_000));
+        ? Math.max(600_000, Math.min(TIMEOUT_MS * 0.6, 1_200_000))
+        : Math.max(600_000, Math.min(TIMEOUT_MS * 0.8, 1_500_000));
 
       noOutputTimer = setInterval(() => {
         if (Date.now() - lastOutputTime > noOutputMs) {
