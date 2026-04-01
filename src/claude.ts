@@ -11,7 +11,7 @@ const CLAUDE_LIGHT_MODEL = process.env.CLAUDE_LIGHT_MODEL || "claude-sonnet-4-6"
 const CLAUDE_EFFORT = process.env.CLAUDE_EFFORT || "medium"; // low | medium | high | max
 const ENABLE_MODEL_ROUTING = process.env.ENABLE_MODEL_ROUTING !== "false"; // default: true
 const SESSION_TTL_MS = parseInt(process.env.SESSION_TTL_MS || "3600000");
-const MAX_TURNS = parseInt(process.env.MAX_TURNS || "20");
+const MAX_TURNS = parseInt(process.env.MAX_TURNS || "50");
 const USER_SYSTEM_PROMPT = process.env.SYSTEM_PROMPT || "";
 const TIMEOUT_MS = parseInt(process.env.TIMEOUT_MS || "2700000"); // 45 min default
 const INACTIVITY_TIMEOUT_MS = parseInt(process.env.INACTIVITY_TIMEOUT_MS || "600000"); // 10 min no-output kill
