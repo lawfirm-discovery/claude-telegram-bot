@@ -291,6 +291,7 @@ async function handleMessage(
   let toolHistory: string[] = [];
   let progressThrottleTimer: ReturnType<typeof setTimeout> | null = null;
   const PROGRESS_THROTTLE_MS = 3000; // 3초마다 최대 1번 업데이트
+  const startTime = Date.now();
 
   const updateProgressMessage = async (newText: string) => {
     if (newText === lastProgressText) return;
@@ -319,7 +320,9 @@ async function handleMessage(
       toolHistory.push(`${emoji} ${info.toolName}`);
       // 최근 5개만 표시
       const recent = toolHistory.slice(-5);
-      const progressText = `⏳ 작업 중... (turn ${info.turnNumber})\n${recent.join(" → ")}`;
+      const elapsed = Math.round((Date.now() - startTime) / 1000);
+      const elapsedStr = elapsed >= 60 ? `${Math.floor(elapsed / 60)}m${elapsed % 60}s` : `${elapsed}s`;
+      const progressText = `⏳ 작업 중... (turn ${info.turnNumber}, ${elapsedStr})\n${recent.join(" → ")}`;
 
       // 쓰로틀링: 3초마다 최대 1번 업데이트
       if (!progressThrottleTimer) {
@@ -357,7 +360,14 @@ async function handleMessage(
     }
     if (didAck) await removeAckReaction(ctx);
     console.error(`[Bot] Error chat=${chatId}:`, error.message);
-    await ctx.reply(`⚠️ ${error.message}`);
+    const reason = error.failoverReason;
+    const hints: Record<string, string> = {
+      rate_limit: "\n💡 API 사용량 한도에 도달했습니다. 잠시 후 다시 시도해주세요.",
+      overloaded: "\n💡 서버가 혼잡합니다. 잠시 후 다시 시도해주세요.",
+      auth: "\n💡 API 인증에 문제가 있습니다. 관리자에게 문의하세요.",
+      billing: "\n💡 API 결제 문제가 발생했습니다. 관리자에게 문의하세요.",
+    };
+    await ctx.reply(`⚠️ ${error.message}${hints[reason] || ""}`);
   }
 }
 

@@ -10,7 +10,8 @@ const CLAUDE_MODEL = process.env.CLAUDE_MODEL || "claude-opus-4-6";
 const SESSION_TTL_MS = parseInt(process.env.SESSION_TTL_MS || "3600000");
 const MAX_TURNS = parseInt(process.env.MAX_TURNS || "0");
 const USER_SYSTEM_PROMPT = process.env.SYSTEM_PROMPT || "";
-const TIMEOUT_MS = parseInt(process.env.TIMEOUT_MS || "1800000"); // 30 min default
+const TIMEOUT_MS = parseInt(process.env.TIMEOUT_MS || "2700000"); // 45 min default
+const INACTIVITY_TIMEOUT_MS = parseInt(process.env.INACTIVITY_TIMEOUT_MS || "600000"); // 10 min no-output kill
 const MAX_PROMPT_ARG_CHARS = 100_000;
 const DEBOUNCE_MS = parseInt(process.env.DEBOUNCE_MS || "1500");
 
@@ -232,22 +233,49 @@ function runClaude(chatId: string, message: string, attachments?: string[], onPr
   return runClaudeWithRetry(chatId, message, attachments, onProgress);
 }
 
+const RETRY_DELAYS: Record<string, number[]> = {
+  session_expired: [0],       // 즉시 1회
+  rate_limit: [10_000, 30_000, 60_000],  // 10s, 30s, 60s
+  overloaded: [15_000, 45_000],          // 15s, 45s
+  timeout: [5_000],                       // 5s 1회
+};
+
 async function runClaudeWithRetry(
   chatId: string, message: string, attachments?: string[], onProgress?: OnProgress
 ): Promise<string> {
-  try {
-    return await executeClaudeCli(chatId, message, attachments, onProgress);
-  } catch (err: any) {
-    const reason = classifyError(err.message || "");
-    if (reason === "session_expired") {
-      console.log(`[Claude] Session expired for chat=${chatId}, retrying with fresh session`);
-      const session = sessions.get(chatId);
-      if (session) { session.isFirstTurn = true; session.sessionId = randomUUID(); saveSessions(); }
+  let lastError: any;
+
+  for (let attempt = 0; attempt <= 3; attempt++) {
+    try {
       return await executeClaudeCli(chatId, message, attachments, onProgress);
+    } catch (err: any) {
+      lastError = err;
+      const reason = classifyError(err.message || "");
+
+      if (!reason || !RETRY_DELAYS[reason]) {
+        if (reason) err.failoverReason = reason;
+        throw err;
+      }
+
+      const delays = RETRY_DELAYS[reason];
+      if (attempt >= delays.length) {
+        err.failoverReason = reason;
+        throw err;
+      }
+
+      const delay = delays[attempt];
+      console.log(`[Claude] ${reason} for chat=${chatId}, retry #${attempt + 1} in ${delay / 1000}s`);
+
+      if (reason === "session_expired") {
+        const session = sessions.get(chatId);
+        if (session) { session.isFirstTurn = true; session.sessionId = randomUUID(); saveSessions(); }
+      }
+
+      if (delay > 0) await new Promise(r => setTimeout(r, delay));
     }
-    if (reason) err.failoverReason = reason;
-    throw err;
   }
+
+  throw lastError;
 }
 
 function executeClaudeCli(
@@ -366,13 +394,12 @@ function executeClaudeCli(
     });
 
     // ── Timeout watchdog ──
-    // stream-json 이벤트 기반 활성 추적:
-    // - 이벤트가 오면 lastActivityTime 갱신
-    // - 도구 실행 중에도 assistant/user 이벤트가 발생하므로 활성 상태 감지 가능
-    // - 단, Bash 도구가 장시간 실행될 경우 (flutter build ~100s) 중간 이벤트 없음
-    //   → overall timeout만으로 보호 (TIMEOUT_MS)
+    // 1. Overall timeout: 절대 상한 (기본 45분)
+    // 2. Inactivity timeout: stdout/stderr 활동 없으면 kill (기본 10분)
+    //    → 활동이 있으면 inactivity 타이머 리셋
 
     let overallTimer: ReturnType<typeof setTimeout> | null = null;
+    let inactivityTimer: ReturnType<typeof setInterval> | null = null;
     let killedByWatchdog = false;
     let killReason = "";
 
@@ -387,9 +414,19 @@ function executeClaudeCli(
       overallTimer = setTimeout(() => killProc(`overall timeout (${TIMEOUT_MS}ms)`), TIMEOUT_MS);
     }
 
+    if (INACTIVITY_TIMEOUT_MS > 0) {
+      inactivityTimer = setInterval(() => {
+        const idle = Date.now() - lastActivityTime;
+        if (idle >= INACTIVITY_TIMEOUT_MS) {
+          killProc(`no output for ${Math.round(idle / 1000)}s`);
+        }
+      }, 30_000); // 30초마다 체크
+    }
+
     const cleanup = () => {
       activeProcesses.delete(proc);
       if (overallTimer) clearTimeout(overallTimer);
+      if (inactivityTimer) clearInterval(inactivityTimer);
     };
 
     proc.on("close", (code: number | null) => {
@@ -403,11 +440,22 @@ function executeClaudeCli(
         session.isFirstTurn = true;
         session.sessionId = randomUUID();
         saveSessions();
-        reject(new Error(
-          killedByWatchdog
-            ? `⏱ Claude 응답 시간 초과 (${killReason}). 다시 시도해주세요.`
-            : "Claude 프로세스가 예기치 않게 종료되었습니다. 다시 시도해주세요."
-        ));
+
+        // 타임아웃이라도 중간에 받은 텍스트가 있으면 살려서 전달
+        if (killedByWatchdog) {
+          const partialText = extractLastAssistantText(rawStdout);
+          const elapsed = Math.round((Date.now() - lastActivityTime) / 1000);
+          if (partialText && partialText.length > 50) {
+            // 부분 응답 + 타임아웃 안내
+            resolve(`${partialText}\n\n---\n⏱ _응답이 중간에 중단되었습니다 (${killReason}). 이어서 진행하려면 "계속" 이라고 보내주세요._`);
+            return;
+          }
+          reject(new Error(
+            `⏱ Claude 응답 시간 초과 (${killReason}, ${elapsed}s 무응답). 다시 시도해주세요.`
+          ));
+        } else {
+          reject(new Error("Claude 프로세스가 예기치 않게 종료되었습니다. 다시 시도해주세요."));
+        }
         return;
       }
 

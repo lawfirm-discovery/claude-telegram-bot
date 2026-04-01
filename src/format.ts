@@ -28,8 +28,8 @@ export function markdownToTelegramHtml(markdown: string): string {
 
   let html = markdown;
 
-  // 1. Fenced code blocks: ```lang\n...\n```
-  html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_m, lang, code) => {
+  // 1. Fenced code blocks: ```lang\n...\n``` (also handle ``` without newline after lang)
+  html = html.replace(/```(\w*)\n?([\s\S]*?)```/g, (_m, lang, code) => {
     const escaped = escapeHtml(code.replace(/\n$/, ""));
     return ph(
       lang
@@ -86,10 +86,29 @@ export function splitMessage(text: string, maxLength = TELEGRAM_TEXT_CHUNK_LIMIT
       chunks.push(remaining);
       break;
     }
-    // Try to split at newline, then space, then hard cut
-    let i = remaining.lastIndexOf("\n", maxLength);
-    if (i < maxLength / 2) i = remaining.lastIndexOf(" ", maxLength);
-    if (i < maxLength / 2) i = maxLength;
+
+    // 코드 블록 내부에서 자르지 않도록: maxLength 범위 내 마지막 완전한 코드 블록 경계 찾기
+    let i = maxLength;
+    const candidate = remaining.substring(0, maxLength);
+
+    // 열린 ``` 가 닫히지 않았는지 확인
+    const backtickMatches = candidate.match(/```/g);
+    const unclosed = backtickMatches && backtickMatches.length % 2 !== 0;
+
+    if (unclosed) {
+      // 마지막 열린 ``` 앞에서 자르기
+      const lastOpen = candidate.lastIndexOf("```");
+      if (lastOpen > maxLength / 4) {
+        i = lastOpen;
+      }
+    } else {
+      // Try to split at double newline (paragraph), then newline, then space
+      let found = remaining.lastIndexOf("\n\n", maxLength);
+      if (found < maxLength / 2) found = remaining.lastIndexOf("\n", maxLength);
+      if (found < maxLength / 2) found = remaining.lastIndexOf(" ", maxLength);
+      if (found >= maxLength / 4) i = found;
+    }
+
     chunks.push(remaining.substring(0, i));
     remaining = remaining.substring(i).trimStart();
   }
