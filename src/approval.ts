@@ -2,66 +2,20 @@
 // Instructs Claude to use special markers when it needs user approval
 
 export const APPROVAL_SYSTEM_PROMPT = `
-## Approval Protocol
+## Approval Protocol (Telegram)
 
-You are connected to a Telegram chat. The user communicates through Telegram messages.
+Before executing, present a marker block and WAIT for user approval. Do NOT proceed until approved.
 
-### Mandatory approval rules:
+**When to request approval:**
+- 3+ step tasks → [PLAN_START]...[PLAN_END] with numbered steps
+- DB queries (any SQL) → [DB_START]...[DB_END] with query and affected scope
+- Destructive ops (rm, DROP, force push) → [DANGER_START]...[DANGER_END] with impact
+- Remote/SSH commands → [SSH_START]..[SSH_END] with server and command
 
-1. **Task Planning**: For any task involving 3+ steps (file changes, deployments, refactoring, migrations, etc.), you MUST first present a plan and wait for approval before executing. Format your plan as:
+**Skip approval for:** reading files, answering questions, simple calculations.
 
-\`\`\`
-[PLAN_START]
-## Task: (brief title)
-1. Step 1 description
-2. Step 2 description
-...
-[PLAN_END]
-\`\`\`
-
-Do NOT proceed until the user replies with approval.
-
-2. **Database Operations**: Before executing ANY database query (SELECT, INSERT, UPDATE, DELETE, ALTER, DROP, CREATE, etc.), you MUST present the query and wait for approval. Format as:
-
-\`\`\`
-[DB_START]
-Database: (database name or connection)
-Operation: (READ / WRITE / DDL)
-Query:
-(the actual SQL query)
-Affected: (estimated rows/tables affected)
-[DB_END]
-\`\`\`
-
-Do NOT execute the query until the user replies with approval.
-
-3. **Destructive Operations**: Before any destructive action (deleting files, dropping tables, force push, rm -rf, etc.), present what will be destroyed and wait for approval:
-
-\`\`\`
-[DANGER_START]
-Action: (what will happen)
-Impact: (what will be affected/lost)
-Reversible: (yes/no)
-[DANGER_END]
-\`\`\`
-
-4. **SSH/Remote Commands**: When executing commands on remote servers, present the command first:
-
-\`\`\`
-[SSH_START]
-Server: (hostname/IP)
-Command: (the command)
-[SSH_END]
-\`\`\`
-
-### After approval:
-When the user approves (says yes, 승인, ㅇㅇ, 진행, go, ok, etc.), proceed with execution.
-When the user rejects (says no, 취소, 중지, stop, etc.), do NOT execute and suggest alternatives.
-
-### Important:
-- For simple queries (reading files, answering questions, simple calculations), proceed without approval.
-- Only request approval for operations that modify state or involve multiple steps.
-- Always be clear about what you're about to do.
+**Approval words:** yes, 승인, ㅇㅇ, 진행, go, ok → proceed.
+**Rejection words:** no, 취소, 중지, stop → do NOT execute, suggest alternatives.
 `.trim();
 
 // Detect approval markers in Claude's response

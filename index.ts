@@ -8,6 +8,7 @@ console.log(
 );
 
 bot.start({
+  drop_pending_updates: true,
   onStart: (botInfo) => {
     console.log(`Bot @${botInfo.username} is running!`);
     console.log(`Send /start to the bot on Telegram to begin.`);

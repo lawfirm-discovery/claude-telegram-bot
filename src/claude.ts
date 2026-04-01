@@ -7,17 +7,53 @@ import { APPROVAL_SYSTEM_PROMPT } from "./approval";
 
 const CLAUDE_PATH = process.env.CLAUDE_PATH || "claude";
 const CLAUDE_MODEL = process.env.CLAUDE_MODEL || "claude-opus-4-6";
+const CLAUDE_LIGHT_MODEL = process.env.CLAUDE_LIGHT_MODEL || "claude-sonnet-4-6";
+const CLAUDE_EFFORT = process.env.CLAUDE_EFFORT || "medium"; // low | medium | high | max
+const ENABLE_MODEL_ROUTING = process.env.ENABLE_MODEL_ROUTING !== "false"; // default: true
 const SESSION_TTL_MS = parseInt(process.env.SESSION_TTL_MS || "3600000");
-const MAX_TURNS = parseInt(process.env.MAX_TURNS || "0");
+const MAX_TURNS = parseInt(process.env.MAX_TURNS || "20");
 const USER_SYSTEM_PROMPT = process.env.SYSTEM_PROMPT || "";
 const TIMEOUT_MS = parseInt(process.env.TIMEOUT_MS || "2700000"); // 45 min default
 const INACTIVITY_TIMEOUT_MS = parseInt(process.env.INACTIVITY_TIMEOUT_MS || "600000"); // 10 min no-output kill
 const MAX_PROMPT_ARG_CHARS = 100_000;
 const DEBOUNCE_MS = parseInt(process.env.DEBOUNCE_MS || "1500");
+const ALLOWED_TOOLS = process.env.ALLOWED_TOOLS || "Bash,Edit,Read,Write,Glob,Grep,Agent,WebFetch,WebSearch";
+const USE_BARE_MODE = process.env.USE_BARE_MODE === "true"; // default: false (--bare disables OAuth)
 
 const SYSTEM_PROMPT = [APPROVAL_SYSTEM_PROMPT, USER_SYSTEM_PROMPT]
   .filter(Boolean)
   .join("\n\n");
+
+// ═══════════════════════════════════════════════════════════════
+// Model routing: route simple messages to lighter model
+// ═══════════════════════════════════════════════════════════════
+
+const COMPLEX_PATTERNS = [
+  // Code task keywords
+  /\b(코드|code|구현|implement|리팩터|refactor|빌드|build|deploy|배포|디버그|debug|fix|버그|수정|migration)\b/i,
+  // File operations
+  /\b(파일|file|디렉토리|directory|폴더|folder|생성|create|삭제|delete|수정|edit|변경|change|작성|write)\b/i,
+  // Multi-step indicators
+  /\b(그리고|그 다음|그런 다음|and then|after that|step\s*\d|단계)\b/i,
+  // SSH / DB / server
+  /\b(ssh|서버|server|데이터베이스|database|db|sql|docker|git|커밋|commit|push|pull)\b/i,
+  // Attachments usually mean complex tasks
+  /\.(ts|js|py|go|rs|java|tsx|jsx|json|yaml|yml|toml|sh|sql|csv)\b/i,
+];
+
+function selectModel(message: string, hasAttachments: boolean): { model: string; effort: string } {
+  if (!ENABLE_MODEL_ROUTING) return { model: CLAUDE_MODEL, effort: CLAUDE_EFFORT };
+  if (hasAttachments) return { model: CLAUDE_MODEL, effort: "high" };
+
+  const isComplex = COMPLEX_PATTERNS.some((p) => p.test(message));
+  const isLong = message.length > 500;
+
+  if (isComplex || isLong) {
+    return { model: CLAUDE_MODEL, effort: CLAUDE_EFFORT };
+  }
+  // Simple question/chat → lighter model
+  return { model: CLAUDE_LIGHT_MODEL, effort: "low" };
+}
 
 // ═══════════════════════════════════════════════════════════════
 // Error classification
@@ -289,16 +325,30 @@ function executeClaudeCli(
   }
 
   const useResume = !session.isFirstTurn;
-  const baseArgs: string[] = ["-p", "--verbose", "--output-format", "stream-json", "--permission-mode", "bypassPermissions"];
+  const hasAttachments = !!(attachments && attachments.length > 0);
+  const routing = selectModel(message, hasAttachments);
+
+  const baseArgs: string[] = [
+    "-p", "--verbose",
+    "--output-format", "stream-json",
+    "--permission-mode", "bypassPermissions",
+    "--effort", routing.effort,
+  ];
+
+  if (USE_BARE_MODE) baseArgs.push("--bare");
+  if (ALLOWED_TOOLS) baseArgs.push("--tools", ALLOWED_TOOLS);
+
+  if (MAX_TURNS > 0) baseArgs.push("--max-turns", String(MAX_TURNS));
 
   if (useResume) {
     baseArgs.push("--resume", session.sessionId);
   } else {
-    baseArgs.push("--model", CLAUDE_MODEL);
-    if (MAX_TURNS > 0) baseArgs.push("--max-turns", String(MAX_TURNS));
+    baseArgs.push("--model", routing.model);
     baseArgs.push("--session-id", session.sessionId);
     if (SYSTEM_PROMPT) baseArgs.push("--append-system-prompt", SYSTEM_PROMPT);
   }
+
+  console.log(`[Claude] Routing: model=${routing.model} effort=${routing.effort} resume=${useResume} chat=${chatId}`);
 
   const useStdin = fullPrompt.length > MAX_PROMPT_ARG_CHARS;
   if (!useStdin) baseArgs.splice(1, 0, fullPrompt);
