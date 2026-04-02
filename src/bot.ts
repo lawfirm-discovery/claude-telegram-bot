@@ -7,6 +7,14 @@ import {
   type ApprovalRequest,
 } from "./approval";
 import { escapeHtml, markdownToTelegramHtml, splitMessage } from "./format";
+import {
+  setAwaitingSearch, clearAwaitingSearch, isAwaitingSearch,
+  setSelectedCompany, getSelectedCompany, selectFromResults,
+  mainMenuKeyboard, companySelectedKeyboard, backKeyboard,
+  mainMenuMessage, searchPromptMessage, needsCompanyMessage,
+  doSearch, doInfo, doFinance, doDisclosure, doEvidence,
+  type SelectedCompany, type ActionResult,
+} from "./menus/company";
 import { mkdtemp, writeFile, unlink } from "fs/promises";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -76,6 +84,7 @@ bot.command("start", async (ctx) => {
       `Model: ${process.env.CLAUDE_MODEL || "claude-opus-4-6"}\n` +
       `Your ID: ${ctx.from?.id}\n\n` +
       `/new — New conversation\n` +
+      `/company — 기업정보 증거서비스\n` +
       `/model — Current model\n` +
       `/stats — Session stats\n` +
       `/pair <code> — Approve user`
@@ -113,9 +122,25 @@ bot.command("pair", async (ctx) => {
   await ctx.reply(`✅ User ${targetUserId} approved.`);
 });
 
-// --- Approval callback handler ---
+// --- /company: 기업정보 증거서비스 메뉴 ---
+bot.command("company", async (ctx) => {
+  const chatId = ctx.chat.id.toString();
+  const selected = getSelectedCompany(chatId);
+  const kb = selected ? companySelectedKeyboard() : mainMenuKeyboard();
+  await ctx.reply(mainMenuMessage(selected), { parse_mode: "HTML", reply_markup: kb });
+});
+
+// --- Callback handler ---
 bot.on("callback_query:data", async (ctx) => {
   const data = ctx.callbackQuery.data;
+
+  // ── 기업정보 메뉴 콜백 ──
+  if (data.startsWith("co:")) {
+    await handleCompanyCallback(ctx, data);
+    return;
+  }
+
+  // ── Approval 콜백 ──
   const isApprove = data.startsWith("approve:");
   const isReject = data.startsWith("reject:");
 
@@ -419,10 +444,148 @@ async function sendApprovalRequest(
   );
 }
 
+// --- 기업정보 콜백 핸들러 ---
+async function handleCompanyCallback(ctx: any, data: string): Promise<void> {
+  const chatId = ctx.chat.id.toString();
+  const action = data.slice(3); // strip "co:"
+
+  if (action === "menu") {
+    const selected = getSelectedCompany(chatId);
+    const kb = selected ? companySelectedKeyboard() : mainMenuKeyboard();
+    await ctx.answerCallbackQuery();
+    await ctx.editMessageText(mainMenuMessage(selected), { parse_mode: "HTML", reply_markup: kb });
+    return;
+  }
+
+  if (action === "search") {
+    setAwaitingSearch(chatId);
+    await ctx.answerCallbackQuery();
+    try {
+      await ctx.editMessageText(searchPromptMessage(), { parse_mode: "HTML", reply_markup: backKeyboard() });
+    } catch {
+      await ctx.reply(searchPromptMessage(), { parse_mode: "HTML", reply_markup: backKeyboard() });
+    }
+    return;
+  }
+
+  // co:sel:INDEX — 검색 결과에서 기업 선택
+  if (action.startsWith("sel:")) {
+    const index = parseInt(action.slice(4), 10);
+    const company = selectFromResults(chatId, index);
+    if (!company) {
+      await ctx.answerCallbackQuery({ text: "선택할 수 없습니다" });
+      return;
+    }
+    await ctx.answerCallbackQuery({ text: `${company.name} 선택됨` });
+    await ctx.editMessageText(
+      mainMenuMessage(company),
+      { parse_mode: "HTML", reply_markup: companySelectedKeyboard() },
+    );
+    return;
+  }
+
+  // info, finance, disc, evidence → 기업 선택 필요
+  const selected = getSelectedCompany(chatId);
+  if (!selected && action !== "evidence") {
+    await ctx.answerCallbackQuery({ text: "먼저 기업을 검색해주세요" });
+    try {
+      await ctx.editMessageText(needsCompanyMessage(), {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard().text("기업 검색", "co:search").text("◂ 메뉴", "co:menu"),
+      });
+    } catch {}
+    return;
+  }
+
+  const actionMap: Record<string, (chatId: string) => Promise<ActionResult>> = {
+    info: doInfo,
+    finance: doFinance,
+    disc: doDisclosure,
+    evidence: doEvidence,
+  };
+
+  const handler = actionMap[action];
+  if (!handler) { await ctx.answerCallbackQuery(); return; }
+
+  const labelMap: Record<string, string> = {
+    info: "기업 개황",
+    finance: "재무제표",
+    disc: "공시 검색",
+    evidence: "증거 수집",
+  };
+
+  await ctx.answerCallbackQuery({ text: `${labelMap[action]} 조회 중...` });
+
+  // "조회 중" 상태 표시
+  const name = selected?.name || "";
+  try {
+    await ctx.editMessageText(
+      `<b>${escapeHtml(name)}</b> ─ ${labelMap[action]} 조회 중...`,
+      { parse_mode: "HTML" },
+    );
+  } catch {}
+
+  // DART API 시도 → 폴백
+  const result = await handler(chatId);
+  await sendActionResult(ctx, chatId, result);
+}
+
+/** ActionResult를 텔레그램으로 전송 */
+async function sendActionResult(ctx: any, chatId: string, result: ActionResult): Promise<void> {
+  if (result.type === "direct") {
+    // DART API 직접 응답 → HTML로 바로 전송
+    try {
+      await ctx.reply(result.html, {
+        parse_mode: "HTML",
+        reply_markup: result.keyboard,
+        link_preview_options: { is_disabled: true },
+      });
+    } catch {
+      // HTML 파싱 실패 시 plain text 폴백
+      await ctx.reply(result.html.replace(/<[^>]+>/g, ""), {
+        reply_markup: result.keyboard,
+      });
+    }
+  } else {
+    // Claude WebSearch 폴백
+    await handleMessage(ctx, chatId, result.prompt);
+    // 폴백 후에도 추가 액션 키보드 표시
+    const sel = getSelectedCompany(chatId);
+    if (sel) {
+      await ctx.reply(
+        `▸ <b>${escapeHtml(sel.name)}</b> ─ 추가 조회`,
+        { parse_mode: "HTML", reply_markup: companySelectedKeyboard() },
+      );
+    }
+  }
+}
+
 // --- Message handlers ---
 bot.on("message:text", async (ctx) => {
   const text = ctx.message.text;
   if (!text || text.startsWith("/")) return;
+
+  const chatId = ctx.chat.id.toString();
+
+  // 기업 검색 입력 대기 중이면 DART API 검색 시도
+  if (isAwaitingSearch(chatId)) {
+    clearAwaitingSearch(chatId);
+    const query = text.trim();
+
+    // "검색 중" 표시
+    const loadingMsg = await ctx.reply(
+      `<b>${escapeHtml(query)}</b> ─ 검색 중...`,
+      { parse_mode: "HTML" },
+    );
+
+    const result = await doSearch(chatId, query);
+
+    // 로딩 메시지 삭제
+    try { await bot.api.deleteMessage(ctx.chat.id, loadingMsg.message_id); } catch {}
+
+    await sendActionResult(ctx, chatId, result);
+    return;
+  }
 
   // Group: only respond when mentioned (use cached bot info)
   if (ctx.chat.type !== "private") {
