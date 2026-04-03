@@ -52,7 +52,22 @@
   3. `git push origin dev-hs-rtx6000-new` — rtx6000에 변경 전달
   4. rtx6000이 1분마다 자동 pull → 서비스 자동 반영 (HMR/DevTools/reload)
 - **서비스 재시작 필요 시**: rtx6000 봇(@rtx6000_claude_style_bot)에게 요청
-- **절대 금지**: 다른 서버에서 `pm2 start`, `systemctl start`, `bootRun` 등 서비스 직접 실행
+- **다른 서버에서 절대 금지**:
+  - 서비스 실행: `pm2 start`, `systemctl start`, `bootRun`
+  - Frontend 빌드: `npm run build`, `npx craco build`, `npx vite build`
+  - Spring 빌드: `./gradlew build`, `./gradlew bootRun`, `./gradlew compileJava`
+  - Flutter 빌드: `flutter build web`
+  - 빌드는 rtx6000의 auto-pull이 자동 검증함. 에러 시 텔레그램 알림 발송
+- **rtx6000 로컬 작업 시 반드시 push**: rtx6000에서 직접 코드를 수정·커밋한 경우 **즉시 push**할 것. auto-pull이 `--ff-only`로 동작하므로, unpushed 로컬 커밋이 남아있으면 다른 서버의 push를 pull할 수 없어 동기화가 멈춤
+
+### 🚨 이 PC(Windows)는 빌드 금지
+- 이 PC는 코드 수정 & 푸시만 담당. **빌드는 rtx6000 개발서버의 auto-pull이 자동 처리**
+- **절대 실행 금지**:
+  - Frontend: `npm run build`, `npx vite build`, `craco build`
+  - Spring: `./gradlew build`, `./gradlew bootRun`, `./gradlew compileJava`
+  - Flutter: `flutter build web`
+  - 서비스 실행: `pm2 start`, `systemctl start`, `bootRun`
+- 검증은 타입체크/린트 수준만. 빌드 검증은 rtx6000이 담당
 
 ### 점진적 작업 (리스크 최소화)
 - 얇은 수직 슬라이스 선호
@@ -116,13 +131,28 @@
 - 포맷팅 변경과 동작 변경 분리
 
 ### 커밋 & 푸시 절차 (필수)
-1. `git diff` / `git status`로 의도한 변경만 포함 확인
-2. 빌드 검증
-3. 린트/타입체크
-4. 테스트
-5. 관련 파일만 `git add` → 원자적 커밋 메시지
-6. 에러 없음 → 바로 푸시 / 에러 → 자동 수정 시도 / 수정 불가 → 보고
-7. 푸시 후 변경 요약 보고
+<<<<<<< Updated upstream
+1. **변경 확인**: `git diff` / `git status`로 의도한 변경만 포함 확인
+2. **검증**: 타입체크/린트 수준만 확인 (빌드는 rtx6000 auto-pull이 처리)
+   - **⚠️ 이 PC에서 빌드 실행 금지** — rtx6000만 빌드 담당
+   - FastAPI: import 에러 없음 확인 가능
+3. **커밋**: 관련 파일만 `git add` → 원자적 커밋 메시지
+4. **푸시 판단**:
+   - ✅ 에러 없음 → **바로 푸시** (사용자 확인 불필요)
+   - ⚠️ 에러 발생 → **자동 수정 시도** → 수정 후 재실행
+   - ❌ 수정 불가 → **사용자에게 보고** (에러 내용 + 시도한 수정 + 제안)
+5. **푸시 후**: 변경 요약 보고 (파일 수, 커밋 메시지, 브랜치)
+
+---
+
+## 완료 정의 (Definition of Done)
+
+- 동작이 수락 기준과 일치
+- 테스트/린트/타입체크 통과 (또는 미실행 사유 문서화)
+- 위험한 변경은 롤백/플래그 전략 보유
+- 기존 컨벤션 준수, 가독성 확보
+- 검증 스토리 존재: "무엇이 변했고 + 어떻게 동작 확인했는지"
+>>>>>>> Stashed changes
 
 ---
 
@@ -133,6 +163,16 @@
 - **포트 3000 사용 금지** — Docker open-webui 점유 중
 - **JAR 빌드(`bootJar`) 금지** — `bootRun` 사용
 - **세 레포 모두 `dev-hs-rtx6000-new` 브랜치** — 다른 브랜치 checkout 금지
+- **Frontend: `craco`, `npm run build` 실행 금지** — Vite로 완전 마이그레이션됨. `craco build`, `npm run build`, `npx craco`는 레거시 CRA 빌드로 CPU 200%+ 점유하여 서버 장애 유발. 빌드 검증은 `npx vite build` 사용
+
+### 🚨 웹-앱 동기화 규칙 (필수)
+리걸몬스터 웹(`lemon-front`)과 Flutter 앱(`lemon_flutter`)은 **동일한 기능을 제공**해야 한다.
+- **Frontend 수정 시**: 동일한 기능이 Flutter에도 존재하면 Flutter도 함께 수정
+- **Flutter 수정 시**: 동일한 기능이 Frontend에도 존재하면 Frontend도 함께 수정
+- **API 변경 시(Spring/FastAPI)**: 웹과 앱 양쪽의 호출부를 모두 확인하고 수정
+- **대상 범위**: UI 동작, API 호출, 비즈니스 로직, 에러 처리, 데이터 표시 형식
+- **제외**: 플랫폼 고유 기능(모바일 푸시 알림, 웹 전용 SEO 등)은 해당 플랫폼만 수정
+- **작업 절차**: 웹 수정 → 웹 검증 → Flutter 동기화 수정 → Flutter 검증 → 양쪽 커밋 & 푸시
 
 ### 🚨 응답 필수 포함 (Response Footer) — 예외 없음!
 리걸몬스터 관련 **모든** 응답 끝에 아래 2줄 필수:
@@ -155,7 +195,7 @@
 | 작업 브랜치 | `dev-hs-rtx6000-new` (모든 저장소) |
 | Config Vault | http://100.117.168.53:8070 (bot:lemon2024!) |
 
-### 빌드 & 실행
+### 빌드 & 실행 (rtx6000 전용)
 ```bash
 # Spring 실행
 sudo systemctl restart lemon-spring-api
