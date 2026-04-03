@@ -139,7 +139,53 @@ export function getSession(chatId: string): Session {
   return session;
 }
 
-export function clearSession(chatId: string): void { sessions.delete(chatId); saveSessions(); }
+export function clearSession(chatId: string): void { sessions.delete(chatId); lastHud.delete(chatId); saveSessions(); }
+
+// ═══════════════════════════════════════════════════════════════
+// HUD: per-chat context usage tracking
+// ═══════════════════════════════════════════════════════════════
+
+export interface HudInfo {
+  inputTokens: number;
+  outputTokens: number;
+  cacheRead: number;
+  totalTokens: number;
+  contextPercent: number;   // 0–100
+  turnNumber: number;
+  durationSec: number;
+}
+
+const MAX_CONTEXT_TOKENS: Record<string, number> = {
+  "claude-opus-4-6": 200_000,
+  "claude-sonnet-4-6": 200_000,
+  "claude-haiku-4-5": 200_000,
+};
+const DEFAULT_MAX_CONTEXT = 200_000;
+
+const lastHud = new Map<string, HudInfo>();
+
+function updateHud(chatId: string, result: ParsedResult, turnNumber: number): void {
+  const maxCtx = MAX_CONTEXT_TOKENS[CLAUDE_MODEL] || DEFAULT_MAX_CONTEXT;
+  const totalTokens = result.inputTokens + result.outputTokens;
+  const contextPercent = Math.min(100, Math.round((result.inputTokens / maxCtx) * 100));
+  lastHud.set(chatId, {
+    inputTokens: result.inputTokens,
+    outputTokens: result.outputTokens,
+    cacheRead: result.cacheRead,
+    totalTokens,
+    contextPercent,
+    turnNumber,
+    durationSec: result.durationMs ? Math.round(result.durationMs / 1000) : 0,
+  });
+}
+
+export function getHudInfo(chatId: string): HudInfo | null {
+  return lastHud.get(chatId) || null;
+}
+
+export function clearHud(chatId: string): void {
+  lastHud.delete(chatId);
+}
 
 export function getSessionStats(): { active: number } {
   const now = Date.now();
@@ -299,7 +345,7 @@ async function runClaudeWithRetry(
         throw err;
       }
 
-      const delay = delays[attempt];
+      const delay = delays[attempt] ?? 0;
       console.log(`[Claude] ${reason} for chat=${chatId}, retry #${attempt + 1} in ${delay / 1000}s`);
 
       if (reason === "session_expired") {
@@ -550,6 +596,7 @@ function executeClaudeCli(
           ` duration=${result.durationMs ? Math.round(result.durationMs / 1000) + "s" : "?"}`
         );
 
+        updateHud(chatId, result, turnNumber);
         resolve(result.text || "(empty response)");
       } catch (e: any) {
         console.error(`[Claude] Parse error: ${e.message} stdout_len=${rawStdout.length}`);

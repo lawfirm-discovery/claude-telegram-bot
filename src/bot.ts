@@ -1,5 +1,5 @@
 import { Bot, InlineKeyboard } from "grammy";
-import { askClaude, askClaudeWithProgress, clearSession, getSessionStats, killActiveProcesses, type ProgressInfo } from "./claude";
+import { askClaude, askClaudeWithProgress, clearSession, getSessionStats, getHudInfo, killActiveProcesses, type ProgressInfo } from "./claude";
 import {
   detectApprovalRequest,
   getApprovalEmoji,
@@ -121,7 +121,7 @@ bot.on("callback_query:data", async (ctx) => {
 
   if (!isApprove && !isReject) return;
 
-  const approvalId = data.split(":")[1];
+  const approvalId = data.split(":")[1] ?? "";
   const pending = pendingApprovals.get(approvalId);
 
   if (!pending) {
@@ -170,7 +170,7 @@ bot.on("callback_query:data", async (ctx) => {
       if (nextApproval) {
         await sendApprovalRequest(ctx, chatId, nextApproval, response);
       } else {
-        await sendResponse(ctx, response);
+        await sendResponse(ctx, response, chatId);
       }
     } catch (error: any) {
       clearInterval(typingInterval);
@@ -200,7 +200,7 @@ bot.on("callback_query:data", async (ctx) => {
         chatId,
         "거절합니다. 실행하지 마세요."
       );
-      await sendResponse(ctx, response);
+      await sendResponse(ctx, response, chatId);
     } catch {}
   }
 });
@@ -239,8 +239,35 @@ function isBotMentioned(text: string, botUsername: string): boolean {
   return false;
 }
 
+// HUD: context usage bar
+function formatHud(chatId: string): string | null {
+  const hud = getHudInfo(chatId);
+  if (!hud || hud.inputTokens === 0) return null;
+
+  const pct = hud.contextPercent;
+  const filled = Math.round(pct / 10);
+  const bar = "█".repeat(filled) + "░".repeat(10 - filled);
+  const color = pct < 50 ? "🟢" : pct < 80 ? "🟡" : "🔴";
+
+  const tokensK = (n: number) => n >= 1000 ? `${(n / 1000).toFixed(0)}K` : `${n}`;
+  const duration = hud.durationSec > 0
+    ? (hud.durationSec >= 60 ? `${Math.floor(hud.durationSec / 60)}m${hud.durationSec % 60}s` : `${hud.durationSec}s`)
+    : "";
+
+  const parts = [
+    `${color} Context: ${bar} ${pct}% (${tokensK(hud.inputTokens)}/200K)`,
+  ];
+  const meta: string[] = [];
+  if (hud.turnNumber > 0) meta.push(`🔄 Turn ${hud.turnNumber}`);
+  if (duration) meta.push(`⏱ ${duration}`);
+  if (hud.cacheRead > 0) meta.push(`📦 Cache ${tokensK(hud.cacheRead)}`);
+  if (meta.length > 0) parts.push(meta.join(" | "));
+
+  return parts.join("\n");
+}
+
 // OpenClaw style: send response as HTML with auto-chunking, fallback to plain text
-async function sendResponse(ctx: any, text: string): Promise<void> {
+async function sendResponse(ctx: any, text: string, chatId?: string): Promise<void> {
   // Chunk raw markdown first, then convert each chunk to HTML
   const chunks = splitMessage(text);
   for (const chunk of chunks) {
@@ -250,6 +277,18 @@ async function sendResponse(ctx: any, text: string): Promise<void> {
     } catch {
       // Fallback: plain text (no formatting)
       await ctx.reply(chunk);
+    }
+  }
+
+  // HUD footer (after last chunk)
+  if (chatId) {
+    const hudText = formatHud(chatId);
+    if (hudText) {
+      try {
+        await ctx.reply(`<code>${escapeHtml(hudText)}</code>`, { parse_mode: "HTML" });
+      } catch {
+        try { await ctx.reply(hudText); } catch {}
+      }
     }
   }
 }
@@ -350,7 +389,7 @@ async function handleMessage(
     if (approval) {
       await sendApprovalRequest(ctx, chatId, approval, response);
     } else {
-      await sendResponse(ctx, response);
+      await sendResponse(ctx, response, chatId);
     }
   } catch (error: any) {
     clearInterval(typingInterval);
@@ -388,7 +427,7 @@ async function sendApprovalRequest(
   const label = getApprovalLabel(approval.type);
 
   // Send the text before the marker
-  const beforeMarker = fullResponse.split(`[${approval.type.toUpperCase()}_START]`)[0].trim();
+  const beforeMarker = (fullResponse.split(`[${approval.type.toUpperCase()}_START]`)[0] ?? "").trim();
   if (beforeMarker) {
     await sendResponse(ctx, beforeMarker);
   }
