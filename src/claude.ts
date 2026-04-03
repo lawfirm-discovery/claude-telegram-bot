@@ -565,9 +565,10 @@ function executeClaudeCli(
 
       if (code !== 0) {
         console.error(`[Claude] exit=${code} stderr=${stderr.slice(0, 300)}`);
-        // exit=1 + empty stderr during resume → likely session lock/conflict
+        // exit=1 + empty stderr → session lock/conflict or transient error
+        // classify as session_expired to trigger retry with fresh session
         const errMsg = stderr.split("\n").filter(Boolean)[0]
-          || (useResume ? "session not found" : `Claude exited with code ${code}`);
+          || "session not found";
         reject(new Error(errMsg));
         return;
       }
