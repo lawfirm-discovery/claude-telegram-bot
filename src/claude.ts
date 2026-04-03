@@ -19,6 +19,7 @@ const MAX_PROMPT_ARG_CHARS = 100_000;
 const DEBOUNCE_MS = parseInt(process.env.DEBOUNCE_MS || "1500");
 const ALLOWED_TOOLS = process.env.ALLOWED_TOOLS || ""; // 빈 값이면 --tools 미전달 (모든 도구 + MCP 도구 사용 가능)
 const USE_BARE_MODE = process.env.USE_BARE_MODE === "true"; // default: false (--bare disables OAuth)
+const WORKING_DIR = process.env.WORKING_DIR || ""; // Claude CLI 작업 디렉토리 (리걸몬스터 레포 접근용)
 
 const SYSTEM_PROMPT = [APPROVAL_SYSTEM_PROMPT, USER_SYSTEM_PROMPT]
   .filter(Boolean)
@@ -354,10 +355,13 @@ function executeClaudeCli(
   if (!useStdin) baseArgs.splice(1, 0, fullPrompt);
 
   return new Promise((resolve, reject) => {
-    const proc = spawn(CLAUDE_PATH, baseArgs, {
+    const spawnOpts: any = {
       env: { ...process.env, NO_COLOR: "1", TELEGRAM_BOT_TOKEN: "" },
       stdio: ["pipe", "pipe", "pipe"],
-    });
+    };
+    if (WORKING_DIR) spawnOpts.cwd = WORKING_DIR;
+
+    const proc = spawn(CLAUDE_PATH, baseArgs, spawnOpts);
 
     activeProcesses.add(proc);
 
