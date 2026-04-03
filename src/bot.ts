@@ -1,5 +1,6 @@
 import { Bot, InlineKeyboard } from "grammy";
 import { askClaude, askClaudeWithProgress, clearSession, getSessionStats, getHudInfo, killActiveProcesses, type ProgressInfo } from "./claude";
+import { appendMemoryLog } from "./openclaw";
 import {
   detectApprovalRequest,
   getApprovalEmoji,
@@ -384,6 +385,10 @@ async function handleMessage(
     }
 
     if (didAck) await removeAckReaction(ctx);
+
+    // OpenClaw: 대화 기록을 메모리에 로깅
+    appendMemoryLog(`User[${chatId}]: ${text.slice(0, 100)}${text.length > 100 ? "..." : ""}`);
+    appendMemoryLog(`Bot[${chatId}]: ${response.slice(0, 100)}${response.length > 100 ? "..." : ""}`);
 
     const approval = detectApprovalRequest(response);
     if (approval) {

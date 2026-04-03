@@ -4,6 +4,7 @@ import { join, dirname } from "path";
 import { readFileSync, writeFileSync, renameSync } from "fs";
 
 import { APPROVAL_SYSTEM_PROMPT } from "./approval";
+import { loadSystemPrompt, appendMemoryLog } from "./openclaw";
 
 const CLAUDE_PATH = process.env.CLAUDE_PATH || "claude";
 const CLAUDE_MODEL = process.env.CLAUDE_MODEL || "claude-opus-4-6";
@@ -20,7 +21,9 @@ const DEBOUNCE_MS = parseInt(process.env.DEBOUNCE_MS || "1500");
 const ALLOWED_TOOLS = process.env.ALLOWED_TOOLS || ""; // 빈 값이면 --tools 미전달 (모든 도구 + MCP 도구 사용 가능)
 const USE_BARE_MODE = process.env.USE_BARE_MODE === "true"; // default: false (--bare disables OAuth)
 
-const SYSTEM_PROMPT = [APPROVAL_SYSTEM_PROMPT, USER_SYSTEM_PROMPT]
+// OpenClaw: SOUL.md + AGENTS.md + MEMORY.md → system prompt
+const OPENCLAW_PROMPT = loadSystemPrompt();
+const SYSTEM_PROMPT = [OPENCLAW_PROMPT, APPROVAL_SYSTEM_PROMPT, USER_SYSTEM_PROMPT]
   .filter(Boolean)
   .join("\n\n");
 
