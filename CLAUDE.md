@@ -45,14 +45,20 @@
 
 ### 멀티서버 작업 규칙
 - **rtx6000 = 중앙 개발 서버**: 개발 서비스(Frontend, Spring, FastAPI)를 실행하는 유일한 서버
-- **다른 서버(A4500, 3060 등)**: 코드 수정 & 푸시만 담당, 서비스 실행 금지
+- **다른 서버(A4500, 3060 등)**: 코드 수정 & 푸시만 담당, 서비스 실행 및 빌드 금지
 - **다른 서버 작업 절차**:
   1. `git pull origin dev-hs-rtx6000-new` — 최신 코드 가져오기
-  2. 코드 수정 & 빌드 검증 (로컬에서 빌드 에러 없는지만 확인)
+  2. 코드 수정 (타입체크/린트 수준만 확인, 빌드 실행 금지)
   3. `git push origin dev-hs-rtx6000-new` — rtx6000에 변경 전달
-  4. rtx6000이 1분마다 자동 pull → 서비스 자동 반영 (HMR/DevTools/reload)
+  4. rtx6000이 1분마다 자동 pull → 빌드·서비스 자동 반영
 - **서비스 재시작 필요 시**: rtx6000 봇(@rtx6000_claude_style_bot)에게 요청
-- **절대 금지**: 다른 서버에서 `pm2 start`, `systemctl start`, `bootRun` 등 서비스 직접 실행
+- **다른 서버에서 절대 금지**:
+  - 서비스 실행: `pm2 start`, `systemctl start`, `bootRun`
+  - Frontend 빌드: `npm run build`, `npx craco build`, `npx vite build`
+  - Spring 빌드: `./gradlew build`, `./gradlew bootRun`, `./gradlew compileJava`
+  - Flutter 빌드: `flutter build web`
+  - 빌드는 rtx6000의 auto-pull이 자동 검증함. 에러 시 텔레그램 알림 발송
+- **rtx6000 로컬 작업 시 반드시 push**: rtx6000에서 직접 코드를 수정·커밋한 경우 **즉시 push**할 것. auto-pull이 `--ff-only`로 동작하므로, unpushed 로컬 커밋이 남아있으면 다른 서버의 push를 pull할 수 없어 동기화가 멈춤
 
 ### 점진적 작업 (리스크 최소화)
 - 얇은 수직 슬라이스 선호
