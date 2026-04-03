@@ -1,6 +1,6 @@
 import { Bot, InlineKeyboard } from "grammy";
 import { askClaude, askClaudeWithProgress, clearSession, getSessionStats, getHudInfo, killActiveProcesses, type ProgressInfo } from "./claude";
-import { appendMemoryLog } from "./openclaw";
+import { appendMemoryLog } from "./lemonclaw";
 import {
   detectApprovalRequest,
   getApprovalEmoji,
@@ -28,7 +28,7 @@ const GROUP_MENTION_PATTERNS = (process.env.GROUP_MENTION_PATTERNS || "")
 
 const bot = new Bot(BOT_TOKEN);
 
-// Pairing system (OpenClaw style)
+// Pairing system (LemonClaw style)
 const pendingPairings = new Map<string, number>();
 const approvedUsers = new Set<number>(ALLOWED_USERS);
 
@@ -137,7 +137,7 @@ bot.on("callback_query:data", async (ctx) => {
   const label = getApprovalLabel(request.type);
 
   if (isApprove) {
-    // Update button message (HTML mode, OpenClaw style)
+    // Update button message (HTML mode, LemonClaw style)
     try {
       await ctx.editMessageText(
         `${emoji} <b>${label}</b> ✅ 승인됨\n\n<pre><code>${escapeHtmlForApproval(request.content)}</code></pre>`,
@@ -267,7 +267,7 @@ function formatHud(chatId: string): string | null {
   return parts.join("\n");
 }
 
-// OpenClaw style: send response as HTML with auto-chunking, fallback to plain text
+// LemonClaw style: send response as HTML with auto-chunking, fallback to plain text
 async function sendResponse(ctx: any, text: string, chatId?: string): Promise<void> {
   // Chunk raw markdown first, then convert each chunk to HTML
   const chunks = splitMessage(text);
@@ -294,7 +294,7 @@ async function sendResponse(ctx: any, text: string, chatId?: string): Promise<vo
   }
 }
 
-// --- OpenClaw ack reaction helpers ---
+// --- LemonClaw ack reaction helpers ---
 async function addAckReaction(ctx: any): Promise<boolean> {
   try {
     await ctx.react("👀");
@@ -386,7 +386,7 @@ async function handleMessage(
 
     if (didAck) await removeAckReaction(ctx);
 
-    // OpenClaw: 대화 기록을 메모리에 로깅
+    // LemonClaw: 대화 기록을 메모리에 로깅
     appendMemoryLog(`User[${chatId}]: ${text.slice(0, 100)}${text.length > 100 ? "..." : ""}`);
     appendMemoryLog(`Bot[${chatId}]: ${response.slice(0, 100)}${response.length > 100 ? "..." : ""}`);
 

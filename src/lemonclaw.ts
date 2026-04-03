@@ -1,5 +1,5 @@
 /**
- * OpenClaw Engine — SOUL, HEARTBEAT, CRON, HOOKS, MEMORY
+ * LemonClaw Engine — SOUL, HEARTBEAT, CRON, HOOKS, MEMORY
  *
  * 에이전트를 자율적으로 동작하게 만드는 핵심 모듈.
  * - SOUL.md + AGENTS.md → system prompt 주입
@@ -16,14 +16,14 @@ import { join } from "path";
 // Paths
 // ═══════════════════════════════════════════════════════════════
 
-const OPENCLAW_DIR = join(import.meta.dir, "..", ".openclaw");
-const SOUL_PATH = join(OPENCLAW_DIR, "SOUL.md");
-const AGENTS_PATH = join(OPENCLAW_DIR, "AGENTS.md");
-const HEARTBEAT_PATH = join(OPENCLAW_DIR, "HEARTBEAT.md");
-const CRON_PATH = join(OPENCLAW_DIR, "CRON.md");
-const HOOKS_PATH = join(OPENCLAW_DIR, "HOOKS.md");
-const MEMORY_PATH = join(OPENCLAW_DIR, "MEMORY.md");
-const MEMORY_DIR = join(OPENCLAW_DIR, "memory");
+const LEMONCLAW_DIR = join(import.meta.dir, "..", ".lemonclaw");
+const SOUL_PATH = join(LEMONCLAW_DIR, "SOUL.md");
+const AGENTS_PATH = join(LEMONCLAW_DIR, "AGENTS.md");
+const HEARTBEAT_PATH = join(LEMONCLAW_DIR, "HEARTBEAT.md");
+const CRON_PATH = join(LEMONCLAW_DIR, "CRON.md");
+const HOOKS_PATH = join(LEMONCLAW_DIR, "HOOKS.md");
+const MEMORY_PATH = join(LEMONCLAW_DIR, "MEMORY.md");
+const MEMORY_DIR = join(LEMONCLAW_DIR, "memory");
 
 // ═══════════════════════════════════════════════════════════════
 // Config
@@ -84,7 +84,7 @@ export function appendMemoryLog(entry: string): void {
       appendFileSync(logPath, line);
     }
   } catch (e: any) {
-    console.error(`[OpenClaw] Memory log failed: ${e.message}`);
+    console.error(`[LemonClaw] Memory log failed: ${e.message}`);
   }
 }
 
@@ -209,16 +209,16 @@ let cronTimer: ReturnType<typeof setInterval> | null = null;
 
 export function startHeartbeat(askClaude: ClaudeFn, sendTelegram: SendFn): void {
   if (!HEARTBEAT_CHAT_ID) {
-    console.log("[OpenClaw] No HEARTBEAT_CHAT_ID, heartbeat disabled");
+    console.log("[LemonClaw] No HEARTBEAT_CHAT_ID, heartbeat disabled");
     return;
   }
 
   if (HEARTBEAT_INTERVAL_MS <= 0) {
-    console.log("[OpenClaw] Heartbeat interval <= 0, disabled");
+    console.log("[LemonClaw] Heartbeat interval <= 0, disabled");
     return;
   }
 
-  console.log(`[OpenClaw] Heartbeat started: every ${HEARTBEAT_INTERVAL_MS / 1000}s, chat=${HEARTBEAT_CHAT_ID}`);
+  console.log(`[LemonClaw] Heartbeat started: every ${HEARTBEAT_INTERVAL_MS / 1000}s, chat=${HEARTBEAT_CHAT_ID}`);
 
   const runHeartbeat = async () => {
     const checklist = readMd(HEARTBEAT_PATH);
@@ -227,7 +227,7 @@ export function startHeartbeat(askClaude: ClaudeFn, sendTelegram: SendFn): void 
     const prompt = `[HEARTBEAT] 아래 체크리스트를 확인해주세요. Bash 도구로 실제 확인하세요.\n\n${checklist}`;
 
     try {
-      console.log("[OpenClaw] Heartbeat running...");
+      console.log("[LemonClaw] Heartbeat running...");
       const response = await askClaude(HEARTBEAT_CHAT_ID, prompt);
 
       appendMemoryLog(`HEARTBEAT: ${response.slice(0, 200)}`);
@@ -235,12 +235,12 @@ export function startHeartbeat(askClaude: ClaudeFn, sendTelegram: SendFn): void 
       // HEARTBEAT_OK가 아니면 (= 문제 발견) 텔레그램으로 알림
       if (!response.includes("HEARTBEAT_OK")) {
         await sendTelegram(HEARTBEAT_CHAT_ID, `🫀 Heartbeat Alert\n\n${response}`);
-        console.log("[OpenClaw] Heartbeat: issue detected, notified user");
+        console.log("[LemonClaw] Heartbeat: issue detected, notified user");
       } else {
-        console.log("[OpenClaw] Heartbeat: OK");
+        console.log("[LemonClaw] Heartbeat: OK");
       }
     } catch (e: any) {
-      console.error(`[OpenClaw] Heartbeat error: ${e.message}`);
+      console.error(`[LemonClaw] Heartbeat error: ${e.message}`);
       try {
         await sendTelegram(HEARTBEAT_CHAT_ID, `🫀 Heartbeat Error\n\n${e.message}`);
       } catch {}
@@ -258,23 +258,23 @@ export function startHeartbeat(askClaude: ClaudeFn, sendTelegram: SendFn): void 
 
 export function startCron(askClaude: ClaudeFn, sendTelegram: SendFn): void {
   if (!HEARTBEAT_CHAT_ID) {
-    console.log("[OpenClaw] No HEARTBEAT_CHAT_ID, cron disabled");
+    console.log("[LemonClaw] No HEARTBEAT_CHAT_ID, cron disabled");
     return;
   }
 
-  console.log("[OpenClaw] Cron scheduler started (checking every 60s)");
+  console.log("[LemonClaw] Cron scheduler started (checking every 60s)");
 
   cronTimer = setInterval(async () => {
     const jobs = getMatchingCronJobs();
     for (const job of jobs) {
-      console.log(`[OpenClaw] Cron triggered: ${job.prompt.slice(0, 50)}...`);
+      console.log(`[LemonClaw] Cron triggered: ${job.prompt.slice(0, 50)}...`);
       appendMemoryLog(`CRON: ${job.prompt.slice(0, 100)}`);
 
       try {
         const response = await askClaude(HEARTBEAT_CHAT_ID, `[CRON] ${job.prompt}`);
         await sendTelegram(HEARTBEAT_CHAT_ID, `⏰ Cron\n\n${response}`);
       } catch (e: any) {
-        console.error(`[OpenClaw] Cron error: ${e.message}`);
+        console.error(`[LemonClaw] Cron error: ${e.message}`);
         try {
           await sendTelegram(HEARTBEAT_CHAT_ID, `⏰ Cron Error\n\n${e.message}`);
         } catch {}
@@ -296,14 +296,14 @@ export async function fireHook(
 
   const prompts = getHooksForEvent(event);
   for (const prompt of prompts) {
-    console.log(`[OpenClaw] Hook ${event}: ${prompt.slice(0, 50)}...`);
+    console.log(`[LemonClaw] Hook ${event}: ${prompt.slice(0, 50)}...`);
     appendMemoryLog(`HOOK[${event}]: ${prompt.slice(0, 100)}`);
 
     try {
       const response = await askClaude(HEARTBEAT_CHAT_ID, `[HOOK:${event}] ${prompt}`);
       await sendTelegram(HEARTBEAT_CHAT_ID, response);
     } catch (e: any) {
-      console.error(`[OpenClaw] Hook ${event} error: ${e.message}`);
+      console.error(`[LemonClaw] Hook ${event} error: ${e.message}`);
     }
   }
 }
@@ -312,8 +312,8 @@ export async function fireHook(
 // Shutdown
 // ═══════════════════════════════════════════════════════════════
 
-export function stopOpenClaw(): void {
+export function stopLemonClaw(): void {
   if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
   if (cronTimer) { clearInterval(cronTimer); cronTimer = null; }
-  console.log("[OpenClaw] Stopped");
+  console.log("[LemonClaw] Stopped");
 }

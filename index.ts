@@ -1,15 +1,15 @@
 import { bot } from "./src/bot";
 import { askClaude, killActiveProcesses } from "./src/claude";
-import { startHeartbeat, startCron, fireHook, stopOpenClaw, appendMemoryLog } from "./src/openclaw";
+import { startHeartbeat, startCron, fireHook, stopLemonClaw, appendMemoryLog } from "./src/lemonclaw";
 import { markdownToTelegramHtml, splitMessage } from "./src/format";
 
-console.log("Starting Claude Telegram Bot (OpenClaw Edition)...");
+console.log("Starting Claude Telegram Bot (LemonClaw Edition)...");
 console.log(`Model: ${process.env.CLAUDE_MODEL || "claude-opus-4-6"}`);
 console.log(
   `Allowed users: ${process.env.ALLOWED_USERS || "all (no restriction)"}`
 );
 
-// Telegram send helper for OpenClaw autonomous messages
+// Telegram send helper for LemonClaw autonomous messages
 async function sendTelegram(chatId: string, text: string): Promise<void> {
   const chunks = splitMessage(text);
   for (const chunk of chunks) {
@@ -20,7 +20,7 @@ async function sendTelegram(chatId: string, text: string): Promise<void> {
       try {
         await bot.api.sendMessage(parseInt(chatId), chunk);
       } catch (e: any) {
-        console.error(`[OpenClaw] sendTelegram failed: ${e.message}`);
+        console.error(`[LemonClaw] sendTelegram failed: ${e.message}`);
       }
     }
   }
@@ -34,13 +34,13 @@ bot.start({
 
     appendMemoryLog(`Bot started: @${botInfo.username}`);
 
-    // Start OpenClaw autonomous systems
+    // Start LemonClaw autonomous systems
     startHeartbeat(askClaude, sendTelegram);
     startCron(askClaude, sendTelegram);
 
     // Fire on_start hooks
     fireHook("on_start", askClaude, sendTelegram).catch((e) =>
-      console.error(`[OpenClaw] on_start hook error: ${e.message}`)
+      console.error(`[LemonClaw] on_start hook error: ${e.message}`)
     );
   },
 });
@@ -48,7 +48,7 @@ bot.start({
 // Graceful shutdown
 const shutdown = () => {
   console.log("\nShutting down...");
-  stopOpenClaw();
+  stopLemonClaw();
   killActiveProcesses();
   bot.stop();
   process.exit(0);

@@ -1,4 +1,4 @@
-// OpenClaw-style markdown → Telegram HTML conversion
+// LemonClaw-style markdown → Telegram HTML conversion
 // Telegram HTML supports: <b>, <i>, <s>, <u>, <code>, <pre>, <a>, <blockquote>, <tg-spoiler>
 
 const TELEGRAM_TEXT_CHUNK_LIMIT = 4000;
@@ -76,7 +76,7 @@ export function markdownToTelegramHtml(markdown: string): string {
 
 /**
  * Split text into chunks respecting Telegram's message size limit.
- * OpenClaw uses 4000 characters (not 4096) for safety margin.
+ * LemonClaw uses 4000 characters (not 4096) for safety margin.
  */
 export function splitMessage(text: string, maxLength = TELEGRAM_TEXT_CHUNK_LIMIT): string[] {
   const chunks: string[] = [];
