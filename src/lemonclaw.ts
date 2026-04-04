@@ -294,6 +294,20 @@ export async function fireHook(
 ): Promise<void> {
   if (!HEARTBEAT_CHAT_ID) return;
 
+  // on_start: CLI 호출 없이 직접 메시지 전송 (토큰 절약)
+  if (event === "on_start") {
+    const now = new Date().toLocaleString("ko-KR", { timeZone: "Asia/Seoul" });
+    const msg = `🤖 봇이 재시작되었습니다.\n⏰ ${now}`;
+    console.log(`[LemonClaw] Hook on_start: direct message (no CLI)`);
+    appendMemoryLog(`HOOK[on_start]: direct message`);
+    try {
+      await sendTelegram(HEARTBEAT_CHAT_ID, msg);
+    } catch (e: any) {
+      console.error(`[LemonClaw] Hook on_start error: ${e.message}`);
+    }
+    return;
+  }
+
   const prompts = getHooksForEvent(event);
   for (const prompt of prompts) {
     console.log(`[LemonClaw] Hook ${event}: ${prompt.slice(0, 50)}...`);
