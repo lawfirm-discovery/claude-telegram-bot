@@ -218,19 +218,64 @@ export function formatAffinityReport(): string {
 type AskClaudeFn = (chatId: string, message: string) => Promise<string>;
 type SendTelegramFn = (chatId: string, message: string) => Promise<void>;
 
+/**
+ * 경량 Claude 호출 — CLI가 아닌 `claude -p` (print mode) + sonnet + low effort
+ * 리드 봇의 계획 단계에서만 사용. 도구 없이 텍스트만 받아옴.
+ */
+async function askClaudeLight(prompt: string): Promise<string> {
+  const CLAUDE_PATH = process.env.CLAUDE_PATH || "claude";
+  return new Promise((resolve, reject) => {
+    const proc = spawn(CLAUDE_PATH, [
+      "-p", prompt,
+      "--model", "claude-sonnet-4-6",
+      "--effort", "low",
+      "--no-tool-use",
+      "--output-format", "text",
+      "--permission-mode", "bypassPermissions",
+    ], {
+      env: { ...process.env, NO_COLOR: "1", TELEGRAM_BOT_TOKEN: "" },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    let stdout = "";
+    let stderr = "";
+    proc.stdout?.on("data", (d: Buffer) => { stdout += d.toString(); });
+    proc.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
+
+    const timer = setTimeout(() => {
+      try { proc.kill("SIGKILL"); } catch {}
+      reject(new Error("계획 타임아웃 (30초)"));
+    }, 30_000);
+
+    proc.on("close", (code) => {
+      clearTimeout(timer);
+      if (code === 0 && stdout.trim()) resolve(stdout.trim());
+      else reject(new Error(stderr.slice(0, 200) || "계획 실패"));
+    });
+    proc.on("error", (e) => { clearTimeout(timer); reject(e); });
+  });
+}
+
 export async function planTask(
   prompt: string,
   requestedBy: string,
-  askClaude: AskClaudeFn,
+  _askClaude?: AskClaudeFn,  // 사용 안 함 — 경량 호출 사용
 ): Promise<OrchestratedTask> {
   const taskId = randomUUID().slice(0, 8);
+
+  // 어피니티 정보를 프롬프트에 포함
+  const affinityHint = affinityMap.length > 0
+    ? `\n\n도메인 어피니티 (이전 작업 이력, 가능하면 같은 봇에 배정):\n${
+        affinityMap.slice(-20).map(a => `- ${a.botName}: ${a.domain} (${a.taskCount}건)`).join("\n")
+      }`
+    : "";
 
   const planPrompt = `당신은 멀티에이전트 개발 오케스트레이터입니다.
 
 다음 작업을 서브태스크로 분해해주세요. 각 서브태스크는 하나의 봇이 독립적으로 실행할 수 있어야 합니다.
 
 사용 가능한 워커 봇과 접근 가능한 레포:
-${workerBots.map(w => `- ${w.name} (${w.username}): ${w.repos.join(", ")}`).join("\n")}
+${workerBots.map(w => `- ${w.name} (${w.username}): ${w.repos.join(", ")}`).join("\n")}${affinityHint}
 
 작업: ${prompt}
 
@@ -248,9 +293,10 @@ ${workerBots.map(w => `- ${w.name} (${w.username}): ${w.repos.join(", ")}`).join
 - 같은 파일을 두 서브태스크에 배정하지 말 것 (충돌 방지)
 - 각 서브태스크는 독립적으로 실행 가능해야 함
 - 워커의 repos에 없는 레포를 배정하지 말 것
+- 이전에 해당 도메인을 작업한 봇이 있으면 같은 봇에 배정 (어피니티)
 - API 변경이 필요하면 API 서브태스크를 먼저 배치`;
 
-  const response = await askClaude(requestedBy, planPrompt);
+  const response = await askClaudeLight(planPrompt);
 
   // Parse JSON from response
   let subtaskDefs: any[] = [];

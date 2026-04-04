@@ -118,7 +118,7 @@ bot.command("orchestrate", async (ctx) => {
 
   try {
     // Step 1: Plan
-    const task = await planTask(taskDescription, chatId, askClaude);
+    const task = await planTask(taskDescription, chatId);
     const statusMsg = formatTaskStatus(task);
     await ctx.reply(`📋 작업 계획 완료:\n\n${statusMsg}\n\n진행하려면 "승인", 취소하려면 "취소"를 입력하세요.`);
 
