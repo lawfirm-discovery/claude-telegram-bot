@@ -548,6 +548,7 @@ bot.on("message:text", async (ctx) => {
   if (!text || text.startsWith("/")) return;
 
   const chatId = ctx.chat.id.toString();
+  console.log(`[MSG] role=${BOT_ROLE} chat=${chatId} len=${text.length}`);
 
   // Group: only respond when mentioned (use cached bot info)
   if (ctx.chat.type !== "private") {
@@ -664,14 +665,13 @@ bot.on("message:text", async (ctx) => {
   // === Lead: 일반 메시지를 워커에 HTTP로 자동 위임 ===
 
   if (BOT_ROLE === "lead") {
-
     const result = await quickDelegate(text, chatId);
     if (result) {
       await ctx.reply(`📨 @${result.workerName} 에 작업 전송 완료\n💬 "${text.slice(0, 80)}${text.length > 80 ? "..." : ""}"`);
-      return;
+    } else {
+      await ctx.reply("⚠️ 모든 워커가 작업 중입니다. 잠시 후 다시 시도해주세요.");
     }
-    // 위임 실패 시 (모든 워커 busy) → 직접 처리
-    await ctx.reply("⚠️ 모든 워커가 작업 중입니다. 직접 처리합니다...");
+    return; // 리드는 절대 직접 작업 안 함
   }
 
   await handleMessage(ctx, chatId, text);
