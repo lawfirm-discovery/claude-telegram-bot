@@ -9,7 +9,7 @@
  * - MEMORY.md + memory/ → 장기 기억 & 일일 로그
  */
 
-import { readFileSync, writeFileSync, existsSync, appendFileSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync } from "fs";
 import { join } from "path";
 
 // ═══════════════════════════════════════════════════════════════
@@ -76,6 +76,8 @@ export function appendMemoryLog(entry: string): void {
     const logPath = todayLogPath();
     const time = new Date().toLocaleTimeString("ko-KR", { timeZone: "Asia/Seoul", hour12: false });
     const line = `- [${time}] ${entry}\n`;
+
+    if (!existsSync(MEMORY_DIR)) mkdirSync(MEMORY_DIR, { recursive: true });
 
     if (!existsSync(logPath)) {
       const date = new Date().toLocaleDateString("ko-KR", { timeZone: "Asia/Seoul" });
