@@ -53,6 +53,15 @@ bot.use(async (ctx, next) => {
   const userId = ctx.from?.id;
   if (!userId) return;
 
+  // 봇 간 위임 메시지는 access control 건너뛰기
+  if (ctx.from?.is_bot && ctx.message && "text" in ctx.message) {
+    const text = (ctx.message as any).text || "";
+    if (text.includes("[DELEGATE:") || text.includes("[TASK:")) {
+      await next();
+      return;
+    }
+  }
+
   if (approvedUsers.size === 0 && ALLOWED_USERS.length === 0) {
     await next();
     return;
