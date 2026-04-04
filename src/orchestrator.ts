@@ -797,3 +797,39 @@ function formatTaskSummary(task: OrchestratedTask, results: string[]): string {
     ...results,
   ].join("\n");
 }
+
+// ═══════════════════════════════════════════════════════════════
+// Lead API — 워커로부터 idle 보고 수신
+// ═══════════════════════════════════════════════════════════════
+
+const LEAD_API_PORT = parseInt(process.env.LEAD_API_PORT || "18801");
+
+export function startLeadApi(): void {
+  Bun.serve({
+    port: LEAD_API_PORT,
+    async fetch(req) {
+      const url = new URL(req.url);
+
+      if (url.pathname === "/health") {
+        return Response.json({ ok: true, role: "lead" });
+      }
+
+      if (url.pathname === "/worker-idle" && req.method === "POST") {
+        try {
+          const body = await req.json() as any;
+          const worker = workerBots.find(w => w.name === body.workerName || w.username === body.workerName);
+          if (worker) {
+            worker.status = "idle";
+            console.log(`[LeadAPI] Worker ${worker.name} is now idle`);
+          }
+          return Response.json({ ok: true });
+        } catch {
+          return Response.json({ ok: false }, { status: 400 });
+        }
+      }
+
+      return new Response("Not found", { status: 404 });
+    },
+  });
+  console.log(`[LeadAPI] Listening on port ${LEAD_API_PORT}`);
+}

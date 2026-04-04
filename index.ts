@@ -41,9 +41,15 @@ bot.start({
     startCron(askClaude, sendTelegram);
     startSharedMemorySync();
 
-    // Worker API (워커 봇만 — HTTP로 리드의 작업 수신)
+    // Worker API (워커 봇 — HTTP로 리드의 작업 수신)
     if (BOT_ROLE === "worker") {
       startWorkerApi(bot);
+    }
+
+    // Lead API (리드 봇 — 워커의 idle 보고 수신)
+    if (BOT_ROLE === "lead") {
+      const { startLeadApi } = await import("./src/orchestrator");
+      startLeadApi();
     }
 
     // Fire on_start hooks

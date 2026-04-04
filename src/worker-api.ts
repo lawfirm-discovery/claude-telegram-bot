@@ -104,5 +104,22 @@ async function processDelegate(bot: Bot, req: DelegateRequest): Promise<void> {
     try {
       await bot.api.sendMessage(parseInt(chatId), `⚠️ @${botUsername} 작업 실패: ${e.message}`);
     } catch {}
+  } finally {
+    // 리드에 idle 보고 (완료/실패 상관없이)
+    notifyLeadIdle(botUsername).catch(() => {});
   }
+}
+
+/** 리드 봇에 idle 상태 보고 */
+async function notifyLeadIdle(workerName: string): Promise<void> {
+  const leadUrl = process.env.LEAD_API_URL;
+  if (!leadUrl) return;
+  try {
+    await fetch(`${leadUrl}/worker-idle`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workerName }),
+      signal: AbortSignal.timeout(5000),
+    });
+  } catch {}
 }
