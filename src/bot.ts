@@ -662,7 +662,9 @@ bot.on("message:text", async (ctx) => {
   }
 
   // === Lead: 일반 메시지를 워커에 HTTP로 자동 위임 ===
+  console.log(`[DEBUG] BOT_ROLE="${BOT_ROLE}" chatType="${ctx.chat.type}" text="${text.slice(0,30)}"`);
   if (BOT_ROLE === "lead") {
+    console.log(`[DEBUG] Attempting quickDelegate...`);
     const result = await quickDelegate(text, chatId);
     if (result) {
       await ctx.reply(`📨 @${result.workerName} 에 작업 전송 완료\n💬 "${text.slice(0, 80)}${text.length > 80 ? "..." : ""}"`);

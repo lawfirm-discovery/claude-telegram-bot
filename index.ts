@@ -37,8 +37,11 @@ bot.start({
     appendMemoryLog(`Bot started: @${botInfo.username}`);
 
     // Start LemonClaw autonomous systems
-    startHeartbeat(askClaude, sendTelegram);
-    startCron(askClaude, sendTelegram);
+    // 리드 봇은 하트비트/크론 비활성화 — Claude 세션을 점유하면 위임이 안 됨
+    if (BOT_ROLE !== "lead") {
+      startHeartbeat(askClaude, sendTelegram);
+      startCron(askClaude, sendTelegram);
+    }
     startSharedMemorySync();
 
     // Worker API (워커 봇 — HTTP로 리드의 작업 수신)
