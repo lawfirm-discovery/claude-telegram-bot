@@ -2,6 +2,11 @@ import { Bot, InlineKeyboard } from "grammy";
 import { askClaude, askClaudeWithProgress, clearSession, getSessionStats, getHudInfo, killActiveProcesses, loadInterruptedContext, hasInterruptedContext, type ProgressInfo } from "./claude";
 import { appendMemoryLog, appendSharedMemory } from "./lemonclaw";
 import {
+  BOT_ROLE, planTask, dispatchTask, handleWorkerReport,
+  mergeCompletedTask, formatTaskStatus, detectTaskMessage,
+  executeWorkerTask, getWorkerBots,
+} from "./orchestrator";
+import {
   detectApprovalRequest,
   getApprovalEmoji,
   getApprovalLabel,
@@ -95,6 +100,49 @@ bot.command("model", async (ctx) => {
 bot.command("stats", async (ctx) => {
   await ctx.reply(`Active sessions: ${getSessionStats().active}`);
 });
+
+// --- Orchestrator Commands (Lead bot only) ---
+bot.command("orchestrate", async (ctx) => {
+  if (BOT_ROLE !== "lead") {
+    await ctx.reply("⚠️ 이 봇은 워커입니다. 리드 봇에서 /orchestrate를 사용하세요.");
+    return;
+  }
+  const taskDescription = ctx.match?.trim();
+  if (!taskDescription) {
+    await ctx.reply("사용법: /orchestrate <작업 설명>\n예: /orchestrate 전문가 상담 기능에 파일 첨부 추가");
+    return;
+  }
+
+  const chatId = ctx.chat.id.toString();
+  await ctx.reply("🔄 작업을 서브태스크로 분해 중...");
+
+  try {
+    // Step 1: Plan
+    const task = await planTask(taskDescription, chatId, askClaude);
+    const statusMsg = formatTaskStatus(task);
+    await ctx.reply(`📋 작업 계획 완료:\n\n${statusMsg}\n\n진행하려면 "승인", 취소하려면 "취소"를 입력하세요.`);
+
+    // Store task ID for approval
+    pendingOrchestrations.set(chatId, task.id);
+  } catch (e: any) {
+    await ctx.reply(`❌ 분해 실패: ${e.message}`);
+  }
+});
+
+bot.command("workers", async (ctx) => {
+  const workers = getWorkerBots();
+  if (!workers.length) {
+    await ctx.reply("등록된 워커 봇이 없습니다. .env의 WORKER_BOTS를 설정하세요.");
+    return;
+  }
+  const lines = workers.map(w =>
+    `${w.status === "idle" ? "🟢" : "🔴"} ${w.name} (@${w.username}) — ${w.repos.join(", ")}`
+  );
+  await ctx.reply(`🤖 워커 봇 목록:\n\n${lines.join("\n")}`);
+});
+
+// Pending orchestration approvals
+const pendingOrchestrations = new Map<string, string>();
 
 bot.command("pair", async (ctx) => {
   if (ALLOWED_USERS.length > 0 && !ALLOWED_USERS.includes(ctx.from?.id!))
@@ -485,12 +533,80 @@ bot.on("message:text", async (ctx) => {
   const text = ctx.message.text;
   if (!text || text.startsWith("/")) return;
 
+  const chatId = ctx.chat.id.toString();
+
   // Group: only respond when mentioned (use cached bot info)
   if (ctx.chat.type !== "private") {
     if (!isBotMentioned(text, ctx.me.username)) return;
   }
 
-  await handleMessage(ctx, ctx.chat.id.toString(), text);
+  // === Orchestrator: 승인/취소 처리 (Lead) ===
+  if (BOT_ROLE === "lead") {
+    const pendingTaskId = pendingOrchestrations.get(chatId);
+    if (pendingTaskId && /^(승인|확인|진행|approve|yes)$/i.test(text.trim())) {
+      pendingOrchestrations.delete(chatId);
+      const { getTask } = await import("./orchestrator");
+      const task = getTask(pendingTaskId);
+      if (task) {
+        await ctx.reply("📨 워커 봇에 서브태스크 전송 중...");
+        const sendTg = async (cid: string, msg: string) => {
+          const { markdownToTelegramHtml, splitMessage } = await import("./format");
+          const chunks = splitMessage(msg);
+          for (const chunk of chunks) {
+            try {
+              await bot.api.sendMessage(parseInt(cid), markdownToTelegramHtml(chunk), { parse_mode: "HTML" });
+            } catch { await bot.api.sendMessage(parseInt(cid), chunk); }
+          }
+        };
+        await dispatchTask(task, sendTg);
+        await ctx.reply(formatTaskStatus(task));
+        return;
+      }
+    }
+    if (pendingTaskId && /^(취소|cancel|no)$/i.test(text.trim())) {
+      pendingOrchestrations.delete(chatId);
+      await ctx.reply("❌ 작업이 취소되었습니다.");
+      return;
+    }
+
+    // === Lead: 워커 완료 보고 수신 ===
+    const report = handleWorkerReport(text);
+    if (report) {
+      if (report.allDone) {
+        await ctx.reply(`🎉 모든 서브태스크 완료! 머지 시작...\n\n${formatTaskStatus(report.task)}`);
+        const sendTg = async (cid: string, msg: string) => {
+          try { await bot.api.sendMessage(parseInt(cid), msg); } catch {}
+        };
+        try {
+          await mergeCompletedTask(report.task, askClaude, sendTg);
+        } catch (e: any) {
+          await ctx.reply(`❌ 머지 실패: ${e.message}`);
+        }
+      } else {
+        await ctx.reply(formatTaskStatus(report.task));
+      }
+      return;
+    }
+  }
+
+  // === Worker: 태스크 메시지 감지 ===
+  if (BOT_ROLE === "worker") {
+    const detectedTask = detectTaskMessage(text);
+    if (detectedTask) {
+      await ctx.reply(`📥 태스크 수신: ${detectedTask.description.slice(0, 80)}\n브랜치: ${detectedTask.branch}\n작업 시작...`);
+      const sendTg = async (cid: string, msg: string) => {
+        try { await bot.api.sendMessage(parseInt(cid), msg); } catch {}
+      };
+      try {
+        await executeWorkerTask(detectedTask, askClaude, sendTg);
+      } catch (e: any) {
+        await ctx.reply(`❌ 태스크 실패: ${e.message}`);
+      }
+      return;
+    }
+  }
+
+  await handleMessage(ctx, chatId, text);
 });
 
 bot.on("message:photo", async (ctx) => {
