@@ -4,7 +4,7 @@ import { appendMemoryLog, appendSharedMemory } from "./lemonclaw";
 import {
   BOT_ROLE, planTask, dispatchTask, handleWorkerReport,
   mergeCompletedTask, formatTaskStatus, detectTaskMessage,
-  executeWorkerTask, getWorkerBots,
+  executeWorkerTask, getWorkerBots, formatAffinityReport,
 } from "./orchestrator";
 import {
   detectApprovalRequest,
@@ -127,6 +127,10 @@ bot.command("orchestrate", async (ctx) => {
   } catch (e: any) {
     await ctx.reply(`❌ 분해 실패: ${e.message}`);
   }
+});
+
+bot.command("affinity", async (ctx) => {
+  await ctx.reply(formatAffinityReport());
 });
 
 bot.command("workers", async (ctx) => {

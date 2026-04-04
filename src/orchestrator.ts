@@ -7,6 +7,8 @@
 
 import { randomUUID } from "crypto";
 import { spawn } from "child_process";
+import { readFileSync, writeFileSync, existsSync } from "fs";
+import { join } from "path";
 
 // ════════════════════════��══════════════════════════════════════
 // Types
@@ -87,9 +89,131 @@ export function getWorkerBots(): WorkerBot[] {
   return workerBots;
 }
 
-// ══════════════════════════════════════════════════��════════════
+// ═══════════════════════════════════════════════════════════════
+// Domain Affinity — 봇별 전문 도메인 학습
+// ═══════════════════════════════════════════════════════════════
+
+interface AffinityEntry {
+  botName: string;
+  domain: string;       // e.g. "ldrive", "chat", "erp/guardian", "ai_chat"
+  taskCount: number;     // 이 도메인에서 완료한 작업 수
+  lastWorked: number;    // 마지막 작업 시간
+  successRate: number;   // 성공률 (0~1)
+}
+
+const AFFINITY_FILE = join(import.meta.dir, "..", ".lemonclaw", "affinity.json");
+
+// 메모리 + 파일 기반 어피니티 저장
+let affinityMap: AffinityEntry[] = [];
+
+function loadAffinity(): void {
+  try {
+    if (existsSync(AFFINITY_FILE)) {
+      affinityMap = JSON.parse(readFileSync(AFFINITY_FILE, "utf-8"));
+    }
+  } catch { affinityMap = []; }
+}
+
+function saveAffinity(): void {
+  try {
+    writeFileSync(AFFINITY_FILE, JSON.stringify(affinityMap, null, 2));
+  } catch (e: any) {
+    console.error(`[Affinity] Save failed: ${e.message}`);
+  }
+}
+
+loadAffinity();
+
+/** 파일 경로에서 도메인 추출 */
+function extractDomain(filePath: string): string {
+  // lib/pages/erp/guardian/xxx.dart → erp/guardian
+  // src/components/Chat/xxx.ts → Chat
+  // lib/pages/ldrive/xxx.dart → ldrive
+  const parts = filePath.replace(/^(lib|src)\/(pages|components|features|widgets)\//, "").split("/");
+  // 첫 1~2 depth를 도메인으로
+  return parts.slice(0, Math.min(2, parts.length - 1)).join("/") || "general";
+}
+
+/** 작업 완료 후 어피니티 업데이트 */
+export function updateAffinity(botName: string, files: string[], success: boolean): void {
+  const domains = new Set(files.map(extractDomain));
+
+  for (const domain of domains) {
+    let entry = affinityMap.find(a => a.botName === botName && a.domain === domain);
+    if (!entry) {
+      entry = { botName, domain, taskCount: 0, lastWorked: 0, successRate: 1 };
+      affinityMap.push(entry);
+    }
+    entry.taskCount++;
+    entry.lastWorked = Date.now();
+    // Rolling average success rate
+    entry.successRate = (entry.successRate * (entry.taskCount - 1) + (success ? 1 : 0)) / entry.taskCount;
+  }
+
+  saveAffinity();
+}
+
+/** 주어진 파일들에 가장 적합한 워커 봇 선택 */
+export function selectBestWorker(files: string[], repo: string): string | null {
+  const domains = new Set(files.map(extractDomain));
+  const eligible = workerBots.filter(w => w.repos.includes(repo));
+
+  if (!eligible.length) return null;
+
+  // 점수 계산: 어피니티(경험) + 상태(idle 우선)
+  const scored = eligible.map(w => {
+    let score = 0;
+
+    // 어피니티 점수: 이 도메인에서 작업한 경험
+    for (const domain of domains) {
+      const entry = affinityMap.find(a => a.botName === w.name && a.domain === domain);
+      if (entry) {
+        score += entry.taskCount * 10;            // 경험치
+        score += entry.successRate * 20;           // 성공률 보너스
+        // 최근 작업 보너스 (24시간 내)
+        const hoursSince = (Date.now() - entry.lastWorked) / 3600000;
+        if (hoursSince < 24) score += 15;          // 캐시가 아직 유효할 가능성
+      }
+    }
+
+    // idle 보너스
+    if (w.status === "idle") score += 30;
+
+    return { worker: w, score };
+  });
+
+  // 최고 점수 워커 선택
+  scored.sort((a, b) => b.score - a.score);
+  return scored[0]?.worker.name || null;
+}
+
+/** 어피니티 현황 포맷 */
+export function formatAffinityReport(): string {
+  if (!affinityMap.length) return "아직 어피니티 데이터가 없습니다.";
+
+  // 봇별 그룹
+  const byBot = new Map<string, AffinityEntry[]>();
+  for (const entry of affinityMap) {
+    const list = byBot.get(entry.botName) || [];
+    list.push(entry);
+    byBot.set(entry.botName, list);
+  }
+
+  const lines: string[] = ["📊 도메인 어피니티 현황\n"];
+  for (const [bot, entries] of byBot) {
+    const sorted = entries.sort((a, b) => b.taskCount - a.taskCount).slice(0, 5);
+    lines.push(`🤖 ${bot}:`);
+    for (const e of sorted) {
+      lines.push(`  ${e.domain}: ${e.taskCount}건 (성공률 ${Math.round(e.successRate * 100)}%)`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+// ═══════════════════════════════════════════════════════════════
 // Step 1: Plan — 작업을 서브태스크로 분해
-// ═════════════════════════════════════���═════════════════════════
+// ═══════════════════════════════════════════════════════════════
 
 type AskClaudeFn = (chatId: string, message: string) => Promise<string>;
 type SendTelegramFn = (chatId: string, message: string) => Promise<void>;
@@ -146,13 +270,20 @@ ${workerBots.map(w => `- ${w.name} (${w.username}): ${w.repos.join(", ")}`).join
 
   const subtasks: SubTask[] = subtaskDefs.map((def: any) => {
     const id = randomUUID().slice(0, 6);
+    const files = def.files || [];
+    const repo = def.repo || "";
+
+    // 어피니티 기반 워커 선택 (Claude 제안보다 우선)
+    const affinityPick = selectBestWorker(files, repo);
+    const assignee = affinityPick || def.assignTo || undefined;
+
     const sub: SubTask = {
       id,
       description: def.description || "",
-      repo: def.repo || "",
-      files: def.files || [],
-      assignedTo: def.assignTo || undefined,
-      branch: `agent/${def.assignTo || "unassigned"}/${taskId}-${id}`,
+      repo,
+      files,
+      assignedTo: assignee,
+      branch: `agent/${assignee || "unassigned"}/${taskId}-${id}`,
       status: "pending",
       createdAt: Date.now(),
     };
@@ -254,7 +385,8 @@ export function handleWorkerReport(
   const sub = task.subtasks.find(s => s.id === subtaskId);
   if (!sub) return null;
 
-  if (doneMatch) {
+  const success = !!doneMatch;
+  if (success) {
     sub.status = "completed";
     sub.completedAt = Date.now();
     console.log(`[Orchestrator] Subtask ${subtaskId} completed by ${sub.assignedTo}`);
@@ -263,6 +395,11 @@ export function handleWorkerReport(
     sub.error = failMatch?.[3] || "Unknown error";
     sub.completedAt = Date.now();
     console.log(`[Orchestrator] Subtask ${subtaskId} failed: ${sub.error}`);
+  }
+
+  // 어피니티 업데이트
+  if (sub.assignedTo && sub.files?.length) {
+    updateAffinity(sub.assignedTo, sub.files, success);
   }
 
   // Release worker
