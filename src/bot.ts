@@ -1,5 +1,5 @@
 import { Bot, InlineKeyboard } from "grammy";
-import { askClaude, askClaudeWithProgress, clearSession, getSessionStats, getHudInfo, killActiveProcesses, type ProgressInfo } from "./claude";
+import { askClaude, askClaudeWithProgress, clearSession, getSessionStats, getHudInfo, killActiveProcesses, loadInterruptedContext, hasInterruptedContext, type ProgressInfo } from "./claude";
 import { appendMemoryLog } from "./lemonclaw";
 import {
   detectApprovalRequest,
@@ -318,6 +318,16 @@ async function handleMessage(
   text: string,
   attachments?: string[]
 ): Promise<void> {
+  // "계속" 메시지 감지 → 중단된 컨텍스트 복원
+  const CONTINUE_PATTERNS = /^(계속|continue|이어서|이어가|진행|go on)\s*\.?$/i;
+  if (CONTINUE_PATTERNS.test(text.trim())) {
+    const savedContext = loadInterruptedContext(chatId);
+    if (savedContext) {
+      text = `이전 작업이 중단되었습니다. 아래 컨텍스트를 참고하여 이어서 진행해주세요.\n\n${savedContext}\n\n---\n위 중단된 작업을 이어서 완료해주세요.`;
+      console.log(`[Bot] Injected interrupted context for chat=${chatId}`);
+    }
+  }
+
   const didAck = await addAckReaction(ctx);
 
   await ctx.replyWithChatAction("typing");

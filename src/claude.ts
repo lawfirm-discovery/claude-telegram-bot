@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "child_process";
 import { randomUUID } from "crypto";
 import { join, dirname } from "path";
-import { readFileSync, writeFileSync, renameSync } from "fs";
+import { readFileSync, writeFileSync, renameSync, existsSync, unlinkSync } from "fs";
 
 import { APPROVAL_SYSTEM_PROMPT } from "./approval";
 import { loadSystemPrompt, appendMemoryLog } from "./lemonclaw";
@@ -196,6 +196,62 @@ export function getSessionStats(): { active: number } {
     if (now - sessions.get(key)!.lastActive >= SESSION_TTL_MS) sessions.delete(key);
   }
   return { active: sessions.size };
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Interrupted context save/restore
+// ═══════════════════════════════════════════════════════════════
+
+const CONTEXT_DIR = join(dirname(import.meta.dir), ".lemonclaw", "memory");
+
+function contextFilePath(chatId: string): string {
+  return join(CONTEXT_DIR, `context-${chatId}.md`);
+}
+
+/** Save interrupted work context so "계속" can resume */
+export function saveInterruptedContext(
+  chatId: string,
+  originalMessage: string,
+  lastAssistantText: string,
+  reason: string
+): void {
+  try {
+    const now = new Date().toLocaleString("ko-KR", { timeZone: "Asia/Seoul" });
+    const content = [
+      `# 중단된 작업 컨텍스트`,
+      `- 중단 시간: ${now}`,
+      `- 사유: ${reason}`,
+      ``,
+      `## 원래 요청`,
+      originalMessage.slice(0, 5000),
+      ``,
+      `## 마지막 응답 (중단 시점)`,
+      lastAssistantText.slice(0, 10000),
+    ].join("\n");
+    writeFileSync(contextFilePath(chatId), content);
+    console.log(`[Context] Saved interrupted context for chat=${chatId} (${reason})`);
+  } catch (e: any) {
+    console.error(`[Context] Save failed: ${e.message}`);
+  }
+}
+
+/** Load and clear saved context. Returns null if none. */
+export function loadInterruptedContext(chatId: string): string | null {
+  const path = contextFilePath(chatId);
+  try {
+    if (!existsSync(path)) return null;
+    const content = readFileSync(path, "utf-8");
+    unlinkSync(path);
+    console.log(`[Context] Loaded interrupted context for chat=${chatId}`);
+    return content;
+  } catch {
+    return null;
+  }
+}
+
+/** Check if interrupted context exists without consuming it */
+export function hasInterruptedContext(chatId: string): boolean {
+  return existsSync(contextFilePath(chatId));
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -427,6 +483,7 @@ function executeClaudeCli(
     let lineBuffer = "";
     let turnNumber = 0;
     let resultEvent: StreamEvent | null = null;
+    const originalMessage = message; // 컨텍스트 저장용
 
     const processLine = (line: string) => {
       if (!line.trim()) return;
@@ -552,9 +609,13 @@ function executeClaudeCli(
         if (killedByWatchdog) {
           const partialText = extractLastAssistantText(rawStdout);
           const elapsed = Math.round((Date.now() - lastActivityTime) / 1000);
+
+          // 중단된 컨텍스트를 파일로 저장 → "계속"으로 이어갈 수 있게
+          saveInterruptedContext(chatId, originalMessage, partialText || "", killReason);
+
           if (partialText && partialText.length > 50) {
             // 부분 응답 + 타임아웃 안내
-            resolve(`${partialText}\n\n---\n⏱ _응답이 중간에 중단되었습니다 (${killReason}). 이어서 진행하려면 "계속" 이라고 보내주세요._`);
+            resolve(`${partialText}\n\n---\n⏱ 응답이 중간에 중단되었습니다 (${killReason}). 이어서 진행하려면 "계속" 이라고 보내주세요.`);
             return;
           }
           reject(new Error(
