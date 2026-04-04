@@ -1,6 +1,6 @@
 import { Bot, InlineKeyboard } from "grammy";
 import { askClaude, askClaudeWithProgress, clearSession, getSessionStats, getHudInfo, killActiveProcesses, loadInterruptedContext, hasInterruptedContext, type ProgressInfo } from "./claude";
-import { appendMemoryLog } from "./lemonclaw";
+import { appendMemoryLog, appendSharedMemory } from "./lemonclaw";
 import {
   detectApprovalRequest,
   getApprovalEmoji,
@@ -399,6 +399,13 @@ async function handleMessage(
     // LemonClaw: 대화 기록을 메모리에 로깅
     appendMemoryLog(`User[${chatId}]: ${text.slice(0, 100)}${text.length > 100 ? "..." : ""}`);
     appendMemoryLog(`Bot[${chatId}]: ${response.slice(0, 100)}${response.length > 100 ? "..." : ""}`);
+
+    // Shared memory: 코드 변경/빌드/배포 등 의미있는 작업만 기록
+    if (toolHistory.length > 0 && /(?:Edit|Write|Bash)/.test(toolHistory.join(" "))) {
+      const botUsername = ctx.me?.username || "unknown";
+      const summary = `${text.slice(0, 80)} → ${response.slice(0, 120)}`;
+      appendSharedMemory(botUsername, summary);
+    }
 
     const approval = detectApprovalRequest(response);
     if (approval) {

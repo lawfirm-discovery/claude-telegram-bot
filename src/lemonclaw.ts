@@ -11,6 +11,7 @@
 
 import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync } from "fs";
 import { join } from "path";
+import { spawn } from "child_process";
 
 // ═══════════════════════════════════════════════════════════════
 // Paths
@@ -23,6 +24,7 @@ const HEARTBEAT_PATH = join(LEMONCLAW_DIR, "HEARTBEAT.md");
 const CRON_PATH = join(LEMONCLAW_DIR, "CRON.md");
 const HOOKS_PATH = join(LEMONCLAW_DIR, "HOOKS.md");
 const MEMORY_PATH = join(LEMONCLAW_DIR, "MEMORY.md");
+const SHARED_MEMORY_PATH = join(LEMONCLAW_DIR, "SHARED_MEMORY.md");
 const MEMORY_DIR = join(LEMONCLAW_DIR, "memory");
 
 // ═══════════════════════════════════════════════════════════════
@@ -45,18 +47,43 @@ function readMd(path: string): string {
   }
 }
 
-/** Load SOUL.md + AGENTS.md + MEMORY.md as combined system prompt */
+/** Load SOUL.md + AGENTS.md + MEMORY.md + SHARED_MEMORY.md as combined system prompt */
 export function loadSystemPrompt(): string {
   const soul = readMd(SOUL_PATH);
   const agents = readMd(AGENTS_PATH);
   const memory = readMd(MEMORY_PATH);
+  const shared = readMd(SHARED_MEMORY_PATH);
 
   const parts: string[] = [];
   if (soul) parts.push(`# 🧠 SOUL\n${soul}`);
   if (agents) parts.push(`# 📋 AGENTS\n${agents}`);
   if (memory) parts.push(`# 📝 MEMORY\n${memory}`);
+  if (shared) parts.push(`# 🔗 SHARED MEMORY (다른 봇들의 최근 작업)\n${shared}`);
 
   return parts.join("\n\n---\n\n");
+}
+
+/** Append a work summary to shared memory (for cross-bot knowledge sharing) */
+export function appendSharedMemory(botName: string, summary: string): void {
+  try {
+    const now = new Date().toLocaleString("ko-KR", { timeZone: "Asia/Seoul" });
+    const line = `- [${now}] **${botName}**: ${summary}\n`;
+
+    if (!existsSync(SHARED_MEMORY_PATH)) {
+      writeFileSync(SHARED_MEMORY_PATH, `# Shared Memory — 봇 간 작업 공유\n\n최근 작업 내역 (최신순):\n\n${line}`);
+    } else {
+      // 파일이 너무 커지지 않도록 최근 50줄만 유지
+      const existing = readFileSync(SHARED_MEMORY_PATH, "utf-8");
+      const lines = existing.split("\n");
+      const header = lines.slice(0, 4).join("\n"); // 헤더 보존
+      const entries = lines.slice(4).filter(l => l.trim());
+      entries.push(line.trim());
+      const recent = entries.slice(-50); // 최근 50개만
+      writeFileSync(SHARED_MEMORY_PATH, `${header}\n${recent.join("\n")}\n`);
+    }
+  } catch (e: any) {
+    console.error(`[LemonClaw] Shared memory write failed: ${e.message}`);
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -325,11 +352,58 @@ export async function fireHook(
 }
 
 // ═══════════════════════════════════════════════════════════════
+// Shared Memory Sync (git pull/push)
+// ═══════════════════════════════════════════════════════════════
+
+const REPO_DIR = join(import.meta.dir, "..");
+let syncTimer: ReturnType<typeof setInterval> | null = null;
+const SYNC_INTERVAL_MS = 5 * 60_000; // 5분마다
+
+function runGit(args: string[]): Promise<string> {
+  return new Promise((resolve) => {
+    const proc = spawn("git", args, { cwd: REPO_DIR, stdio: ["ignore", "pipe", "pipe"] });
+    let out = "";
+    proc.stdout?.on("data", (d: Buffer) => { out += d.toString(); });
+    proc.stderr?.on("data", (d: Buffer) => { out += d.toString(); });
+    proc.on("close", () => resolve(out.trim()));
+    proc.on("error", () => resolve(""));
+  });
+}
+
+async function syncSharedMemory(): Promise<void> {
+  try {
+    // 1) Pull latest (다른 봇의 shared memory 반영)
+    await runGit(["pull", "--rebase", "--autostash", "origin", "main"]);
+
+    // 2) 로컬 변경이 있으면 push
+    const status = await runGit(["status", "--porcelain", ".lemonclaw/SHARED_MEMORY.md"]);
+    if (status) {
+      await runGit(["add", ".lemonclaw/SHARED_MEMORY.md"]);
+      await runGit(["commit", "-m", "chore: sync shared memory"]);
+      await runGit(["push", "origin", "main"]);
+      console.log("[LemonClaw] Shared memory synced to remote");
+    }
+  } catch (e: any) {
+    console.error(`[LemonClaw] Shared memory sync failed: ${e.message}`);
+  }
+}
+
+export function startSharedMemorySync(): void {
+  // 시작 시 즉시 pull
+  syncSharedMemory().catch(() => {});
+  syncTimer = setInterval(() => syncSharedMemory().catch(() => {}), SYNC_INTERVAL_MS);
+  console.log(`[LemonClaw] Shared memory sync started (every ${SYNC_INTERVAL_MS / 1000}s)`);
+}
+
+// ═══════════════════════════════════════════════════════════════
 // Shutdown
 // ═══════════════════════════════════════════════════════════════
 
 export function stopLemonClaw(): void {
   if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
   if (cronTimer) { clearInterval(cronTimer); cronTimer = null; }
+  if (syncTimer) { clearInterval(syncTimer); syncTimer = null; }
+  // 종료 전 마지막 sync
+  syncSharedMemory().catch(() => {});
   console.log("[LemonClaw] Stopped");
 }

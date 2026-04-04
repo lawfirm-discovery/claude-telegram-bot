@@ -1,6 +1,6 @@
 import { bot } from "./src/bot";
 import { askClaude, killActiveProcesses } from "./src/claude";
-import { startHeartbeat, startCron, fireHook, stopLemonClaw, appendMemoryLog } from "./src/lemonclaw";
+import { startHeartbeat, startCron, fireHook, stopLemonClaw, appendMemoryLog, startSharedMemorySync } from "./src/lemonclaw";
 import { markdownToTelegramHtml, splitMessage } from "./src/format";
 
 console.log("Starting Claude Telegram Bot (LemonClaw Edition)...");
@@ -37,6 +37,7 @@ bot.start({
     // Start LemonClaw autonomous systems
     startHeartbeat(askClaude, sendTelegram);
     startCron(askClaude, sendTelegram);
+    startSharedMemorySync();
 
     // Fire on_start hooks
     fireHook("on_start", askClaude, sendTelegram).catch((e) =>
