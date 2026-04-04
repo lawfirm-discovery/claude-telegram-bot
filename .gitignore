@@ -36,3 +36,6 @@ sessions.json
 
 # OpenClaw daily logs (auto-generated, potentially large)
 .openclaw/memory/
+
+# LemonClaw daily logs (auto-generated per server)
+.lemonclaw/memory/
