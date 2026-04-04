@@ -5,7 +5,7 @@ import {
   BOT_ROLE, planTask, dispatchTask, handleWorkerReport,
   mergeCompletedTask, formatTaskStatus, detectTaskMessage,
   executeWorkerTask, getWorkerBots, formatAffinityReport,
-  quickDelegate,
+  quickDelegate, detectDelegateMessage,
 } from "./orchestrator";
 import {
   detectApprovalRequest,
@@ -594,8 +594,49 @@ bot.on("message:text", async (ctx) => {
     }
   }
 
-  // === Worker: 태스크 메시지 감지 ===
+  // === Worker: 위임 메시지 감지 [DELEGATE:chatId] ===
   if (BOT_ROLE === "worker") {
+    const delegated = detectDelegateMessage(text);
+    if (delegated) {
+      const botName = ctx.me?.username || "worker";
+      // 포럼 그룹에 수신 확인
+      await ctx.reply(`📥 작업 수신. 처리 중...`);
+
+      try {
+        // 실제 작업 실행 (일반 handleMessage와 동일)
+        const response = await askClaudeWithProgress(chatId, delegated.message);
+
+        // 요청자(사용자)에게 직접 DM으로 결과 전송
+        const header = `🤖 @${botName} 작업 완료:\n\n`;
+        const chunks = splitMessage(header + response);
+        for (const chunk of chunks) {
+          const html = markdownToTelegramHtml(chunk);
+          try {
+            await bot.api.sendMessage(parseInt(delegated.requestedBy), html, { parse_mode: "HTML" });
+          } catch {
+            try { await bot.api.sendMessage(parseInt(delegated.requestedBy), chunk); } catch {}
+          }
+        }
+
+        // HUD 정보도 전송
+        const hudText = formatHud(chatId);
+        if (hudText) {
+          try {
+            await bot.api.sendMessage(parseInt(delegated.requestedBy),
+              `<code>${escapeHtml(hudText)}</code>`, { parse_mode: "HTML" });
+          } catch {}
+        }
+      } catch (e: any) {
+        // 에러도 요청자에게 직접 전송
+        try {
+          await bot.api.sendMessage(parseInt(delegated.requestedBy),
+            `⚠️ @${botName} 작업 실패: ${e.message}`);
+        } catch {}
+      }
+      return;
+    }
+
+    // === Worker: 오케스트레이션 태스크 메시지 감지 ===
     const detectedTask = detectTaskMessage(text);
     if (detectedTask) {
       await ctx.reply(`📥 태스크 수신: ${detectedTask.description.slice(0, 80)}\n브랜치: ${detectedTask.branch}\n작업 시작...`);

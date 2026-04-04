@@ -410,37 +410,49 @@ ${sub.files?.length ? `파일: ${sub.files.join(", ")}` : ""}
 // Quick Delegate — 분해 없이 바로 idle 워커 1명에게 전달
 // ═══════════════════════════════════════════════════════════════
 
+/**
+ * Quick Delegate — idle 워커에 바로 전달
+ *
+ * 워커 봇에 메시지를 보낼 때 [DELEGATE:requestedBy] 헤더를 포함해서
+ * 워커가 결과를 요청자에게 직접 DM으로 보낼 수 있게 함
+ */
 export async function quickDelegate(
   message: string,
   requestedBy: string,
   sendTelegram: SendTelegramFn,
 ): Promise<{ workerName: string; taskId: string } | null> {
-  // idle 워커 중 아무나 선택 (어피니티 고려)
   const idle = workerBots.filter(w => w.status === "idle");
   if (!idle.length) return null;
 
-  // 메시지에서 도메인 힌트 추출
-  const bestWorker = idle[0]!; // TODO: 어피니티 기반 선택
-
+  const bestWorker = idle[0]!;
   const taskId = randomUUID().slice(0, 8);
-  const subId = randomUUID().slice(0, 6);
   const mention = bestWorker.username ? `@${bestWorker.username} ` : "";
 
   bestWorker.status = "busy";
 
-  // 워커에게 보낼 메시지 — [TASK:] 프로토콜이 아닌 일반 메시지로 전달
-  // 워커 봇이 그냥 일반 메시지로 처리하도록
-  const delegateMsg = `${mention}${message}`;
+  // [DELEGATE:chatId] 헤더로 요청자 정보 전달
+  const delegateMsg = `${mention}[DELEGATE:${requestedBy}]\n${message}`;
 
   try {
     await sendTelegram(bestWorker.chatId, delegateMsg);
     console.log(`[Orchestrator] Quick delegated to ${bestWorker.name}: ${message.slice(0, 50)}`);
+
+    // 5분 후 자동 idle 복구 (워커가 보고 안 하면)
+    setTimeout(() => { bestWorker.status = "idle"; }, 300_000);
+
     return { workerName: bestWorker.name, taskId };
   } catch (e: any) {
     bestWorker.status = "idle";
     console.error(`[Orchestrator] Quick delegate failed: ${e.message}`);
     return null;
   }
+}
+
+/** 위임 메시지 감지 — 워커에서 사용 */
+export function detectDelegateMessage(text: string): { requestedBy: string; message: string } | null {
+  const match = text.match(/\[DELEGATE:(\d+)\]\n?([\s\S]*)/);
+  if (!match) return null;
+  return { requestedBy: match[1]!, message: match[2]!.trim() };
 }
 
 // ════════════════════════════════���══════════════════════════════
