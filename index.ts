@@ -2,6 +2,8 @@ import { bot } from "./src/bot";
 import { askClaude, killActiveProcesses } from "./src/claude";
 import { startHeartbeat, startCron, fireHook, stopLemonClaw, appendMemoryLog, startSharedMemorySync } from "./src/lemonclaw";
 import { markdownToTelegramHtml, splitMessage } from "./src/format";
+import { startWorkerApi } from "./src/worker-api";
+import { BOT_ROLE } from "./src/orchestrator";
 
 console.log("Starting Claude Telegram Bot (LemonClaw Edition)...");
 console.log(`Model: ${process.env.CLAUDE_MODEL || "claude-opus-4-6"}`);
@@ -38,6 +40,11 @@ bot.start({
     startHeartbeat(askClaude, sendTelegram);
     startCron(askClaude, sendTelegram);
     startSharedMemorySync();
+
+    // Worker API (워커 봇만 — HTTP로 리드의 작업 수신)
+    if (BOT_ROLE === "worker") {
+      startWorkerApi(bot);
+    }
 
     // Fire on_start hooks
     fireHook("on_start", askClaude, sendTelegram).catch((e) =>

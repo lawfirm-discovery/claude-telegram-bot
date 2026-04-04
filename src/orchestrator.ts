@@ -17,9 +17,10 @@ import { join } from "path";
 export type BotRole = "lead" | "worker";
 
 export interface WorkerBot {
-  chatId: string;       // Telegram chat ID of the worker bot
+  chatId: string;       // Telegram chat ID (포럼 그룹용, 레거시)
   name: string;         // e.g. "a4500", "3060", "macmini"
   username: string;     // Telegram bot username
+  apiUrl: string;       // HTTP API URL, e.g. "http://100.66.165.128:18800"
   repos: string[];      // repos available on this server, e.g. ["lemon-front", "lemon_flutter"]
   status: "idle" | "busy";
 }
@@ -56,20 +57,37 @@ export const BOT_ROLE: BotRole = (process.env.BOT_ROLE || "worker") as BotRole;
 export const DEV_BRANCH = process.env.DEV_BRANCH || "dev-hs-rtx6000-new";
 const LEAD_BOT_CHAT_ID = process.env.LEAD_BOT_CHAT_ID || "";
 
-// Parse WORKER_BOTS from env: "chatId:name:username:repo1+repo2,chatId2:name2:..."
+// Parse WORKER_BOTS from env: "apiUrl:name:username:repo1+repo2,..."
+// 예: "http://100.66.165.128:18800:3060:b3060_claude_style_bot:lemon-front+lemon_flutter"
 function parseWorkerBots(): WorkerBot[] {
   const raw = process.env.WORKER_BOTS || "";
   if (!raw) return [];
   return raw.split(",").map((entry) => {
-    const [chatId, name, username, reposStr] = entry.split(":");
+    const parts = entry.split(":");
+    // URL에 ":"가 포함되므로 http://host:port 부분을 먼저 추출
+    let apiUrl = "", name = "", username = "", reposStr = "";
+    if (parts[0]?.startsWith("http")) {
+      // http://host:port:name:username:repos
+      apiUrl = `${parts[0]}:${parts[1]}:${parts[2]}`;  // http://host:port
+      name = parts[3]?.trim() || "";
+      username = parts[4]?.trim() || "";
+      reposStr = parts[5] || "";
+    } else {
+      // legacy: chatId:name:username:repos
+      apiUrl = "";
+      name = parts[1]?.trim() || "";
+      username = parts[2]?.trim() || "";
+      reposStr = parts[3] || "";
+    }
     return {
-      chatId: chatId?.trim() || "",
-      name: name?.trim() || "",
-      username: username?.trim() || "",
-      repos: (reposStr || "").split("+").filter(Boolean),
+      chatId: "",
+      name,
+      username,
+      apiUrl,
+      repos: reposStr.split("+").filter(Boolean),
       status: "idle" as const,
     };
-  }).filter(w => w.chatId && w.name);
+  }).filter(w => w.name && w.apiUrl);
 }
 
 const workerBots: WorkerBot[] = parseWorkerBots();
@@ -419,31 +437,37 @@ ${sub.files?.length ? `파일: ${sub.files.join(", ")}` : ""}
 export async function quickDelegate(
   message: string,
   requestedBy: string,
-  sendTelegram: SendTelegramFn,
+  _sendTelegram?: SendTelegramFn,  // 미사용 (HTTP로 직접 통신)
 ): Promise<{ workerName: string; taskId: string } | null> {
   const idle = workerBots.filter(w => w.status === "idle");
   if (!idle.length) return null;
 
   const bestWorker = idle[0]!;
   const taskId = randomUUID().slice(0, 8);
-  const mention = bestWorker.username ? `@${bestWorker.username} ` : "";
 
   bestWorker.status = "busy";
 
-  // [DELEGATE:chatId] 헤더로 요청자 정보 전달
-  const delegateMsg = `${mention}[DELEGATE:${requestedBy}]\n${message}`;
-
   try {
-    await sendTelegram(bestWorker.chatId, delegateMsg);
-    console.log(`[Orchestrator] Quick delegated to ${bestWorker.name}: ${message.slice(0, 50)}`);
+    // HTTP POST로 워커에 직접 전달
+    const resp = await fetch(`${bestWorker.apiUrl}/delegate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message, requestedBy, taskId }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    const result = await resp.json() as any;
 
-    // 5분 후 자동 idle 복구 (워커가 보고 안 하면)
-    setTimeout(() => { bestWorker.status = "idle"; }, 300_000);
+    if (!result.ok) throw new Error(result.error || "delegate failed");
+
+    console.log(`[Orchestrator] Delegated to ${bestWorker.name} via HTTP: ${message.slice(0, 50)}`);
+
+    // 10분 후 자동 idle 복구
+    setTimeout(() => { bestWorker.status = "idle"; }, 600_000);
 
     return { workerName: bestWorker.name, taskId };
   } catch (e: any) {
     bestWorker.status = "idle";
-    console.error(`[Orchestrator] Quick delegate failed: ${e.message}`);
+    console.error(`[Orchestrator] Delegate to ${bestWorker.name} failed: ${e.message}`);
     return null;
   }
 }
