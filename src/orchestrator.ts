@@ -390,7 +390,9 @@ export async function dispatchTask(
 }
 
 function formatTaskMessage(taskId: string, sub: SubTask): string {
-  return `[TASK:${taskId}:${sub.id}]
+  const worker = workerBots.find(w => w.name === sub.assignedTo);
+  const mention = worker?.username ? `@${worker.username} ` : "";
+  return `${mention}[TASK:${taskId}:${sub.id}]
 작업: ${sub.description}
 레포: ${sub.repo}
 브랜치: ${sub.branch}
@@ -402,6 +404,43 @@ ${sub.files?.length ? `파일: ${sub.files.join(", ")}` : ""}
 3. 완료 시 "[DONE:${taskId}:${sub.id}]" 메시지를 보내세요
 4. 실패 시 "[FAIL:${taskId}:${sub.id}] 사유" 메시지를 보내세요
 5. dev 브랜치에 직접 push 금지!`;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Quick Delegate — 분해 없이 바로 idle 워커 1명에게 전달
+// ═══════════════════════════════════════════════════════════════
+
+export async function quickDelegate(
+  message: string,
+  requestedBy: string,
+  sendTelegram: SendTelegramFn,
+): Promise<{ workerName: string; taskId: string } | null> {
+  // idle 워커 중 아무나 선택 (어피니티 고려)
+  const idle = workerBots.filter(w => w.status === "idle");
+  if (!idle.length) return null;
+
+  // 메시지에서 도메인 힌트 추출
+  const bestWorker = idle[0]!; // TODO: 어피니티 기반 선택
+
+  const taskId = randomUUID().slice(0, 8);
+  const subId = randomUUID().slice(0, 6);
+  const mention = bestWorker.username ? `@${bestWorker.username} ` : "";
+
+  bestWorker.status = "busy";
+
+  // 워커에게 보낼 메시지 — [TASK:] 프로토콜이 아닌 일반 메시지로 전달
+  // 워커 봇이 그냥 일반 메시지로 처리하도록
+  const delegateMsg = `${mention}${message}`;
+
+  try {
+    await sendTelegram(bestWorker.chatId, delegateMsg);
+    console.log(`[Orchestrator] Quick delegated to ${bestWorker.name}: ${message.slice(0, 50)}`);
+    return { workerName: bestWorker.name, taskId };
+  } catch (e: any) {
+    bestWorker.status = "idle";
+    console.error(`[Orchestrator] Quick delegate failed: ${e.message}`);
+    return null;
+  }
 }
 
 // ════════════════════════════════���══════════════════════════════

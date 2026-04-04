@@ -5,6 +5,7 @@ import {
   BOT_ROLE, planTask, dispatchTask, handleWorkerReport,
   mergeCompletedTask, formatTaskStatus, detectTaskMessage,
   executeWorkerTask, getWorkerBots, formatAffinityReport,
+  quickDelegate,
 } from "./orchestrator";
 import {
   detectApprovalRequest,
@@ -608,6 +609,22 @@ bot.on("message:text", async (ctx) => {
       }
       return;
     }
+  }
+
+  // === Lead: 일반 메시지를 워커에 자동 위임 ===
+  if (BOT_ROLE === "lead") {
+    const sendTg = async (cid: string, msg: string) => {
+      try { await bot.api.sendMessage(parseInt(cid), msg); } catch (e: any) {
+        console.error(`[Lead] sendTg failed to ${cid}: ${e.message}`);
+      }
+    };
+    const result = await quickDelegate(text, chatId, sendTg);
+    if (result) {
+      await ctx.reply(`📨 @${result.workerName} 에 작업 전송 완료\n💬 "${text.slice(0, 80)}${text.length > 80 ? "..." : ""}"`);
+      return;
+    }
+    // 위임 실패 시 (모든 워커 busy) → 직접 처리
+    await ctx.reply("⚠️ 모든 워커가 작업 중입니다. 직접 처리합니다...");
   }
 
   await handleMessage(ctx, chatId, text);
