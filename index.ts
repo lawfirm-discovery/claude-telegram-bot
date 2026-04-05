@@ -3,7 +3,7 @@ import { askClaude, killActiveProcesses } from "./src/claude";
 import { startHeartbeat, startCron, fireHook, stopLemonClaw, appendMemoryLog, startSharedMemorySync } from "./src/lemonclaw";
 import { markdownToTelegramHtml, splitMessage } from "./src/format";
 import { startWorkerApi } from "./src/worker-api";
-import { BOT_ROLE } from "./src/orchestrator";
+import { BOT_ROLE, stopHealthCheck } from "./src/orchestrator";
 
 console.log("Starting Claude Telegram Bot (LemonClaw Edition)...");
 console.log(`Model: ${process.env.CLAUDE_MODEL || "claude-opus-4-6"}`);
@@ -66,6 +66,7 @@ bot.start({
 const shutdown = () => {
   console.log("\nShutting down...");
   stopLemonClaw();
+  stopHealthCheck();
   killActiveProcesses();
   bot.stop();
   process.exit(0);

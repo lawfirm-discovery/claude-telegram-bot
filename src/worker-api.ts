@@ -17,11 +17,13 @@ interface DelegateRequest {
   message: string;
   requestedBy: string;   // 요청자 Telegram chat ID
   taskId?: string;
+  leadApiUrl?: string;
 }
 
 interface DelegateResponse {
   ok: boolean;
   taskId?: string;
+  leadApiUrl?: string;
   error?: string;
 }
 
@@ -106,14 +108,14 @@ async function processDelegate(bot: Bot, req: DelegateRequest): Promise<void> {
     } catch {}
   } finally {
     // 리드에 idle 보고 (완료/실패 상관없이)
-    notifyLeadIdle(botUsername).catch(() => {});
+    notifyLeadIdle(botUsername, req.leadApiUrl).catch(() => {});
   }
 }
 
 /** 리드 봇에 idle 상태 보고 */
-async function notifyLeadIdle(workerName: string): Promise<void> {
-  const leadUrl = process.env.LEAD_API_URL;
-  if (!leadUrl) return;
+async function notifyLeadIdle(workerName: string, leadApiUrl?: string): Promise<void> {
+  const leadUrl = leadApiUrl || process.env.LEAD_API_URL;
+  if (!leadUrl) { console.warn("[WorkerAPI] No LEAD_API_URL"); return; }
   try {
     await fetch(`${leadUrl}/worker-idle`, {
       method: "POST",

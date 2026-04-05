@@ -563,17 +563,8 @@ bot.on("message:text", async (ctx) => {
       const { getTask } = await import("./orchestrator");
       const task = getTask(pendingTaskId);
       if (task) {
-        await ctx.reply("📨 워커 봇에 서브태스크 전송 중...");
-        const sendTg = async (cid: string, msg: string) => {
-          const { markdownToTelegramHtml, splitMessage } = await import("./format");
-          const chunks = splitMessage(msg);
-          for (const chunk of chunks) {
-            try {
-              await bot.api.sendMessage(parseInt(cid), markdownToTelegramHtml(chunk), { parse_mode: "HTML" });
-            } catch { await bot.api.sendMessage(parseInt(cid), chunk); }
-          }
-        };
-        await dispatchTask(task, sendTg);
+        await ctx.reply("📨 워커 봇에 HTTP 전송 중...");
+        await dispatchTask(task);
         await ctx.reply(formatTaskStatus(task));
         return;
       }
