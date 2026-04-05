@@ -9,6 +9,7 @@ import { randomUUID } from "crypto";
 import { spawn } from "child_process";
 import { readFileSync, writeFileSync, existsSync } from "fs";
 import { join } from "path";
+import { saveMessage, saveSession, getMessages, getSessions, getStats, testConnection, type SaveMessageParams, type SaveSessionParams } from "./db";
 
 export type BotRole = "lead" | "worker";
 
@@ -443,6 +444,58 @@ export function startLeadApi(): void {
         const resp = await fetch(`${w.apiUrl}/recent-activity?count=${body.count || 10}`, { signal: AbortSignal.timeout(10_000) });
         return json(await resp.json());
       } catch (e: any) { return json({ ok: false, error: e.message }, 500); }
+    }
+
+    // ═══ DB API — 대화 기록 저장/조회 ═══
+
+    // 워커가 메시지를 보고: POST /report-message
+    if (url.pathname === "/report-message" && req.method === "POST") {
+      try {
+        const body = await req.json() as SaveMessageParams;
+        await saveMessage(body);
+        return json({ ok: true });
+      } catch (e: any) { return json({ ok: false, error: e.message }, 500); }
+    }
+
+    // 워커가 세션 완료를 보고: POST /report-session
+    if (url.pathname === "/report-session" && req.method === "POST") {
+      try {
+        const body = await req.json() as SaveSessionParams;
+        await saveSession(body);
+        return json({ ok: true });
+      } catch (e: any) { return json({ ok: false, error: e.message }, 500); }
+    }
+
+    // 대화 조회: POST /messages { botName?, chatId?, search?, limit?, offset? }
+    if (url.pathname === "/messages" && req.method === "POST") {
+      try {
+        const body = await req.json() as any;
+        const result = await getMessages(body);
+        return json({ ok: true, ...result });
+      } catch (e: any) { return json({ ok: false, error: e.message }, 500); }
+    }
+
+    // 세션 조회: POST /sessions { botName?, limit? }
+    if (url.pathname === "/sessions" && req.method === "POST") {
+      try {
+        const body = await req.json() as any;
+        const sessions = await getSessions(body.botName, body.limit);
+        return json({ ok: true, sessions });
+      } catch (e: any) { return json({ ok: false, error: e.message }, 500); }
+    }
+
+    // 통계: GET /stats
+    if (url.pathname === "/stats") {
+      try {
+        const stats = await getStats();
+        return json({ ok: true, ...stats });
+      } catch (e: any) { return json({ ok: false, error: e.message }, 500); }
+    }
+
+    // DB 상태: GET /db-health
+    if (url.pathname === "/db-health") {
+      const ok = await testConnection();
+      return json({ ok, db: ok ? "connected" : "disconnected" });
     }
 
     // 워커 idle 보고

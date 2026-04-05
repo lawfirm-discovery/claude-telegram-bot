@@ -210,15 +210,20 @@ export function startWorkerApi(bot: Bot): void {
 async function processDelegate(bot: Bot, req: DelegateRequest): Promise<void> {
   const chatId = req.requestedBy;
   const botUsername = (await bot.api.getMe()).username || "worker";
+  const leadUrl = req.leadApiUrl || process.env.LEAD_API_URL;
+  const botName = process.env.BOT_NAME || botUsername;
+
+  // DB에 수신 메시지 저장
+  reportMessage(leadUrl, { botName, botUsername, chatId, direction: "inbound", messageText: req.message });
 
   try {
-    // 요청자에게 수신 확인
     await bot.api.sendMessage(parseInt(chatId), `📥 @${botUsername} 작업 수신. 처리 중...`);
 
-    // Claude 실행
     const response = await askClaudeWithProgress(chatId, req.message);
 
-    // 요청자에게 결과 DM 전송
+    // DB에 응답 메시지 저장
+    reportMessage(leadUrl, { botName, botUsername, chatId, direction: "outbound", messageText: response.slice(0, 10000) });
+
     const header = `🤖 @${botUsername} 작업 완료:\n\n`;
     const chunks = splitMessage(header + response);
     for (const chunk of chunks) {
@@ -230,27 +235,45 @@ async function processDelegate(bot: Bot, req: DelegateRequest): Promise<void> {
       }
     }
 
-    // HUD
+    // HUD + 세션 DB 저장
     const hud = getHudInfo(chatId);
     if (hud && hud.inputTokens > 0) {
       const pct = hud.contextPercent;
       const bar = "█".repeat(Math.round(pct / 10)) + "░".repeat(10 - Math.round(pct / 10));
       const hudText = `Context: ${bar} ${pct}% | Turn ${hud.turnNumber} | ${hud.durationSec}s`;
-      try {
-        await bot.api.sendMessage(parseInt(chatId), `<code>${escapeHtml(hudText)}</code>`, { parse_mode: "HTML" });
-      } catch {}
+      try { await bot.api.sendMessage(parseInt(chatId), `<code>${escapeHtml(hudText)}</code>`, { parse_mode: "HTML" }); } catch {}
+
+      // 세션 완료 보고
+      reportSession(leadUrl, { botName, chatId, turns: hud.turnNumber, inputTokens: hud.inputTokens, outputTokens: hud.outputTokens, cacheRead: hud.cacheRead, totalCost: 0, durationSec: hud.durationSec });
     }
 
     console.log(`[WorkerAPI] Completed delegate for ${chatId}`);
   } catch (e: any) {
     console.error(`[WorkerAPI] Failed: ${e.message}`);
-    try {
-      await bot.api.sendMessage(parseInt(chatId), `⚠️ @${botUsername} 작업 실패: ${e.message}`);
-    } catch {}
+    try { await bot.api.sendMessage(parseInt(chatId), `⚠️ @${botUsername} 작업 실패: ${e.message}`); } catch {}
   } finally {
-    // 리드에 idle 보고 (완료/실패 상관없이) + requestedBy 전달 (세션 어피니티용)
     notifyLeadIdle(botUsername, req.leadApiUrl, req.requestedBy).catch(() => {});
   }
+}
+
+/** Lead API에 메시지 보고 (비동기, 실패 무시) */
+function reportMessage(leadUrl: string | undefined, data: any): void {
+  const url = leadUrl || process.env.LEAD_API_URL;
+  if (!url) return;
+  fetch(`${url}/report-message`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data), signal: AbortSignal.timeout(5000),
+  }).catch(() => {});
+}
+
+/** Lead API에 세션 완료 보고 (비동기, 실패 무시) */
+function reportSession(leadUrl: string | undefined, data: any): void {
+  const url = leadUrl || process.env.LEAD_API_URL;
+  if (!url) return;
+  fetch(`${url}/report-session`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data), signal: AbortSignal.timeout(5000),
+  }).catch(() => {});
 }
 
 /** Claude CLI 인증 상태 확인 */
