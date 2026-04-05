@@ -161,7 +161,7 @@ async function processDelegate(bot: Bot, req: DelegateRequest): Promise<void> {
 /** Claude CLI 인증 상태 확인 */
 async function checkCliAuth(): Promise<boolean> {
   return new Promise((resolve) => {
-    const proc = spawn(process.env.CLAUDE_PATH || "claude", ["--print", "--model", "claude-haiku-4-5-20251001", "--no-tool-use", "--output-format", "text"], {
+    const proc = spawn(process.env.CLAUDE_PATH || "claude", ["--print", "--model", "claude-haiku-4-5-20251001", "--output-format", "text"], {
       env: { ...process.env, NO_COLOR: "1" },
       stdio: ["pipe", "pipe", "pipe"],
     });
