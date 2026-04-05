@@ -676,10 +676,9 @@ bot.on("message:photo", async (ctx) => {
   if (!photo) return;
   const tmpPath = await downloadTelegramFile(photo.file_id, "jpg");
 
-  // Lead: 첨부파일 포함 메시지도 워커에 위임
+  // Lead: 첨부파일 포함 메시지도 워커에 위임 (file_id 전달로 워커가 직접 다운로드)
   if (BOT_ROLE === "lead") {
-    const msg = `${caption}\n\n[첨부: 이미지 파일 ${tmpPath}]`;
-    const result = await quickDelegate(msg, chatId);
+    const result = await quickDelegate(caption, chatId, [{ file_id: photo.file_id, type: "photo" }]);
     if (result) {
       await ctx.reply(`📨 @${result.workerName} 에 작업 전송 완료\n💬 "${caption.slice(0, 80)}${caption.length > 80 ? "..." : ""}" + 📷 이미지`);
     } else {
@@ -700,10 +699,9 @@ bot.on("message:document", async (ctx) => {
   const ext = doc.file_name?.split(".").pop() || "txt";
   const tmpPath = await downloadTelegramFile(doc.file_id, ext);
 
-  // Lead: 첨부파일 포함 메시지도 워커에 위임
+  // Lead: 첨부파일 포함 메시지도 워커에 위임 (file_id 전달로 워커가 직접 다운로드)
   if (BOT_ROLE === "lead") {
-    const msg = `${caption}\n\n[첨부: ${doc.file_name} ${tmpPath}]`;
-    const result = await quickDelegate(msg, chatId);
+    const result = await quickDelegate(caption, chatId, [{ file_id: doc.file_id, type: "document", filename: doc.file_name }]);
     if (result) {
       await ctx.reply(`📨 @${result.workerName} 에 작업 전송 완료\n💬 "${caption.slice(0, 80)}${caption.length > 80 ? "..." : ""}" + 📎 ${doc.file_name}`);
     } else {

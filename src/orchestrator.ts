@@ -240,7 +240,13 @@ export function getUserLastWorker(requestedBy: string): string | null {
   return entry.workerName;
 }
 
-export async function quickDelegate(message: string, requestedBy: string): Promise<{ workerName: string; taskId: string } | null> {
+export interface DelegateAttachment {
+  file_id: string;
+  type: "photo" | "document" | "voice";
+  filename?: string;
+}
+
+export async function quickDelegate(message: string, requestedBy: string, attachments?: DelegateAttachment[]): Promise<{ workerName: string; taskId: string } | null> {
   const idle = workerBots.filter(w => w.status === "idle");
   if (!idle.length) return null;
 
@@ -273,7 +279,7 @@ export async function quickDelegate(message: string, requestedBy: string): Promi
     const r = await fetch(`${bw.apiUrl}/delegate`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message, requestedBy, taskId, leadApiUrl: getLeadApiUrl() }),
+      body: JSON.stringify({ message, requestedBy, taskId, leadApiUrl: getLeadApiUrl(), attachments }),
       signal: AbortSignal.timeout(10_000),
     });
     const j = await r.json() as any;
@@ -288,7 +294,7 @@ export async function quickDelegate(message: string, requestedBy: string): Promi
   } catch (e: any) {
     bw.status = "offline";
     const rem = workerBots.filter(w => w.status === "idle");
-    if (rem.length) return quickDelegate(message, requestedBy);
+    if (rem.length) return quickDelegate(message, requestedBy, attachments);
     return null;
   }
 }

@@ -12,15 +12,24 @@ import { getHudInfo } from "./claude";
 import { Bot } from "grammy";
 import { spawn } from "child_process";
 import { join } from "path";
+import { tmpdir } from "os";
+import { writeFile, unlink } from "fs/promises";
 
 const WORKER_API_PORT = parseInt(process.env.WORKER_API_PORT || "18800");
 const RESTART_SECRET = process.env.RESTART_SECRET || "lemonclaw-restart-2024";
+
+interface DelegateAttachment {
+  file_id: string;
+  type: "photo" | "document" | "voice";
+  filename?: string;
+}
 
 interface DelegateRequest {
   message: string;
   requestedBy: string;   // 요청자 Telegram chat ID
   taskId?: string;
   leadApiUrl?: string;
+  attachments?: DelegateAttachment[];
 }
 
 interface DelegateResponse {
@@ -220,10 +229,33 @@ async function processDelegate(bot: Bot, req: DelegateRequest): Promise<void> {
   // DB에 수신 메시지 저장
   reportMessage(leadUrl, { botName, botUsername, chatId, direction: "inbound", messageText: req.message });
 
+  // 첨부파일 다운로드 (리드가 file_id를 전달한 경우)
+  const localFiles: string[] = [];
+  if (req.attachments?.length) {
+    for (const att of req.attachments) {
+      try {
+        const file = await bot.api.getFile(att.file_id);
+        const fileUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
+        const resp = await fetch(fileUrl);
+        const buf = Buffer.from(await resp.arrayBuffer());
+        const ext = att.filename?.split(".").pop() || (att.type === "photo" ? "jpg" : att.type === "voice" ? "ogg" : "bin");
+        const tmpPath = join(tmpdir(), `tg_delegate_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.${ext}`);
+        await writeFile(tmpPath, buf);
+        localFiles.push(tmpPath);
+      } catch (e: any) {
+        console.error(`[WorkerAPI] Failed to download attachment ${att.file_id}: ${e.message}`);
+      }
+    }
+  }
+
   try {
     await bot.api.sendMessage(parseInt(chatId), `📥 @${botUsername} 작업 수신. 처리 중...`);
 
-    const response = await askClaudeWithProgress(chatId, req.message);
+    // 첨부파일 경로를 메시지에 포함
+    const msgWithFiles = localFiles.length
+      ? `${req.message}\n\n${localFiles.map(f => `[첨부파일: ${f}]`).join("\n")}`
+      : req.message;
+    const response = await askClaudeWithProgress(chatId, msgWithFiles);
 
     // DB에 응답 메시지 저장
     reportMessage(leadUrl, { botName, botUsername, chatId, direction: "outbound", messageText: response.slice(0, 10000) });
@@ -256,6 +288,8 @@ async function processDelegate(bot: Bot, req: DelegateRequest): Promise<void> {
     console.error(`[WorkerAPI] Failed: ${e.message}`);
     try { await bot.api.sendMessage(parseInt(chatId), `⚠️ @${botUsername} 작업 실패: ${e.message}`); } catch {}
   } finally {
+    // 임시 첨부파일 정리
+    for (const f of localFiles) { unlink(f).catch(() => {}); }
     notifyLeadIdle(botUsername, req.leadApiUrl, req.requestedBy).catch(() => {});
   }
 }
