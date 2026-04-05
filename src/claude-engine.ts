@@ -9,7 +9,7 @@
  * 이 파일에서 import하여 엔진에 무관하게 동작.
  */
 
-const ENGINE_VERSION = process.env.ENGINE_VERSION || "v1";
+const ENGINE_VERSION = process.env.ENGINE_VERSION || "v2";
 
 console.log(`[Engine] Using Claude engine: ${ENGINE_VERSION}`);
 
