@@ -440,7 +440,7 @@ function runClaude(chatId: string, message: string, attachments?: string[], onPr
 }
 
 const RETRY_DELAYS: Record<string, number[]> = {
-  session_expired: [0],       // 즉시 1회
+  session_expired: [0, 3_000],            // 즉시 1회 + 3초 후 1회 ("already in use" 대비)
   rate_limit: [10_000, 30_000, 60_000],  // 10s, 30s, 60s
   overloaded: [15_000, 45_000],          // 15s, 45s
   timeout: [5_000],                       // 5s 1회
@@ -479,6 +479,11 @@ async function runClaudeWithRetry(
         const session = sessions.get(chatId);
         if (session) {
           const isConflict = /already in use/i.test(err.message || "");
+          if (isConflict) {
+            // 이전 CLI 프로세스가 세션을 점유 중 → kill 후 새 UUID
+            console.log(`[Claude] Session conflict — killing stale CLI processes for chat=${chatId}`);
+            await killActiveProcesses();
+          }
           if (isConflict || attempt > 0) session.sessionId = randomUUID();
           session.isFirstTurn = true;
           saveSessions();
