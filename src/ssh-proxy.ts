@@ -65,9 +65,11 @@ export function startSshProxy(): void {
       if (url.pathname === "/ssh") {
         const serverName = url.searchParams.get("server");
         const secret = url.searchParams.get("secret");
-        // nginx auth_request 경유 시 X-Forwarded-For 헤더가 있으면 인증 통과 (nginx가 JWT 검증)
+        // 인증: nginx 프록시 경유 OR 시크릿 파라미터 OR 같은 호스트 브라우저 (Origin 체크)
         const isNginxProxy = req.headers.get("x-forwarded-for") || req.headers.get("x-real-ip");
-        if (!isNginxProxy && secret !== PROXY_SECRET) {
+        const origin = req.headers.get("origin") || "";
+        const isBrowserDirect = /^https?:\/\/(localhost|127\.0\.0\.1|100\.\d+\.\d+\.\d+)(:\d+)?$/.test(origin);
+        if (!isNginxProxy && !isBrowserDirect && secret !== PROXY_SECRET) {
           return new Response("Unauthorized", { status: 403 });
         }
         if (!serverName || !SERVER_MAP[serverName]) {
