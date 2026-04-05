@@ -105,12 +105,17 @@ async function startBot(retries = 5): Promise<void> {
       const is409 = e.error_code === 409 || String(e.message || "").includes("409");
       if (is409 && attempt < retries) {
         // 이전 프로세스의 long-polling이 Telegram 서버에서 타임아웃될 때까지 대기
-        const wait = attempt * 5; // 5s, 10s, 15s, 20s
+        // Telegram long-polling timeout은 ~30초이므로 충분히 길게 대기
+        const wait = Math.min(attempt * 10, 45); // 10s, 20s, 30s, 40s
         console.log(`[Bot] 409 conflict — waiting ${wait}s before retry (attempt ${attempt}/${retries})`);
         await new Promise(r => setTimeout(r, wait * 1000));
         continue;
       }
       console.error(`[Bot] Fatal error after ${attempt} attempts:`, e.message);
+      // PM2 즉시 재시작 시 이전 long-polling이 Telegram에서 아직 살아있어 409 무한루프 발생
+      // 45초 대기 후 exit하여 Telegram 쪽 이전 연결이 타임아웃되도록 함
+      console.log(`[Bot] Waiting 45s before exit to let Telegram polling timeout...`);
+      await new Promise(r => setTimeout(r, 45_000));
       process.exit(1);
     }
   }
