@@ -56,7 +56,8 @@ export function startWorkerApi(bot: Bot): void {
         const base = { ok: true, role: "worker", timestamp: Date.now(), pid: process.pid, botUsername: botInfo?.username || "unknown" };
         if (deep) {
           const cliOk = await checkCliAuth();
-          return jsonRes({ ...base, cliAuth: cliOk });
+          const authInfo = await getAuthInfo();
+          return jsonRes({ ...base, cliAuth: cliOk, authInfo });
         }
         return jsonRes(base);
       }
@@ -294,6 +295,24 @@ async function checkCliAuth(): Promise<boolean> {
       resolve(!stderr.toLowerCase().includes("expired") && !stderr.toLowerCase().includes("unauthorized") && !stderr.toLowerCase().includes("401"));
     });
     proc.on("error", () => { clearTimeout(timer); resolve(false); });
+  });
+}
+
+/** Claude CLI 인증 상세 정보 */
+async function getAuthInfo(): Promise<any> {
+  return new Promise((resolve) => {
+    const proc = spawn(process.env.CLAUDE_PATH || "claude", ["auth", "status"], {
+      env: { ...process.env, NO_COLOR: "1" },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    proc.stdout?.on("data", (d: Buffer) => { stdout += d.toString(); });
+    const timer = setTimeout(() => { try { proc.kill("SIGKILL"); } catch {} resolve(null); }, 10_000);
+    proc.on("close", (code) => {
+      clearTimeout(timer);
+      try { resolve(JSON.parse(stdout)); } catch { resolve(null); }
+    });
+    proc.on("error", () => { clearTimeout(timer); resolve(null); });
   });
 }
 

@@ -408,6 +408,41 @@ export function startLeadApi(): void {
       }
     }
 
+    // 워커 상세 (auth + 사용량 포함): GET /workers-detail
+    if (url.pathname === "/workers-detail" && req.method === "GET") {
+      const results = await Promise.allSettled(workerBots.map(async (w) => {
+        try {
+          const resp = await fetch(`${w.apiUrl}/health?deep=1`, { signal: AbortSignal.timeout(15_000) });
+          const data = await resp.json() as any;
+          // recent-activity에서 비용 합산
+          let totalCost = 0;
+          let totalSessions = 0;
+          try {
+            const actResp = await fetch(`${w.apiUrl}/recent-activity?count=100`, { signal: AbortSignal.timeout(5_000) });
+            const actData = await actResp.json() as any;
+            if (actData.ok && actData.activities) {
+              for (const a of actData.activities) {
+                if (a.cost) { totalCost += a.cost; totalSessions++; }
+              }
+            }
+          } catch {}
+          return {
+            name: w.name, username: w.username, apiUrl: w.apiUrl, repos: w.repos,
+            orchestratorStatus: w.status, health: data.ok ? "online" : "error",
+            pid: data.pid, botUsername: data.botUsername,
+            cliAuth: data.cliAuth,
+            authInfo: data.authInfo || null,
+            totalCost: Math.round(totalCost * 10000) / 10000,
+            totalSessions,
+          };
+        } catch {
+          return { name: w.name, username: w.username, apiUrl: w.apiUrl, repos: w.repos, orchestratorStatus: w.status, health: "offline" };
+        }
+      }));
+      const workers = results.map(r => r.status === "fulfilled" ? r.value : { health: "error" });
+      return json({ ok: true, workers, timestamp: Date.now() });
+    }
+
     // 워커 로그 프록시: POST /worker-logs { worker, lines? }
     if (url.pathname === "/worker-logs" && req.method === "POST") {
       try {
