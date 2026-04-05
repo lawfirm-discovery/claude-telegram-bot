@@ -153,8 +153,8 @@ async function processDelegate(bot: Bot, req: DelegateRequest): Promise<void> {
       await bot.api.sendMessage(parseInt(chatId), `⚠️ @${botUsername} 작업 실패: ${e.message}`);
     } catch {}
   } finally {
-    // 리드에 idle 보고 (완료/실패 상관없이)
-    notifyLeadIdle(botUsername, req.leadApiUrl).catch(() => {});
+    // 리드에 idle 보고 (완료/실패 상관없이) + requestedBy 전달 (세션 어피니티용)
+    notifyLeadIdle(botUsername, req.leadApiUrl, req.requestedBy).catch(() => {});
   }
 }
 
@@ -179,15 +179,15 @@ async function checkCliAuth(): Promise<boolean> {
   });
 }
 
-/** 리드 봇에 idle 상태 보고 */
-async function notifyLeadIdle(workerName: string, leadApiUrl?: string): Promise<void> {
+/** 리드 봇에 idle 상태 보고 (requestedBy 포함 — 세션 어피니티용) */
+async function notifyLeadIdle(workerName: string, leadApiUrl?: string, requestedBy?: string): Promise<void> {
   const leadUrl = leadApiUrl || process.env.LEAD_API_URL;
   if (!leadUrl) { console.warn("[WorkerAPI] No LEAD_API_URL"); return; }
   try {
     await fetch(`${leadUrl}/worker-idle`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ workerName }),
+      body: JSON.stringify({ workerName, requestedBy }),
       signal: AbortSignal.timeout(5000),
     });
   } catch {}

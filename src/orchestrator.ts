@@ -218,20 +218,72 @@ function formatTaskMessage(tid: string, sub: SubTask): string {
   return `[TASK:${tid}:${sub.id}]\n작업: ${sub.description}\n레포: ${sub.repo}\n브랜치: ${sub.branch}\n${sub.files?.length ? `파일: ${sub.files.join(", ")}` : ""}\n\n규칙: git checkout -b ${sub.branch}, push, DONE/FAIL 보고`;
 }
 
-// Quick Delegate
+// Quick Delegate + Session Affinity
 let rrIdx = 0;
+const SESSION_AFFINITY_TTL_MS = 600_000; // 10분 내 후속 요청은 같은 워커로
+const userLastWorker = new Map<string, { workerName: string; timestamp: number }>();
+
+export function getUserLastWorker(requestedBy: string): string | null {
+  const entry = userLastWorker.get(requestedBy);
+  if (!entry) return null;
+  if (Date.now() - entry.timestamp > SESSION_AFFINITY_TTL_MS) {
+    userLastWorker.delete(requestedBy);
+    return null;
+  }
+  return entry.workerName;
+}
+
 export async function quickDelegate(message: string, requestedBy: string): Promise<{ workerName: string; taskId: string } | null> {
-  const idle = workerBots.filter(w => w.status === "idle"); if (!idle.length) return null;
-  const fh = message.match(/(?:src|lib|pages|components)\/[\w/.-]+/g) || [];
-  let bw: WorkerBot; if (fh.length) { const bn = selectBestWorker(fh, ""); bw = idle.find(w => w.name === bn) || idle[rrIdx % idle.length]!; } else bw = idle[rrIdx % idle.length]!;
-  rrIdx++; const taskId = randomUUID().slice(0, 8); bw.status = "busy";
+  const idle = workerBots.filter(w => w.status === "idle");
+  if (!idle.length) return null;
+
+  let bw: WorkerBot;
+
+  // 1순위: 세션 어피니티 — 최근 같은 사용자의 요청을 처리한 워커 (idle이면)
+  const lastWorkerName = getUserLastWorker(requestedBy);
+  const affinityWorker = lastWorkerName ? idle.find(w => w.name === lastWorkerName) : null;
+
+  if (affinityWorker) {
+    bw = affinityWorker;
+    console.log(`[Orchestrator] Session affinity: ${bw.name} for user=${requestedBy}`);
+  } else {
+    // 2순위: 도메인 어피니티 — 파일 경로 기반
+    const fh = message.match(/(?:src|lib|pages|components)\/[\w/.-]+/g) || [];
+    if (fh.length) {
+      const bn = selectBestWorker(fh, "");
+      bw = idle.find(w => w.name === bn) || idle[rrIdx % idle.length]!;
+    } else {
+      // 3순위: 라운드로빈
+      bw = idle[rrIdx % idle.length]!;
+    }
+  }
+
+  rrIdx++;
+  const taskId = randomUUID().slice(0, 8);
+  bw.status = "busy";
+
   try {
-    const r = await fetch(`${bw.apiUrl}/delegate`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message, requestedBy, taskId, leadApiUrl: getLeadApiUrl() }), signal: AbortSignal.timeout(10_000) });
-    const j = await r.json() as any; if (!j.ok) throw new Error(j.error || "failed");
+    const r = await fetch(`${bw.apiUrl}/delegate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message, requestedBy, taskId, leadApiUrl: getLeadApiUrl() }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    const j = await r.json() as any;
+    if (!j.ok) throw new Error(j.error || "failed");
+
+    // 세션 어피니티 기록
+    userLastWorker.set(requestedBy, { workerName: bw.name, timestamp: Date.now() });
+
     console.log(`[Orchestrator] → ${bw.name}: ${message.slice(0, 50)}`);
     setTimeout(() => { if (bw.status === "busy") bw.status = "idle"; }, 600_000);
     return { workerName: bw.name, taskId };
-  } catch (e: any) { bw.status = "offline"; const rem = workerBots.filter(w => w.status === "idle"); if (rem.length) return quickDelegate(message, requestedBy); return null; }
+  } catch (e: any) {
+    bw.status = "offline";
+    const rem = workerBots.filter(w => w.status === "idle");
+    if (rem.length) return quickDelegate(message, requestedBy);
+    return null;
+  }
 }
 
 export function detectDelegateMessage(text: string): { requestedBy: string; message: string } | null { const m = text.match(/\[DELEGATE:(\d+)\]\n?([\s\S]*)/); return m ? { requestedBy: m[1]!, message: m[2]!.trim() } : null; }
@@ -308,7 +360,7 @@ export function startLeadApi(): void {
   Bun.serve({ port: LEAD_API_PORT, async fetch(req) {
     const url = new URL(req.url);
     if (url.pathname === "/health") return Response.json({ ok: true, role: "lead", workers: workerBots.map(w => ({ name: w.name, status: w.status, repos: w.repos })) });
-    if (url.pathname === "/worker-idle" && req.method === "POST") { try { const b = await req.json() as any; const w = workerBots.find(w => w.name === b.workerName || w.username === b.workerName); if (w) { w.status = "idle"; console.log(`[LeadAPI] ${w.name} idle`); } return Response.json({ ok: true }); } catch { return Response.json({ ok: false }, { status: 400 }); } }
+    if (url.pathname === "/worker-idle" && req.method === "POST") { try { const b = await req.json() as any; const w = workerBots.find(w => w.name === b.workerName || w.username === b.workerName); if (w) { w.status = "idle"; console.log(`[LeadAPI] ${w.name} idle`); } /* 세션 어피니티 타임스탬프 갱신 — 워커 작업 완료 시점 기준으로 10분 유지 */ if (b.requestedBy && w) { userLastWorker.set(b.requestedBy, { workerName: w.name, timestamp: Date.now() }); } return Response.json({ ok: true }); } catch { return Response.json({ ok: false }, { status: 400 }); } }
     return new Response("Not found", { status: 404 });
   }});
   console.log(`[LeadAPI] Listening on port ${LEAD_API_PORT}`);
