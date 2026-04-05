@@ -55,8 +55,9 @@ export function startSshProxy(): void {
       if (url.pathname === "/ssh") {
         const serverName = url.searchParams.get("server");
         const secret = url.searchParams.get("secret");
-
-        if (secret !== PROXY_SECRET) {
+        // nginx auth_request 경유 시 X-Forwarded-For 헤더가 있으면 인증 통과 (nginx가 JWT 검증)
+        const isNginxProxy = req.headers.get("x-forwarded-for") || req.headers.get("x-real-ip");
+        if (!isNginxProxy && secret !== PROXY_SECRET) {
           return new Response("Unauthorized", { status: 403 });
         }
         if (!serverName || !SERVER_MAP[serverName]) {
