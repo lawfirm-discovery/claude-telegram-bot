@@ -29,45 +29,68 @@ async function sendTelegram(chatId: string, text: string): Promise<void> {
   }
 }
 
-bot.start({
-  drop_pending_updates: true,
-  onStart: async (botInfo) => {
-    console.log(`Bot @${botInfo.username} is running!`);
-    console.log(`Send /start to the bot on Telegram to begin.`);
+// 서버/서비스는 한 번만 시작 (409 재시도 시 중복 방지)
+let servicesStarted = false;
+async function startServices(): Promise<void> {
+  if (servicesStarted) return;
+  servicesStarted = true;
 
-    appendMemoryLog(`Bot started: @${botInfo.username}`);
+  if (BOT_ROLE !== "lead") {
+    startHeartbeat(askClaude, sendTelegram);
+    startCron(askClaude, sendTelegram);
+  }
+  startSharedMemorySync();
 
-    // Start LemonClaw autonomous systems
-    // 리드 봇은 하트비트/크론 비활성화 — Claude 세션을 점유하면 위임이 안 됨
-    if (BOT_ROLE !== "lead") {
-      startHeartbeat(askClaude, sendTelegram);
-      startCron(askClaude, sendTelegram);
+  if (BOT_ROLE === "worker") {
+    startWorkerApi(bot);
+  }
+
+  if (BOT_ROLE === "lead") {
+    const { startLeadApi } = await import("./src/orchestrator");
+    startLeadApi();
+  }
+
+  if (BOT_ROLE === "lead") {
+    const { startSshProxy } = await import("./src/ssh-proxy");
+    startSshProxy();
+  }
+}
+
+// 409 재시도 포함 봇 시작
+async function startBot(retries = 5): Promise<void> {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      await bot.start({
+        drop_pending_updates: true,
+        onStart: async (botInfo) => {
+          console.log(`Bot @${botInfo.username} is running!`);
+          console.log(`Send /start to the bot on Telegram to begin.`);
+          appendMemoryLog(`Bot started: @${botInfo.username}`);
+
+          await startServices();
+
+          fireHook("on_start", askClaude, sendTelegram).catch((e) =>
+            console.error(`[LemonClaw] on_start hook error: ${e.message}`)
+          );
+        },
+      });
+      return; // start()가 정상 종료하면 (bot.stop() 호출 시) 리턴
+    } catch (e: any) {
+      const is409 = e.error_code === 409 || String(e.message || "").includes("409");
+      if (is409 && attempt < retries) {
+        // 이전 프로세스의 long-polling이 Telegram 서버에서 타임아웃될 때까지 대기
+        const wait = attempt * 5; // 5s, 10s, 15s, 20s
+        console.log(`[Bot] 409 conflict — waiting ${wait}s before retry (attempt ${attempt}/${retries})`);
+        await new Promise(r => setTimeout(r, wait * 1000));
+        continue;
+      }
+      console.error(`[Bot] Fatal error after ${attempt} attempts:`, e.message);
+      process.exit(1);
     }
-    startSharedMemorySync();
+  }
+}
 
-    // Worker API (워커 봇 — HTTP로 리드의 작업 수신)
-    if (BOT_ROLE === "worker") {
-      startWorkerApi(bot);
-    }
-
-    // Lead API (리드 봇 — 워커의 idle 보고 수신)
-    if (BOT_ROLE === "lead") {
-      const { startLeadApi } = await import("./src/orchestrator");
-      startLeadApi();
-    }
-
-    // SSH Proxy (리드봇에서만 실행 — 관리자 페이지 터미널용)
-    if (BOT_ROLE === "lead") {
-      const { startSshProxy } = await import("./src/ssh-proxy");
-      startSshProxy();
-    }
-
-    // Fire on_start hooks
-    fireHook("on_start", askClaude, sendTelegram).catch((e) =>
-      console.error(`[LemonClaw] on_start hook error: ${e.message}`)
-    );
-  },
-});
+startBot();
 
 // #4 Graceful shutdown — 진행 중 작업 완료 대기 후 종료
 const shutdown = async () => {
