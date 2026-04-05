@@ -360,7 +360,7 @@ function fmtSummary(task: OrchestratedTask, results: string[]): string {
 const LEAD_CORS = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, POST, OPTIONS", "Access-Control-Allow-Headers": "Content-Type" };
 
 export function startLeadApi(): void {
-  Bun.serve({ port: LEAD_API_PORT, async fetch(req) {
+  Bun.serve({ port: LEAD_API_PORT, idleTimeout: 120, async fetch(req) {
     if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: LEAD_CORS });
     const json = (data: any, status = 200) => Response.json(data, { status, headers: LEAD_CORS });
     const url = new URL(req.url);
