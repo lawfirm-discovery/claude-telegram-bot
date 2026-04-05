@@ -4,7 +4,33 @@ import { startHeartbeat, startCron, fireHook, stopLemonClaw, appendMemoryLog, st
 import { markdownToTelegramHtml, splitMessage } from "./src/format";
 import { startWorkerApi, stopWorkerApi } from "./src/worker-api";
 import { BOT_ROLE, stopHealthCheck } from "./src/orchestrator";
+import { existsSync, writeFileSync, readFileSync, unlinkSync } from "fs";
+import { join } from "path";
 // ssh-proxy는 리드봇에서만 동적 import (워커에서 키 파일 없어서 크래시 방지)
+
+// ── PID 파일 기반 중복 실행 방지 ──
+const PID_FILE = join(import.meta.dir, "bot.pid");
+function checkAndWritePid(): void {
+  if (existsSync(PID_FILE)) {
+    const oldPid = parseInt(readFileSync(PID_FILE, "utf-8").trim());
+    if (oldPid && !isNaN(oldPid)) {
+      try {
+        // 프로세스 존재 확인 (signal 0 = 확인만)
+        process.kill(oldPid, 0);
+        // 프로세스가 살아있으면 죽이고 대기
+        console.log(`[Bot] Killing previous instance (PID ${oldPid})...`);
+        process.kill(oldPid, "SIGTERM");
+        Bun.sleepSync(3000);
+        try { process.kill(oldPid, "SIGKILL"); } catch {}
+        Bun.sleepSync(1000);
+      } catch {
+        // 프로세스가 이미 죽어있음 — 정상
+      }
+    }
+  }
+  writeFileSync(PID_FILE, String(process.pid));
+}
+checkAndWritePid();
 
 console.log("Starting Claude Telegram Bot (LemonClaw Edition)...");
 console.log(`Model: ${process.env.CLAUDE_MODEL || "claude-opus-4-6"}`);
@@ -95,6 +121,7 @@ startBot();
 // #4 Graceful shutdown — 진행 중 작업 완료 대기 후 종료
 const shutdown = async () => {
   console.log("\nShutting down...");
+  try { unlinkSync(PID_FILE); } catch {}
   stopLemonClaw();
   stopHealthCheck();
   stopWorkerApi();
