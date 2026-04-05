@@ -52,17 +52,65 @@ function parseWorkerBots(): WorkerBot[] {
 const workerBots: WorkerBot[] = parseWorkerBots();
 function getLeadApiUrl(): string { return process.env.LEAD_API_URL || `http://100.108.86.92:${LEAD_API_PORT}`; }
 
-// Health Check
+// Health Check + Auto Recovery
+const RESTART_SECRET = process.env.RESTART_SECRET || "lemonclaw-restart-2024";
+const workerFailCount = new Map<string, number>(); // 연속 실패 횟수 추적
+
 async function checkWorkerHealth(): Promise<void> {
   await Promise.allSettled(workerBots.map(async (w) => {
     try {
-      const resp = await fetch(`${w.apiUrl}/health`, { signal: AbortSignal.timeout(3000) });
+      const resp = await fetch(`${w.apiUrl}/health?deep=1`, { signal: AbortSignal.timeout(10_000) });
       const data = await resp.json() as any;
-      if (data.ok && w.status === "offline") { w.status = "idle"; console.log(`[HealthCheck] ${w.name} back online`); }
-      if (!data.ok && w.status !== "busy") w.status = "offline";
-    } catch { if (w.status !== "busy") w.status = "offline"; }
+      if (data.ok) {
+        if (w.status === "offline") { w.status = "idle"; console.log(`[HealthCheck] ${w.name} back online`); }
+        workerFailCount.set(w.name, 0);
+
+        // CLI 인증 실패 감지 → 세션 리셋 시도
+        if (data.cliAuth === false) {
+          console.log(`[HealthCheck] ${w.name}: CLI auth failed — resetting session`);
+          try {
+            await fetch(`${w.apiUrl}/reset-session`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ secret: RESTART_SECRET }),
+              signal: AbortSignal.timeout(5_000),
+            });
+          } catch {}
+        }
+      } else {
+        await handleWorkerDown(w, "unhealthy response");
+      }
+    } catch {
+      await handleWorkerDown(w, "unreachable");
+    }
   }));
-  console.log(`[HealthCheck] ${workerBots.filter(w => w.status !== "offline").length} online, ${workerBots.filter(w => w.status === "offline").length} offline`);
+  const online = workerBots.filter(w => w.status !== "offline").length;
+  const offline = workerBots.filter(w => w.status === "offline").length;
+  console.log(`[HealthCheck] ${online} online, ${offline} offline`);
+}
+
+async function handleWorkerDown(w: WorkerBot, reason: string): Promise<void> {
+  if (w.status === "busy") return; // 작업 중이면 건드리지 않음
+  const fails = (workerFailCount.get(w.name) || 0) + 1;
+  workerFailCount.set(w.name, fails);
+
+  // 연속 3회 실패 시 재시작 시도 (1회차: 일시적일 수 있음)
+  if (fails === 3) {
+    console.log(`[HealthCheck] ${w.name}: ${fails} consecutive fails (${reason}) — attempting restart`);
+    try {
+      await fetch(`${w.apiUrl}/restart`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ secret: RESTART_SECRET, reason: `auto-recovery: ${reason}` }),
+        signal: AbortSignal.timeout(5_000),
+      });
+      console.log(`[HealthCheck] ${w.name}: restart signal sent`);
+    } catch {
+      console.log(`[HealthCheck] ${w.name}: restart failed (server unreachable)`);
+    }
+  }
+
+  w.status = "offline";
 }
 let healthCheckInterval: ReturnType<typeof setInterval> | null = null;
 export function startHealthCheck(): void { checkWorkerHealth(); healthCheckInterval = setInterval(checkWorkerHealth, 60_000); }

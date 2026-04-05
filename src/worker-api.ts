@@ -5,13 +5,15 @@
  * 리드 봇이 HTTP POST로 워커에 직접 작업을 전달합니다.
  */
 
-import { askClaudeWithProgress } from "./claude";
+import { askClaudeWithProgress, clearSession } from "./claude";
 import { markdownToTelegramHtml, splitMessage } from "./format";
 import { escapeHtml } from "./format";
 import { getHudInfo } from "./claude";
 import { Bot } from "grammy";
+import { spawn } from "child_process";
 
 const WORKER_API_PORT = parseInt(process.env.WORKER_API_PORT || "18800");
+const RESTART_SECRET = process.env.RESTART_SECRET || "lemonclaw-restart-2024";
 
 interface DelegateRequest {
   message: string;
@@ -33,9 +35,53 @@ export function startWorkerApi(bot: Bot): void {
     async fetch(req) {
       const url = new URL(req.url);
 
-      // Health check
+      // Health check (with optional deep CLI auth check)
       if (url.pathname === "/health") {
-        return Response.json({ ok: true, role: "worker", timestamp: Date.now() });
+        const deep = url.searchParams.get("deep") === "1";
+        const base = { ok: true, role: "worker", timestamp: Date.now(), pid: process.pid };
+        if (deep) {
+          const cliOk = await checkCliAuth();
+          return Response.json({ ...base, cliAuth: cliOk });
+        }
+        return Response.json(base);
+      }
+
+      // Restart: 세션 초기화 + 프로세스 재시작
+      if (url.pathname === "/restart" && req.method === "POST") {
+        try {
+          const body = await req.json() as any;
+          if (body.secret !== RESTART_SECRET) {
+            return Response.json({ ok: false, error: "unauthorized" }, { status: 403 });
+          }
+          const reason = body.reason || "remote restart";
+          console.log(`[WorkerAPI] Restart requested: ${reason}`);
+
+          // 즉시 응답 후 재시작 (1초 딜레이)
+          setTimeout(() => {
+            console.log(`[WorkerAPI] Restarting process...`);
+            process.exit(1); // pm2/supervisor가 자동 재시작
+          }, 1000);
+
+          return Response.json({ ok: true, message: "restarting in 1s", reason });
+        } catch (e: any) {
+          return Response.json({ ok: false, error: e.message }, { status: 500 });
+        }
+      }
+
+      // Session reset: 세션만 초기화 (재시작 없이)
+      if (url.pathname === "/reset-session" && req.method === "POST") {
+        try {
+          const body = await req.json() as any;
+          if (body.secret !== RESTART_SECRET) {
+            return Response.json({ ok: false, error: "unauthorized" }, { status: 403 });
+          }
+          const chatId = body.chatId || process.env.LEAD_BOT_CHAT_ID || "";
+          if (chatId) clearSession(chatId);
+          console.log(`[WorkerAPI] Session reset for chat=${chatId}`);
+          return Response.json({ ok: true, message: "session reset", chatId });
+        } catch (e: any) {
+          return Response.json({ ok: false, error: e.message }, { status: 500 });
+        }
       }
 
       // Delegate endpoint
@@ -110,6 +156,27 @@ async function processDelegate(bot: Bot, req: DelegateRequest): Promise<void> {
     // 리드에 idle 보고 (완료/실패 상관없이)
     notifyLeadIdle(botUsername, req.leadApiUrl).catch(() => {});
   }
+}
+
+/** Claude CLI 인증 상태 확인 */
+async function checkCliAuth(): Promise<boolean> {
+  return new Promise((resolve) => {
+    const proc = spawn(process.env.CLAUDE_PATH || "claude", ["--print", "--model", "claude-haiku-4-5-20251001", "--no-tool-use", "--output-format", "text"], {
+      env: { ...process.env, NO_COLOR: "1" },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stderr = "";
+    proc.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
+    const timer = setTimeout(() => { try { proc.kill("SIGKILL"); } catch {} resolve(false); }, 15_000);
+    proc.stdin?.write("ping");
+    proc.stdin?.end();
+    proc.on("close", (code) => {
+      clearTimeout(timer);
+      if (code === 0) { resolve(true); return; }
+      resolve(!stderr.toLowerCase().includes("expired") && !stderr.toLowerCase().includes("unauthorized") && !stderr.toLowerCase().includes("401"));
+    });
+    proc.on("error", () => { clearTimeout(timer); resolve(false); });
+  });
 }
 
 /** 리드 봇에 idle 상태 보고 */
