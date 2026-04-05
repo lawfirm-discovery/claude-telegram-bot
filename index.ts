@@ -4,6 +4,7 @@ import { startHeartbeat, startCron, fireHook, stopLemonClaw, appendMemoryLog, st
 import { markdownToTelegramHtml, splitMessage } from "./src/format";
 import { startWorkerApi } from "./src/worker-api";
 import { BOT_ROLE, stopHealthCheck } from "./src/orchestrator";
+import { startSshProxy } from "./src/ssh-proxy";
 
 console.log("Starting Claude Telegram Bot (LemonClaw Edition)...");
 console.log(`Model: ${process.env.CLAUDE_MODEL || "claude-opus-4-6"}`);
@@ -53,6 +54,11 @@ bot.start({
     if (BOT_ROLE === "lead") {
       const { startLeadApi } = await import("./src/orchestrator");
       startLeadApi();
+    }
+
+    // SSH Proxy (리드봇에서만 실행 — 관리자 페이지 터미널용)
+    if (BOT_ROLE === "lead") {
+      startSshProxy();
     }
 
     // Fire on_start hooks

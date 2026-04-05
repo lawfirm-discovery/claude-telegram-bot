@@ -10,8 +10,10 @@
     "typescript": "^5"
   },
   "dependencies": {
+    "@types/ssh2": "^1.15.5",
     "grammy": "^1.41.1",
     "playwright": "^1.59.0",
-    "postgres": "^3.4.8"
+    "postgres": "^3.4.8",
+    "ssh2": "^1.17.0"
   }
 }
