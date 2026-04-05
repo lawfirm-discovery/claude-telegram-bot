@@ -1,5 +1,5 @@
 import { Bot, InlineKeyboard } from "grammy";
-import { askClaude, askClaudeWithProgress, clearSession, getSessionStats, getHudInfo, killActiveProcesses, loadInterruptedContext, hasInterruptedContext, type ProgressInfo } from "./claude";
+import { askClaude, askClaudeWithProgress, clearSession, getSessionStats, getHudInfo, killActiveProcesses, loadInterruptedContext, hasInterruptedContext, type ProgressInfo } from "./claude-engine";
 import { appendMemoryLog, appendSharedMemory } from "./lemonclaw";
 import {
   BOT_ROLE, planTask, dispatchTask, handleWorkerReport,

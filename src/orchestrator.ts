@@ -10,7 +10,7 @@ import { spawn } from "child_process";
 import { readFileSync, writeFileSync, existsSync } from "fs";
 import { join } from "path";
 import { saveMessage, saveSession, getMessages, getSessions, getStats, testConnection, type SaveMessageParams, type SaveSessionParams } from "./db";
-import { CLI_SUPPORTS_EFFORT } from "./claude";
+import { CLI_SUPPORTS_EFFORT } from "./claude-engine";
 
 export type BotRole = "lead" | "worker";
 

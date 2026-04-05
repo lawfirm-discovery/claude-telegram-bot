@@ -5,10 +5,10 @@
  * 리드 봇이 HTTP POST로 워커에 직접 작업을 전달합니다.
  */
 
-import { askClaudeWithProgress, clearSession } from "./claude";
+import { askClaudeWithProgress, clearSession } from "./claude-engine";
 import { markdownToTelegramHtml, splitMessage } from "./format";
 import { escapeHtml } from "./format";
-import { getHudInfo } from "./claude";
+import { getHudInfo } from "./claude-engine";
 import { Bot } from "grammy";
 import { spawn } from "child_process";
 import { join } from "path";

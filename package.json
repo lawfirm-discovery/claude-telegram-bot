@@ -10,6 +10,7 @@
     "typescript": "^5"
   },
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.92",
     "@types/ssh2": "^1.15.5",
     "grammy": "^1.41.1",
     "playwright": "^1.59.0",
