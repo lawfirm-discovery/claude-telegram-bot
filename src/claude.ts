@@ -10,6 +10,22 @@ const CLAUDE_PATH = process.env.CLAUDE_PATH || "claude";
 const CLAUDE_MODEL = process.env.CLAUDE_MODEL || "claude-opus-4-6";
 const CLAUDE_LIGHT_MODEL = process.env.CLAUDE_LIGHT_MODEL || "claude-sonnet-4-6";
 const CLAUDE_EFFORT = process.env.CLAUDE_EFFORT || "medium"; // low | medium | high | max
+
+// CLI 버전 체크: --effort 플래그 지원 여부 (v2.1.7+ 부터 지원)
+export let CLI_SUPPORTS_EFFORT = true;
+try {
+  const ver = Bun.spawnSync([CLAUDE_PATH, "--version"]).stdout.toString().trim();
+  const match = ver.match(/(\d+)\.(\d+)\.(\d+)/);
+  if (match) {
+    const [, major, minor, patch] = match.map(Number);
+    if (major < 2 || (major === 2 && minor < 2 && patch < 7)) {
+      CLI_SUPPORTS_EFFORT = false;
+      console.log(`[Claude] CLI v${ver} — --effort not supported, will be omitted`);
+    } else {
+      console.log(`[Claude] CLI v${ver} — --effort supported`);
+    }
+  }
+} catch { CLI_SUPPORTS_EFFORT = false; }
 const ENABLE_MODEL_ROUTING = process.env.ENABLE_MODEL_ROUTING !== "false"; // default: true
 const SESSION_TTL_MS = parseInt(process.env.SESSION_TTL_MS || "3600000");
 const MAX_TURNS = parseInt(process.env.MAX_TURNS || "200"); // 안전망 (진짜 runaway만 차단)
@@ -494,8 +510,8 @@ function executeClaudeCli(
     "-p", "--verbose",
     "--output-format", "stream-json",
     "--permission-mode", "bypassPermissions",
-    "--effort", routing.effort,
   ];
+  if (CLI_SUPPORTS_EFFORT) baseArgs.push("--effort", routing.effort);
 
   if (USE_BARE_MODE) baseArgs.push("--bare");
   if (ALLOWED_TOOLS) baseArgs.push("--tools", ALLOWED_TOOLS);

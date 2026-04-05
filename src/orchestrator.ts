@@ -10,6 +10,7 @@ import { spawn } from "child_process";
 import { readFileSync, writeFileSync, existsSync } from "fs";
 import { join } from "path";
 import { saveMessage, saveSession, getMessages, getSessions, getStats, testConnection, type SaveMessageParams, type SaveSessionParams } from "./db";
+import { CLI_SUPPORTS_EFFORT } from "./claude";
 
 export type BotRole = "lead" | "worker";
 
@@ -180,7 +181,8 @@ type SendTelegramFn = (chatId: string, message: string) => Promise<void>;
 
 async function askClaudeLight(prompt: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    const proc = spawn(process.env.CLAUDE_PATH || "claude", ["-p", prompt, "--model", "claude-sonnet-4-6", "--effort", "low", "--no-tool-use", "--output-format", "text", "--permission-mode", "bypassPermissions"], { env: { ...process.env, NO_COLOR: "1", TELEGRAM_BOT_TOKEN: "" }, stdio: ["ignore", "pipe", "pipe"] });
+    const args = ["-p", prompt, "--model", "claude-sonnet-4-6", ...(CLI_SUPPORTS_EFFORT ? ["--effort", "low"] : []), "--no-tool-use", "--output-format", "text", "--permission-mode", "bypassPermissions"];
+    const proc = spawn(process.env.CLAUDE_PATH || "claude", args, { env: { ...process.env, NO_COLOR: "1", TELEGRAM_BOT_TOKEN: "" }, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "", stderr = "";
     proc.stdout?.on("data", (d: Buffer) => { stdout += d.toString(); });
     proc.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
