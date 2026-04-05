@@ -29,21 +29,35 @@ interface DelegateResponse {
   error?: string;
 }
 
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type",
+};
+
 export function startWorkerApi(bot: Bot): void {
   const server = Bun.serve({
     port: WORKER_API_PORT,
     async fetch(req) {
+      // CORS preflight
+      if (req.method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: CORS_HEADERS });
+      }
+
       const url = new URL(req.url);
+
+      const jsonRes = (data: any, status = 200) => Response.json(data, { status, headers: CORS_HEADERS });
 
       // Health check (with optional deep CLI auth check)
       if (url.pathname === "/health") {
         const deep = url.searchParams.get("deep") === "1";
-        const base = { ok: true, role: "worker", timestamp: Date.now(), pid: process.pid };
+        const botInfo = await bot.api.getMe().catch(() => null);
+        const base = { ok: true, role: "worker", timestamp: Date.now(), pid: process.pid, botUsername: botInfo?.username || "unknown" };
         if (deep) {
           const cliOk = await checkCliAuth();
-          return Response.json({ ...base, cliAuth: cliOk });
+          return jsonRes({ ...base, cliAuth: cliOk });
         }
-        return Response.json(base);
+        return jsonRes(base);
       }
 
       // Restart: 세션 초기화 + 프로세스 재시작

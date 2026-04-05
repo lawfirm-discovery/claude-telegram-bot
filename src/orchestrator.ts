@@ -355,13 +355,70 @@ function fmtSummary(task: OrchestratedTask, results: string[]): string {
   return [`📋 #${task.id} — ${task.status === "completed" ? "✅" : "❌"}`, `⏱ ${Math.round(((task.completedAt || Date.now()) - task.createdAt) / 1000)}s`, `요청: ${task.originalPrompt.slice(0, 100)}`, "", ...results].join("\n");
 }
 
-// Lead API
+// Lead API — 프론트엔드 대시보드 + 워커 간 통신
+const LEAD_CORS = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, POST, OPTIONS", "Access-Control-Allow-Headers": "Content-Type" };
+
 export function startLeadApi(): void {
   Bun.serve({ port: LEAD_API_PORT, async fetch(req) {
+    if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: LEAD_CORS });
+    const json = (data: any, status = 200) => Response.json(data, { status, headers: LEAD_CORS });
     const url = new URL(req.url);
-    if (url.pathname === "/health") return Response.json({ ok: true, role: "lead", workers: workerBots.map(w => ({ name: w.name, status: w.status, repos: w.repos })) });
-    if (url.pathname === "/worker-idle" && req.method === "POST") { try { const b = await req.json() as any; const w = workerBots.find(w => w.name === b.workerName || w.username === b.workerName); if (w) { w.status = "idle"; console.log(`[LeadAPI] ${w.name} idle`); } /* 세션 어피니티 타임스탬프 갱신 — 워커 작업 완료 시점 기준으로 10분 유지 */ if (b.requestedBy && w) { userLastWorker.set(b.requestedBy, { workerName: w.name, timestamp: Date.now() }); } return Response.json({ ok: true }); } catch { return Response.json({ ok: false }, { status: 400 }); } }
-    return new Response("Not found", { status: 404 });
+
+    // 전체 상태 (프론트엔드 대시보드용)
+    if (url.pathname === "/health") {
+      return json({ ok: true, role: "lead", workers: workerBots.map(w => ({ name: w.name, username: w.username, status: w.status, repos: w.repos, apiUrl: w.apiUrl })) });
+    }
+
+    // 워커 상세 상태 (프론트에서 전체 워커의 deep health를 한 번에 조회)
+    if (url.pathname === "/workers" && req.method === "GET") {
+      const results = await Promise.allSettled(workerBots.map(async (w) => {
+        try {
+          const resp = await fetch(`${w.apiUrl}/health`, { signal: AbortSignal.timeout(5_000) });
+          const data = await resp.json() as any;
+          return { name: w.name, username: w.username, apiUrl: w.apiUrl, repos: w.repos, orchestratorStatus: w.status, health: data.ok ? "online" : "error", pid: data.pid, botUsername: data.botUsername };
+        } catch {
+          return { name: w.name, username: w.username, apiUrl: w.apiUrl, repos: w.repos, orchestratorStatus: w.status, health: "offline" };
+        }
+      }));
+      const workers = results.map(r => r.status === "fulfilled" ? r.value : { health: "error" });
+      return json({ ok: true, workers, timestamp: Date.now() });
+    }
+
+    // 개별 워커 제어: POST /worker-action { worker: "3060", action: "restart" | "reset-session" }
+    if (url.pathname === "/worker-action" && req.method === "POST") {
+      try {
+        const body = await req.json() as any;
+        const w = workerBots.find(w => w.name === body.worker);
+        if (!w) return json({ ok: false, error: "worker not found" }, 404);
+
+        const endpoint = body.action === "restart" ? "/restart" : body.action === "reset-session" ? "/reset-session" : null;
+        if (!endpoint) return json({ ok: false, error: "invalid action" }, 400);
+
+        const resp = await fetch(`${w.apiUrl}${endpoint}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ secret: RESTART_SECRET, reason: `dashboard: ${body.action}` }),
+          signal: AbortSignal.timeout(10_000),
+        });
+        const result = await resp.json();
+        return json({ ok: true, worker: w.name, action: body.action, result });
+      } catch (e: any) {
+        return json({ ok: false, error: e.message }, 500);
+      }
+    }
+
+    // 워커 idle 보고
+    if (url.pathname === "/worker-idle" && req.method === "POST") {
+      try {
+        const b = await req.json() as any;
+        const w = workerBots.find(w => w.name === b.workerName || w.username === b.workerName);
+        if (w) { w.status = "idle"; console.log(`[LeadAPI] ${w.name} idle`); }
+        if (b.requestedBy && w) { userLastWorker.set(b.requestedBy, { workerName: w.name, timestamp: Date.now() }); }
+        return json({ ok: true });
+      } catch { return json({ ok: false }, 400); }
+    }
+
+    return new Response("Not found", { status: 404, headers: LEAD_CORS });
   }});
   console.log(`[LeadAPI] Listening on port ${LEAD_API_PORT}`);
   startHealthCheck();
