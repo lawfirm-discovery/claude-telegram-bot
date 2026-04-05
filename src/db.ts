@@ -2,23 +2,18 @@
  * DB Module — PostgreSQL 대화 기록 저장
  *
  * 리드봇에서만 실행. 워커는 Lead API를 통해 메시지를 보고.
- * Bun.sql 내장 PostgreSQL 드라이버 사용 (별도 의존성 없음).
+ * postgres.js 라이브러리 사용.
  */
+
+import postgres from "postgres";
 
 const DB_URL = process.env.LEMONCLAW_DB_URL || "postgres://lemonclaw:lemonclaw2024@127.0.0.1:5434/lemonclaw";
 
-let db: ReturnType<typeof Bun.sql> | null = null;
-
-function getDb() {
-  if (!db) {
-    db = Bun.sql(DB_URL);
-  }
-  return db;
-}
+const sql = postgres(DB_URL, { max: 5, idle_timeout: 30 });
 
 export async function testConnection(): Promise<boolean> {
   try {
-    const result = await getDb()`SELECT 1 AS ok`;
+    const result = await sql`SELECT 1 AS ok`;
     return result[0]?.ok === 1;
   } catch (e: any) {
     console.error(`[DB] Connection failed: ${e.message}`);
@@ -44,7 +39,7 @@ export interface SaveMessageParams {
 
 export async function saveMessage(params: SaveMessageParams): Promise<void> {
   try {
-    await getDb()`
+    await sql`
       INSERT INTO bot_messages (bot_name, bot_username, chat_id, user_name, direction, message_text, attachments, telegram_message_id, reply_to_message_id)
       VALUES (${params.botName}, ${params.botUsername || null}, ${params.chatId}, ${params.userName || null}, ${params.direction}, ${params.messageText}, ${JSON.stringify(params.attachments || [])}, ${params.telegramMessageId || null}, ${params.replyToMessageId || null})
     `;
@@ -66,26 +61,17 @@ export async function getMessages(query: MessageQuery): Promise<{ messages: any[
   const offset = query.offset || 0;
 
   try {
-    let where = "1=1";
-    const params: any[] = [];
-    let paramIdx = 1;
-
-    if (query.botName) { where += ` AND bot_name = $${paramIdx++}`; params.push(query.botName); }
-    if (query.chatId) { where += ` AND chat_id = $${paramIdx++}`; params.push(query.chatId); }
-    if (query.search) { where += ` AND message_text ILIKE $${paramIdx++}`; params.push(`%${query.search}%`); }
-
-    // Bun.sql은 tagged template만 지원하므로 raw query 방식 사용
     const messages = query.search
-      ? await getDb()`SELECT * FROM bot_messages WHERE message_text ILIKE ${'%' + query.search + '%'} ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}`
+      ? await sql`SELECT * FROM bot_messages WHERE message_text ILIKE ${'%' + query.search + '%'} ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}`
       : query.botName
-        ? await getDb()`SELECT * FROM bot_messages WHERE bot_name = ${query.botName} ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}`
-        : await getDb()`SELECT * FROM bot_messages ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}`;
+        ? await sql`SELECT * FROM bot_messages WHERE bot_name = ${query.botName} ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}`
+        : await sql`SELECT * FROM bot_messages ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}`;
 
     const countResult = query.search
-      ? await getDb()`SELECT COUNT(*)::int AS total FROM bot_messages WHERE message_text ILIKE ${'%' + query.search + '%'}`
+      ? await sql`SELECT COUNT(*)::int AS total FROM bot_messages WHERE message_text ILIKE ${'%' + query.search + '%'}`
       : query.botName
-        ? await getDb()`SELECT COUNT(*)::int AS total FROM bot_messages WHERE bot_name = ${query.botName}`
-        : await getDb()`SELECT COUNT(*)::int AS total FROM bot_messages`;
+        ? await sql`SELECT COUNT(*)::int AS total FROM bot_messages WHERE bot_name = ${query.botName}`
+        : await sql`SELECT COUNT(*)::int AS total FROM bot_messages`;
 
     return { messages: Array.from(messages), total: countResult[0]?.total || 0 };
   } catch (e: any) {
@@ -112,7 +98,7 @@ export interface SaveSessionParams {
 
 export async function saveSession(params: SaveSessionParams): Promise<void> {
   try {
-    await getDb()`
+    await sql`
       INSERT INTO bot_sessions (bot_name, chat_id, session_id, turns, input_tokens, output_tokens, cache_read, total_cost, duration_sec, status, ended_at)
       VALUES (${params.botName}, ${params.chatId}, ${params.sessionId || null}, ${params.turns}, ${params.inputTokens}, ${params.outputTokens}, ${params.cacheRead}, ${params.totalCost}, ${params.durationSec}, 'completed', NOW())
     `;
@@ -124,8 +110,8 @@ export async function saveSession(params: SaveSessionParams): Promise<void> {
 export async function getSessions(botName?: string, limit = 50): Promise<any[]> {
   try {
     const rows = botName
-      ? await getDb()`SELECT * FROM bot_sessions WHERE bot_name = ${botName} ORDER BY started_at DESC LIMIT ${limit}`
-      : await getDb()`SELECT * FROM bot_sessions ORDER BY started_at DESC LIMIT ${limit}`;
+      ? await sql`SELECT * FROM bot_sessions WHERE bot_name = ${botName} ORDER BY started_at DESC LIMIT ${limit}`
+      : await sql`SELECT * FROM bot_sessions ORDER BY started_at DESC LIMIT ${limit}`;
     return Array.from(rows);
   } catch (e: any) {
     console.error(`[DB] getSessions failed: ${e.message}`);
@@ -139,10 +125,10 @@ export async function getSessions(botName?: string, limit = 50): Promise<any[]> 
 
 export async function getStats(): Promise<any> {
   try {
-    const msgCount = await getDb()`SELECT COUNT(*)::int AS total FROM bot_messages`;
-    const sessionCount = await getDb()`SELECT COUNT(*)::int AS total FROM bot_sessions`;
-    const costSum = await getDb()`SELECT COALESCE(SUM(total_cost), 0)::float AS total FROM bot_sessions`;
-    const botStats = await getDb()`
+    const msgCount = await sql`SELECT COUNT(*)::int AS total FROM bot_messages`;
+    const sessionCount = await sql`SELECT COUNT(*)::int AS total FROM bot_sessions`;
+    const costSum = await sql`SELECT COALESCE(SUM(total_cost), 0)::float AS total FROM bot_sessions`;
+    const botStats = await sql`
       SELECT bot_name, COUNT(*)::int AS message_count, MAX(created_at) AS last_active
       FROM bot_messages GROUP BY bot_name ORDER BY last_active DESC
     `;

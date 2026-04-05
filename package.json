@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "grammy": "^1.41.1",
-    "playwright": "^1.59.0"
+    "playwright": "^1.59.0",
+    "postgres": "^3.4.8"
   }
 }
