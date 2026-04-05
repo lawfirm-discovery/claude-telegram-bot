@@ -407,6 +407,44 @@ export function startLeadApi(): void {
       }
     }
 
+    // 워커 로그 프록시: POST /worker-logs { worker, lines? }
+    if (url.pathname === "/worker-logs" && req.method === "POST") {
+      try {
+        const body = await req.json() as any;
+        const w = workerBots.find(w => w.name === body.worker);
+        if (!w) return json({ ok: false, error: "worker not found" }, 404);
+        const resp = await fetch(`${w.apiUrl}/logs?lines=${body.lines || 100}`, { signal: AbortSignal.timeout(10_000) });
+        return json(await resp.json());
+      } catch (e: any) { return json({ ok: false, error: e.message }, 500); }
+    }
+
+    // 워커 명령 실행 프록시: POST /worker-exec { worker, command }
+    if (url.pathname === "/worker-exec" && req.method === "POST") {
+      try {
+        const body = await req.json() as any;
+        const w = workerBots.find(w => w.name === body.worker);
+        if (!w) return json({ ok: false, error: "worker not found" }, 404);
+        const resp = await fetch(`${w.apiUrl}/exec`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ secret: RESTART_SECRET, command: body.command, timeout: body.timeout }),
+          signal: AbortSignal.timeout(65_000),
+        });
+        return json(await resp.json());
+      } catch (e: any) { return json({ ok: false, error: e.message }, 500); }
+    }
+
+    // 워커 최근 작업 프록시: POST /worker-recent { worker, count? }
+    if (url.pathname === "/worker-recent" && req.method === "POST") {
+      try {
+        const body = await req.json() as any;
+        const w = workerBots.find(w => w.name === body.worker);
+        if (!w) return json({ ok: false, error: "worker not found" }, 404);
+        const resp = await fetch(`${w.apiUrl}/recent-activity?count=${body.count || 10}`, { signal: AbortSignal.timeout(10_000) });
+        return json(await resp.json());
+      } catch (e: any) { return json({ ok: false, error: e.message }, 500); }
+    }
+
     // 워커 idle 보고
     if (url.pathname === "/worker-idle" && req.method === "POST") {
       try {

@@ -98,6 +98,86 @@ export function startWorkerApi(bot: Bot): void {
         }
       }
 
+      // 로그 조회: GET /logs?lines=100
+      if (url.pathname === "/logs") {
+        const lines = parseInt(url.searchParams.get("lines") || "100");
+        try {
+          const logPath = join(import.meta.dir, "..", "bot.log");
+          const file = Bun.file(logPath);
+          if (await file.exists()) {
+            const text = await file.text();
+            const allLines = text.split("\n");
+            const tail = allLines.slice(-Math.min(lines, 500)).join("\n");
+            return jsonRes({ ok: true, lines: tail, total: allLines.length });
+          }
+          return jsonRes({ ok: false, error: "bot.log not found" }, 404);
+        } catch (e: any) {
+          return jsonRes({ ok: false, error: e.message }, 500);
+        }
+      }
+
+      // 명령 실행: POST /exec { secret, command, timeout? }
+      if (url.pathname === "/exec" && req.method === "POST") {
+        try {
+          const body = await req.json() as any;
+          if (body.secret !== RESTART_SECRET) return jsonRes({ ok: false, error: "unauthorized" }, 403);
+          if (!body.command) return jsonRes({ ok: false, error: "command required" }, 400);
+
+          const timeoutMs = Math.min(body.timeout || 30000, 60000);
+          const proc = Bun.spawn(["bash", "-c", body.command], {
+            cwd: join(import.meta.dir, ".."),
+            env: { ...process.env, NO_COLOR: "1", PATH: `${process.env.HOME}/.bun/bin:${process.env.HOME}/.local/bin:${process.env.HOME}/.nvm/versions/node/v22.22.0/bin:/usr/local/bin:/usr/bin:/bin:${process.env.PATH}` },
+            stdout: "pipe",
+            stderr: "pipe",
+          });
+          const timer = setTimeout(() => proc.kill(), timeoutMs);
+          const stdout = await new Response(proc.stdout).text();
+          const stderr = await new Response(proc.stderr).text();
+          const code = await proc.exited;
+          clearTimeout(timer);
+
+          console.log(`[WorkerAPI] Exec: "${body.command.slice(0, 60)}" exit=${code}`);
+          return jsonRes({ ok: code === 0, stdout: stdout.slice(0, 10000), stderr: stderr.slice(0, 5000), exitCode: code });
+        } catch (e: any) {
+          return jsonRes({ ok: false, error: e.message }, 500);
+        }
+      }
+
+      // 최근 작업 내역: GET /recent-activity?count=10
+      if (url.pathname === "/recent-activity") {
+        try {
+          const count = parseInt(url.searchParams.get("count") || "10");
+          const logPath = join(import.meta.dir, "..", "bot.log");
+          const file = Bun.file(logPath);
+          if (!(await file.exists())) return jsonRes({ ok: true, activities: [] });
+
+          const text = await file.text();
+          const lines = text.split("\n");
+          const activities: any[] = [];
+
+          // Claude 세션 완료 로그 파싱: [Claude] chat=X turns=Y in=Z out=W cost=$C duration=Ds
+          for (const line of lines) {
+            const match = line.match(/\[Claude\] chat=(\S+) turns=(\d+) in=(\d+) out=(\d+).*cost=\$([0-9.]+).*duration=(\S+)/);
+            if (match) {
+              activities.push({
+                chatId: match[1], turns: parseInt(match[2]),
+                inputTokens: parseInt(match[3]), outputTokens: parseInt(match[4]),
+                cost: parseFloat(match[5]), duration: match[6],
+              });
+            }
+            // 위임 수신 로그
+            const delegateMatch = line.match(/\[WorkerAPI\] Received delegate: "(.+?)"/);
+            if (delegateMatch) {
+              activities.push({ type: "delegate", message: delegateMatch[1] });
+            }
+          }
+
+          return jsonRes({ ok: true, activities: activities.slice(-count) });
+        } catch (e: any) {
+          return jsonRes({ ok: false, error: e.message }, 500);
+        }
+      }
+
       // Delegate endpoint
       if (url.pathname === "/delegate" && req.method === "POST") {
         try {
