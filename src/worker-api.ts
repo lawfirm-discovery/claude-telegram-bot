@@ -36,9 +36,12 @@ const CORS_HEADERS = {
   "Access-Control-Allow-Headers": "Content-Type",
 };
 
+let workerServer: ReturnType<typeof Bun.serve> | null = null;
+export function stopWorkerApi(): void { if (workerServer) { workerServer.stop(true); workerServer = null; } }
+
 export function startWorkerApi(bot: Bot): void {
-  const server = Bun.serve({
-    port: WORKER_API_PORT,
+  workerServer = Bun.serve({
+    port: WORKER_API_PORT, reusePort: true,
     async fetch(req) {
       // CORS preflight
       if (req.method === "OPTIONS") {

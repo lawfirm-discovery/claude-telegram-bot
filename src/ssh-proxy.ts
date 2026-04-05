@@ -33,11 +33,21 @@ try { privateKey = readFileSync(SSH_KEY_PATH); } catch (e: any) {
 }
 
 const activeSessions = new Map<any, { client: SSHClient; stream: any }>();
+let sshProxyServer: ReturnType<typeof Bun.serve> | null = null;
+
+export function stopSshProxy(): void {
+  if (sshProxyServer) { sshProxyServer.stop(true); sshProxyServer = null; }
+  for (const [ws, session] of activeSessions) {
+    try { session.stream.destroy(); } catch {}
+    try { session.client.end(); } catch {}
+  }
+  activeSessions.clear();
+}
 
 export function startSshProxy(): void {
   if (!privateKey) { console.warn("[SSH-Proxy] No private key, skipping."); return; }
-  Bun.serve({
-    port: SSH_PROXY_PORT,
+  sshProxyServer = Bun.serve({
+    port: SSH_PROXY_PORT, reusePort: true,
     fetch(req, server) {
       const url = new URL(req.url);
 

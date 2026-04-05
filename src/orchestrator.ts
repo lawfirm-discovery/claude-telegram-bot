@@ -119,8 +119,12 @@ async function handleWorkerDown(w: WorkerBot, reason: string): Promise<void> {
   w.status = "offline";
 }
 let healthCheckInterval: ReturnType<typeof setInterval> | null = null;
+let leadServer: ReturnType<typeof Bun.serve> | null = null;
 export function startHealthCheck(): void { checkWorkerHealth(); healthCheckInterval = setInterval(checkWorkerHealth, 60_000); }
-export function stopHealthCheck(): void { if (healthCheckInterval) clearInterval(healthCheckInterval); }
+export function stopHealthCheck(): void {
+  if (healthCheckInterval) clearInterval(healthCheckInterval);
+  if (leadServer) { leadServer.stop(true); leadServer = null; }
+}
 
 // Task Registry
 const activeTasks = new Map<string, OrchestratedTask>();
@@ -360,7 +364,7 @@ function fmtSummary(task: OrchestratedTask, results: string[]): string {
 const LEAD_CORS = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, POST, OPTIONS", "Access-Control-Allow-Headers": "Content-Type" };
 
 export function startLeadApi(): void {
-  Bun.serve({ port: LEAD_API_PORT, idleTimeout: 120, async fetch(req) {
+  leadServer = Bun.serve({ port: LEAD_API_PORT, idleTimeout: 120, reusePort: true, async fetch(req) {
     if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: LEAD_CORS });
     const json = (data: any, status = 200) => Response.json(data, { status, headers: LEAD_CORS });
     const url = new URL(req.url);

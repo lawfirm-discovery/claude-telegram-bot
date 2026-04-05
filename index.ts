@@ -2,7 +2,7 @@ import { bot } from "./src/bot";
 import { askClaude, killActiveProcesses } from "./src/claude";
 import { startHeartbeat, startCron, fireHook, stopLemonClaw, appendMemoryLog, startSharedMemorySync } from "./src/lemonclaw";
 import { markdownToTelegramHtml, splitMessage } from "./src/format";
-import { startWorkerApi } from "./src/worker-api";
+import { startWorkerApi, stopWorkerApi } from "./src/worker-api";
 import { BOT_ROLE, stopHealthCheck } from "./src/orchestrator";
 // ssh-proxy는 리드봇에서만 동적 import (워커에서 키 파일 없어서 크래시 방지)
 
@@ -74,6 +74,9 @@ const shutdown = async () => {
   console.log("\nShutting down...");
   stopLemonClaw();
   stopHealthCheck();
+  stopWorkerApi();
+  // ssh-proxy 정리 (동적 import — 워커에선 로드 안 됨)
+  try { const { stopSshProxy } = await import("./src/ssh-proxy"); stopSshProxy(); } catch {}
   await killActiveProcesses();
   bot.stop();
   process.exit(0);
