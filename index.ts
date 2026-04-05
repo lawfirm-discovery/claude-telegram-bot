@@ -4,7 +4,7 @@ import { startHeartbeat, startCron, fireHook, stopLemonClaw, appendMemoryLog, st
 import { markdownToTelegramHtml, splitMessage } from "./src/format";
 import { startWorkerApi } from "./src/worker-api";
 import { BOT_ROLE, stopHealthCheck } from "./src/orchestrator";
-import { startSshProxy } from "./src/ssh-proxy";
+// ssh-proxy는 리드봇에서만 동적 import (워커에서 키 파일 없어서 크래시 방지)
 
 console.log("Starting Claude Telegram Bot (LemonClaw Edition)...");
 console.log(`Model: ${process.env.CLAUDE_MODEL || "claude-opus-4-6"}`);
@@ -58,6 +58,7 @@ bot.start({
 
     // SSH Proxy (리드봇에서만 실행 — 관리자 페이지 터미널용)
     if (BOT_ROLE === "lead") {
+      const { startSshProxy } = await import("./src/ssh-proxy");
       startSshProxy();
     }
 

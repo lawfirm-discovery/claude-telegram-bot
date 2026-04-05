@@ -27,15 +27,15 @@ const SERVER_MAP: Record<string, ServerConfig> = {
   "m4mini-office": { host: "100.99.191.66",   port: 22,   username: "angrylawyer" },
 };
 
-let privateKey: Buffer;
+let privateKey: Buffer | null = null;
 try { privateKey = readFileSync(SSH_KEY_PATH); } catch (e: any) {
-  console.error(`[SSH-Proxy] Cannot read key: ${SSH_KEY_PATH} — ${e.message}`);
-  process.exit(1);
+  console.warn(`[SSH-Proxy] Cannot read key: ${SSH_KEY_PATH} — ${e.message}. SSH Proxy disabled.`);
 }
 
 const activeSessions = new Map<any, { client: SSHClient; stream: any }>();
 
 export function startSshProxy(): void {
+  if (!privateKey) { console.warn("[SSH-Proxy] No private key, skipping."); return; }
   Bun.serve({
     port: SSH_PROXY_PORT,
     fetch(req, server) {
