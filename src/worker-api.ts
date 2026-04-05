@@ -11,6 +11,7 @@ import { escapeHtml } from "./format";
 import { getHudInfo } from "./claude";
 import { Bot } from "grammy";
 import { spawn } from "child_process";
+import { join } from "path";
 
 const WORKER_API_PORT = parseInt(process.env.WORKER_API_PORT || "18800");
 const RESTART_SECRET = process.env.RESTART_SECRET || "lemonclaw-restart-2024";
