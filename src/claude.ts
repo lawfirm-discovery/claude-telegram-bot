@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "child_process";
 import { randomUUID } from "crypto";
 import { join, dirname } from "path";
-import { readFileSync, writeFileSync, renameSync, existsSync, unlinkSync } from "fs";
+import { readFileSync, writeFileSync, renameSync, existsSync, unlinkSync, readdirSync, statSync } from "fs";
 
 import { APPROVAL_SYSTEM_PROMPT } from "./approval";
 import { loadSystemPrompt, appendMemoryLog } from "./lemonclaw";
@@ -20,6 +20,7 @@ const MAX_PROMPT_ARG_CHARS = 100_000;
 const DEBOUNCE_MS = parseInt(process.env.DEBOUNCE_MS || "1500");
 const ALLOWED_TOOLS = process.env.ALLOWED_TOOLS || ""; // 빈 값이면 --tools 미전달 (모든 도구 + MCP 도구 사용 가능)
 const USE_BARE_MODE = process.env.USE_BARE_MODE === "true"; // default: false (--bare disables OAuth)
+const FALLBACK_MODEL = process.env.FALLBACK_MODEL || ""; // #2 overload 시 자동 전환 (예: claude-sonnet-4-6)
 
 // LemonClaw: SOUL.md + AGENTS.md + MEMORY.md → system prompt
 const LEMONCLAW_PROMPT = loadSystemPrompt();
@@ -129,6 +130,35 @@ function saveSessions(): void {
 }
 
 loadSessions();
+
+// #9 세션 정리: TTL 만료된 세션을 주기적으로 제거 (1시간마다)
+setInterval(() => {
+  const now = Date.now();
+  let pruned = 0;
+  for (const [key, session] of sessions) {
+    if (now - session.lastActive >= SESSION_TTL_MS) { sessions.delete(key); pruned++; }
+  }
+  if (pruned > 0) { saveSessions(); console.log(`[Sessions] Pruned ${pruned} expired session(s).`); }
+}, 3600_000);
+
+// #10 중단 컨텍스트 GC: 24시간 이상 된 context 파일 삭제 (기동 시 1회)
+(function cleanupStaleContextFiles(): void {
+  try {
+    const ctxDir = join(dirname(import.meta.dir), ".lemonclaw", "memory");
+    if (!existsSync(ctxDir)) return;
+    const now = Date.now();
+    for (const file of readdirSync(ctxDir)) {
+      if (!file.startsWith("context-")) continue;
+      try {
+        const stat = statSync(join(ctxDir, file));
+        if (now - stat.mtimeMs >= 24 * 3600_000) {
+          unlinkSync(join(ctxDir, file));
+          console.log(`[Context] GC: removed stale ${file}`);
+        }
+      } catch {}
+    }
+  } catch {}
+})();
 
 export function getSession(chatId: string): Session {
   const existing = sessions.get(chatId);
@@ -295,9 +325,10 @@ function flushDebounce(chatId: string): void {
 }
 
 export function askClaude(chatId: string, message: string, attachments?: string[]): Promise<string> {
-  if ((attachments && attachments.length > 0) || DEBOUNCE_MS <= 0) {
+  if (DEBOUNCE_MS <= 0) {
     return enqueueForChat(chatId, () => runClaude(chatId, message, attachments));
   }
+  // #11: 파일 첨부 메시지도 디바운스에 포함
   return new Promise((resolve, reject) => {
     let buf = debounceBuffers.get(chatId);
     if (!buf) { buf = { messages: [], timer: null as any }; debounceBuffers.set(chatId, buf); }
@@ -313,9 +344,27 @@ export function askClaude(chatId: string, message: string, attachments?: string[
 
 const activeProcesses = new Set<ChildProcess>();
 
-export function killActiveProcesses(): void {
+// #4 Graceful shutdown: SIGTERM → 15초 대기 → SIGKILL
+const SHUTDOWN_DRAIN_MS = 15_000;
+
+export function killActiveProcesses(): Promise<void> {
+  if (activeProcesses.size === 0) return Promise.resolve();
+  console.log(`[Claude] Graceful shutdown: ${activeProcesses.size} active process(es), waiting ${SHUTDOWN_DRAIN_MS / 1000}s...`);
   for (const proc of activeProcesses) { try { proc.kill("SIGTERM"); } catch {} }
-  activeProcesses.clear();
+  return new Promise((resolve) => {
+    const check = setInterval(() => {
+      if (activeProcesses.size === 0) { clearInterval(check); resolve(); }
+    }, 500);
+    setTimeout(() => {
+      clearInterval(check);
+      if (activeProcesses.size > 0) {
+        console.warn(`[Claude] Force killing ${activeProcesses.size} remaining process(es)`);
+        for (const proc of activeProcesses) { try { proc.kill("SIGKILL"); } catch {} }
+        activeProcesses.clear();
+      }
+      resolve();
+    }, SHUTDOWN_DRAIN_MS);
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -404,12 +453,20 @@ async function runClaudeWithRetry(
         throw err;
       }
 
-      const delay = delays[attempt] ?? 0;
+      // #5 jitter: ±20% 랜덤화로 thundering herd 방지
+      const baseDelay = delays[attempt] ?? 0;
+      const delay = baseDelay > 0 ? Math.round(baseDelay * (0.8 + Math.random() * 0.4)) : 0;
       console.log(`[Claude] ${reason} for chat=${chatId}, retry #${attempt + 1} in ${delay / 1000}s`);
 
+      // #1 세션 리셋 개선: "already in use"만 즉시 새 UUID, 나머지는 같은 ID로 재시도
       if (reason === "session_expired") {
         const session = sessions.get(chatId);
-        if (session) { session.isFirstTurn = true; session.sessionId = randomUUID(); saveSessions(); }
+        if (session) {
+          const isConflict = /already in use/i.test(err.message || "");
+          if (isConflict || attempt > 0) session.sessionId = randomUUID();
+          session.isFirstTurn = true;
+          saveSessions();
+        }
       }
 
       if (delay > 0) await new Promise(r => setTimeout(r, delay));
@@ -447,8 +504,15 @@ function executeClaudeCli(
 
   if (useResume) {
     baseArgs.push("--resume", session.sessionId);
+    // #7 시스템 프롬프트 갱신: resume 시에도 변경된 SOUL.md 등 반영
+    const freshPrompt = loadSystemPrompt();
+    if (freshPrompt && freshPrompt !== LEMONCLAW_PROMPT) {
+      const refreshed = [freshPrompt, APPROVAL_SYSTEM_PROMPT, USER_SYSTEM_PROMPT].filter(Boolean).join("\n\n");
+      baseArgs.push("--append-system-prompt", refreshed);
+    }
   } else {
     baseArgs.push("--model", routing.model);
+    if (FALLBACK_MODEL) baseArgs.push("--fallback-model", FALLBACK_MODEL); // #2
     baseArgs.push("--session-id", session.sessionId);
     if (SYSTEM_PROMPT) baseArgs.push("--append-system-prompt", SYSTEM_PROMPT);
   }
@@ -584,7 +648,7 @@ function executeClaudeCli(
         if (idle >= INACTIVITY_TIMEOUT_MS) {
           killProc(`no output for ${Math.round(idle / 1000)}s`);
         }
-      }, 30_000); // 30초마다 체크
+      }, 10_000); // #8: 30초 → 10초 (inactivity 감지 정밀도 개선)
     }
 
     const cleanup = () => {

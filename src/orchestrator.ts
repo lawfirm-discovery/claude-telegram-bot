@@ -55,18 +55,23 @@ function getLeadApiUrl(): string { return process.env.LEAD_API_URL || `http://10
 // Health Check + Auto Recovery
 const RESTART_SECRET = process.env.RESTART_SECRET || "lemonclaw-restart-2024";
 const workerFailCount = new Map<string, number>(); // 연속 실패 횟수 추적
+let healthCheckCycle = 0; // #6: deep check는 5회마다 1번 (CLI 스폰 부하 줄이기)
 
 async function checkWorkerHealth(): Promise<void> {
+  healthCheckCycle++;
+  const isDeepCheck = healthCheckCycle % 5 === 0; // 5분마다 deep (60s × 5)
+
   await Promise.allSettled(workerBots.map(async (w) => {
     try {
-      const resp = await fetch(`${w.apiUrl}/health?deep=1`, { signal: AbortSignal.timeout(10_000) });
+      const url = isDeepCheck ? `${w.apiUrl}/health?deep=1` : `${w.apiUrl}/health`;
+      const resp = await fetch(url, { signal: AbortSignal.timeout(isDeepCheck ? 20_000 : 5_000) });
       const data = await resp.json() as any;
       if (data.ok) {
         if (w.status === "offline") { w.status = "idle"; console.log(`[HealthCheck] ${w.name} back online`); }
         workerFailCount.set(w.name, 0);
 
-        // CLI 인증 실패 감지 → 세션 리셋 시도
-        if (data.cliAuth === false) {
+        // CLI 인증 실패 감지 → 세션 리셋 시도 (deep check일 때만)
+        if (isDeepCheck && data.cliAuth === false) {
           console.log(`[HealthCheck] ${w.name}: CLI auth failed — resetting session`);
           try {
             await fetch(`${w.apiUrl}/reset-session`, {
@@ -86,7 +91,7 @@ async function checkWorkerHealth(): Promise<void> {
   }));
   const online = workerBots.filter(w => w.status !== "offline").length;
   const offline = workerBots.filter(w => w.status === "offline").length;
-  console.log(`[HealthCheck] ${online} online, ${offline} offline`);
+  if (isDeepCheck) console.log(`[HealthCheck] deep: ${online} online, ${offline} offline`);
 }
 
 async function handleWorkerDown(w: WorkerBot, reason: string): Promise<void> {

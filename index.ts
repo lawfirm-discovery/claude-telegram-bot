@@ -62,12 +62,12 @@ bot.start({
   },
 });
 
-// Graceful shutdown
-const shutdown = () => {
+// #4 Graceful shutdown — 진행 중 작업 완료 대기 후 종료
+const shutdown = async () => {
   console.log("\nShutting down...");
   stopLemonClaw();
   stopHealthCheck();
-  killActiveProcesses();
+  await killActiveProcesses();
   bot.stop();
   process.exit(0);
 };
