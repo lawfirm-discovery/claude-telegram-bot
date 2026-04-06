@@ -14,7 +14,7 @@ import {
   type ApprovalRequest,
 } from "./approval";
 import { escapeHtml, markdownToTelegramHtml, splitMessage } from "./format";
-import { mkdtemp, writeFile, unlink } from "fs/promises";
+import { mkdtemp, writeFile, unlink, readFile } from "fs/promises";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -676,9 +676,10 @@ bot.on("message:photo", async (ctx) => {
   if (!photo) return;
   const tmpPath = await downloadTelegramFile(photo.file_id, "jpg");
 
-  // Lead: 첨부파일 포함 메시지도 워커에 위임 (file_id 전달로 워커가 직접 다운로드)
+  // Lead: 첨부파일 포함 메시지도 워커에 위임 (base64로 파일 데이터 직접 전달)
   if (BOT_ROLE === "lead") {
-    const result = await quickDelegate(caption, chatId, [{ file_id: photo.file_id, type: "photo" }]);
+    const fileData = await readFile(tmpPath);
+    const result = await quickDelegate(caption, chatId, [{ file_id: photo.file_id, type: "photo", data: fileData.toString("base64") }]);
     if (result) {
       await ctx.reply(`📨 @${result.workerName} 에 작업 전송 완료\n💬 "${caption.slice(0, 80)}${caption.length > 80 ? "..." : ""}" + 📷 이미지`);
     } else {
@@ -699,9 +700,10 @@ bot.on("message:document", async (ctx) => {
   const ext = doc.file_name?.split(".").pop() || "txt";
   const tmpPath = await downloadTelegramFile(doc.file_id, ext);
 
-  // Lead: 첨부파일 포함 메시지도 워커에 위임 (file_id 전달로 워커가 직접 다운로드)
+  // Lead: 첨부파일 포함 메시지도 워커에 위임 (base64로 파일 데이터 직접 전달)
   if (BOT_ROLE === "lead") {
-    const result = await quickDelegate(caption, chatId, [{ file_id: doc.file_id, type: "document", filename: doc.file_name }]);
+    const fileData = await readFile(tmpPath);
+    const result = await quickDelegate(caption, chatId, [{ file_id: doc.file_id, type: "document", filename: doc.file_name, data: fileData.toString("base64") }]);
     if (result) {
       await ctx.reply(`📨 @${result.workerName} 에 작업 전송 완료\n💬 "${caption.slice(0, 80)}${caption.length > 80 ? "..." : ""}" + 📎 ${doc.file_name}`);
     } else {

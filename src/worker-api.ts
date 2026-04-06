@@ -22,6 +22,7 @@ interface DelegateAttachment {
   file_id: string;
   type: "photo" | "document" | "voice";
   filename?: string;
+  data?: string; // base64-encoded file content (리드가 직접 다운로드하여 전달)
 }
 
 interface DelegateRequest {
@@ -229,21 +230,31 @@ async function processDelegate(bot: Bot, req: DelegateRequest): Promise<void> {
   // DB에 수신 메시지 저장
   reportMessage(leadUrl, { botName, botUsername, chatId, direction: "inbound", messageText: req.message });
 
-  // 첨부파일 다운로드 (리드가 file_id를 전달한 경우)
+  // 첨부파일 처리: base64 data 우선, 없으면 file_id로 폴백
   const localFiles: string[] = [];
   if (req.attachments?.length) {
     for (const att of req.attachments) {
       try {
-        const file = await bot.api.getFile(att.file_id);
-        const fileUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
-        const resp = await fetch(fileUrl);
-        const buf = Buffer.from(await resp.arrayBuffer());
         const ext = att.filename?.split(".").pop() || (att.type === "photo" ? "jpg" : att.type === "voice" ? "ogg" : "bin");
         const tmpPath = join(tmpdir(), `tg_delegate_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.${ext}`);
-        await writeFile(tmpPath, buf);
-        localFiles.push(tmpPath);
+
+        if (att.data) {
+          // base64로 전달된 파일 (리드가 직접 다운로드한 경우)
+          const buf = Buffer.from(att.data, "base64");
+          await writeFile(tmpPath, buf);
+          localFiles.push(tmpPath);
+        } else {
+          // file_id로 폴백 (같은 봇이거나 레거시 호환)
+          const file = await bot.api.getFile(att.file_id);
+          const fileUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
+          const resp = await fetch(fileUrl);
+          const buf = Buffer.from(await resp.arrayBuffer());
+          await writeFile(tmpPath, buf);
+          localFiles.push(tmpPath);
+        }
       } catch (e: any) {
-        console.error(`[WorkerAPI] Failed to download attachment ${att.file_id}: ${e.message}`);
+        console.error(`[WorkerAPI] Failed to process attachment ${att.file_id}: ${e.message}`);
+        await bot.api.sendMessage(parseInt(chatId), `⚠️ 첨부파일 다운로드 실패: ${e.message}`).catch(() => {});
       }
     }
   }

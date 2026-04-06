@@ -244,6 +244,7 @@ export interface DelegateAttachment {
   file_id: string;
   type: "photo" | "document" | "voice";
   filename?: string;
+  data?: string; // base64-encoded file content (리드가 직접 다운로드하여 전달)
 }
 
 export async function quickDelegate(message: string, requestedBy: string, attachments?: DelegateAttachment[]): Promise<{ workerName: string; taskId: string } | null> {
