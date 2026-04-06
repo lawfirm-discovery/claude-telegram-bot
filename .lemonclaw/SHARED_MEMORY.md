@@ -22,5 +22,11 @@
 - 이미지/엑셀은 줌 컨트롤도 함께 표시
 - **모든 파
 - [2026. 4. 5. 오전 2:16:23] **rtx6000_claude_style_bot**: https://100.108.86.92:3011/erp/organization/lemon-store/products/new?organizatio → 수정 완료, 푸시 성공.
-
 **원인**: `Sidebar.tsx:1327`의 `numericIdSegments` 배열에 `:productId`가 없어서, `/products/new` 경로의 "new"가 `:produ
+- [2026. 4. 6. 오후 6:50:14] **angrylawyer_rtx4060_win_bot**: 지금 mcp 칩의 이름이 사건이름을 제대로 렌더링을 못하는 문제가 여전함. 그리고 2번째 사진처럼 칩을 열어 사건상세정보 모달이 뜰때 밤테인데, → 스크린샷 확인. 여전히 "형사소송 #319"만 표시됨. 두 가지 문제를 조사합니다.
+1. **사건 칩 이름**: Spring API의 list 응답에 `caseType1`/`caseType2`/`clientName
+- [2026. 4. 6. 오후 6:52:47] **angrylawyer_rtx4060_win_bot**: 이 이미지를 분석해줘 → 사건 상세 모달 스크린샷 확인.
+
+**다크테마 이슈가 보입니다:**
+- 상단 헤더(보라색 그라데이션) + 탭 바: 다크 적용됨
+- **사건 정보 영역(하단 카드)**: 흰색 배경 + 검정 텍스트 → **라이트 테마*
