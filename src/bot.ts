@@ -653,6 +653,16 @@ bot.on("message:text", async (ctx) => {
     }
   }
 
+  // === Lead: "직접 처리" 키워드 감지 → 로컬 처리 ===
+  const FORCE_LOCAL_RE = /(?:직접\s*처리|직접\s*해줘|개발서버(?:가|에서)\s*처리|로컬에서|여기서\s*처리|네가\s*직접)/;
+
+  if (BOT_ROLE === "lead" && FORCE_LOCAL_RE.test(text)) {
+    const cleanedText = text.replace(FORCE_LOCAL_RE, "").trim();
+    await ctx.reply("🖥️ 리드 봇이 직접 처리합니다.");
+    await handleMessage(ctx, chatId, cleanedText || text);
+    return;
+  }
+
   // === Lead: 일반 메시지를 워커에 HTTP로 자동 위임 ===
 
   if (BOT_ROLE === "lead") {
