@@ -9,11 +9,23 @@ import { askClaudeWithProgress, clearSession } from "./claude-engine";
 import { markdownToTelegramHtml, splitMessage } from "./format";
 import { escapeHtml } from "./format";
 import { getHudInfo } from "./claude-engine";
-import { Bot } from "grammy";
+import {
+  detectApprovalRequest,
+  getApprovalEmoji,
+  getApprovalLabel,
+  type ApprovalRequest,
+} from "./approval";
+import { Bot, InlineKeyboard } from "grammy";
 import { spawn } from "child_process";
 import { join } from "path";
 import { tmpdir } from "os";
 import { writeFile, unlink } from "fs/promises";
+
+// Pending approval requests for delegated tasks
+const pendingDelegateApprovals = new Map<
+  string,
+  { chatId: string; request: ApprovalRequest; bot: Bot; leadUrl?: string; botName: string; botUsername: string }
+>();
 
 const WORKER_API_PORT = parseInt(process.env.WORKER_API_PORT || "18800");
 const RESTART_SECRET = process.env.RESTART_SECRET || "lemonclaw-restart-2024";
@@ -271,6 +283,15 @@ async function processDelegate(bot: Bot, req: DelegateRequest): Promise<void> {
     // DB에 응답 메시지 저장
     reportMessage(leadUrl, { botName, botUsername, chatId, direction: "outbound", messageText: response.slice(0, 10000) });
 
+    // 승인 마커 감지
+    const approval = detectApprovalRequest(response);
+    if (approval) {
+      await sendDelegateApprovalRequest(bot, chatId, approval, response, leadUrl, botName, botUsername);
+      console.log(`[WorkerAPI] Approval requested for delegate chat=${chatId}`);
+      // 승인 대기 중이므로 idle 알림은 보내지 않음 (finally에서 처리)
+      return;
+    }
+
     const header = `🤖 @${botUsername} 작업 완료:\n\n`;
     const chunks = splitMessage(header + response);
     for (const chunk of chunks) {
@@ -283,16 +304,7 @@ async function processDelegate(bot: Bot, req: DelegateRequest): Promise<void> {
     }
 
     // HUD + 세션 DB 저장
-    const hud = getHudInfo(chatId);
-    if (hud && hud.inputTokens > 0) {
-      const pct = hud.contextPercent;
-      const bar = "█".repeat(Math.round(pct / 10)) + "░".repeat(10 - Math.round(pct / 10));
-      const hudText = `Context: ${bar} ${pct}% | Turn ${hud.turnNumber} | ${hud.durationSec}s`;
-      try { await bot.api.sendMessage(parseInt(chatId), `<code>${escapeHtml(hudText)}</code>`, { parse_mode: "HTML" }); } catch {}
-
-      // 세션 완료 보고
-      reportSession(leadUrl, { botName, chatId, turns: hud.turnNumber, inputTokens: hud.inputTokens, outputTokens: hud.outputTokens, cacheRead: hud.cacheRead, totalCost: 0, durationSec: hud.durationSec });
-    }
+    sendHudAndSession(bot, chatId, leadUrl, botName);
 
     console.log(`[WorkerAPI] Completed delegate for ${chatId}`);
   } catch (e: any) {
@@ -362,6 +374,155 @@ async function getAuthInfo(): Promise<any> {
     });
     proc.on("error", () => { clearTimeout(timer); resolve(null); });
   });
+}
+
+/** HUD 정보 전송 + 세션 보고 헬퍼 */
+function sendHudAndSession(bot: Bot, chatId: string, leadUrl?: string, botName?: string): void {
+  const hud = getHudInfo(chatId);
+  if (hud && hud.inputTokens > 0) {
+    const pct = hud.contextPercent;
+    const bar = "█".repeat(Math.round(pct / 10)) + "░".repeat(10 - Math.round(pct / 10));
+    const hudText = `Context: ${bar} ${pct}% | Turn ${hud.turnNumber} | ${hud.durationSec}s`;
+    bot.api.sendMessage(parseInt(chatId), `<code>${escapeHtml(hudText)}</code>`, { parse_mode: "HTML" }).catch(() => {});
+    reportSession(leadUrl, { botName, chatId, turns: hud.turnNumber, inputTokens: hud.inputTokens, outputTokens: hud.outputTokens, cacheRead: hud.cacheRead, totalCost: 0, durationSec: hud.durationSec });
+  }
+}
+
+/** Escape HTML for approval card content */
+function escapeHtmlForApproval(text: string): string {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/** 위임 작업의 승인 요청 전송 */
+async function sendDelegateApprovalRequest(
+  bot: Bot,
+  chatId: string,
+  approval: ApprovalRequest,
+  fullResponse: string,
+  leadUrl?: string,
+  botName?: string,
+  botUsername?: string,
+): Promise<void> {
+  const approvalId = Math.random().toString(36).substring(2, 10);
+  pendingDelegateApprovals.set(approvalId, { chatId, request: approval, bot, leadUrl, botName: botName || "", botUsername: botUsername || "" });
+
+  // 10분 후 자동 만료
+  setTimeout(() => {
+    if (pendingDelegateApprovals.has(approvalId)) {
+      pendingDelegateApprovals.delete(approvalId);
+      notifyLeadIdle(botUsername || "", leadUrl, chatId).catch(() => {});
+    }
+  }, 600_000);
+
+  const emoji = getApprovalEmoji(approval.type);
+  const label = getApprovalLabel(approval.type);
+
+  // 마커 이전 텍스트 전송
+  const beforeMarker = (fullResponse.split(`[${approval.type.toUpperCase()}_START]`)[0] ?? "").trim();
+  if (beforeMarker) {
+    const chunks = splitMessage(beforeMarker);
+    for (const chunk of chunks) {
+      const html = markdownToTelegramHtml(chunk);
+      try { await bot.api.sendMessage(parseInt(chatId), html, { parse_mode: "HTML" }); } catch {
+        try { await bot.api.sendMessage(parseInt(chatId), chunk); } catch {}
+      }
+    }
+  }
+
+  // 승인 카드 + 버튼
+  const keyboard = new InlineKeyboard()
+    .text("✅ 승인 (Approve)", `delegate_approve:${approvalId}`)
+    .text("❌ 거절 (Reject)", `delegate_reject:${approvalId}`);
+
+  const approvalMsg =
+    `${emoji} <b>${label} - 승인 필요</b> (@${botUsername})\n\n` +
+    `<pre><code>${escapeHtmlForApproval(approval.content)}</code></pre>`;
+
+  try {
+    await bot.api.sendMessage(parseInt(chatId), approvalMsg, { parse_mode: "HTML", reply_markup: keyboard });
+  } catch {
+    await bot.api.sendMessage(parseInt(chatId), `${emoji} ${label} - 승인 필요 (@${botUsername})\n\n${approval.content}`, { reply_markup: keyboard }).catch(() => {});
+  }
+
+  console.log(`[WorkerAPI] Approval ${approval.type} id=${approvalId} chat=${chatId}`);
+}
+
+/** 위임 작업 승인/거절 콜백 처리 — bot.ts에서 호출 */
+export async function handleDelegateApprovalCallback(data: string, ctx: any): Promise<boolean> {
+  const isApprove = data.startsWith("delegate_approve:");
+  const isReject = data.startsWith("delegate_reject:");
+  if (!isApprove && !isReject) return false;
+
+  const approvalId = data.split(":")[1] ?? "";
+  const pending = pendingDelegateApprovals.get(approvalId);
+  if (!pending) {
+    await ctx.answerCallbackQuery({ text: "만료되었거나 이미 처리됨" });
+    return true;
+  }
+
+  const { chatId, request, bot, leadUrl, botName, botUsername } = pending;
+  pendingDelegateApprovals.delete(approvalId);
+
+  const emoji = getApprovalEmoji(request.type);
+  const label = getApprovalLabel(request.type);
+
+  if (isApprove) {
+    try {
+      await ctx.editMessageText(
+        `${emoji} <b>${label}</b> ✅ 승인됨 (@${botUsername})\n\n<pre><code>${escapeHtmlForApproval(request.content)}</code></pre>`,
+        { parse_mode: "HTML" }
+      );
+    } catch {
+      try { await ctx.editMessageText(`${emoji} ${label} ✅ 승인됨\n\n${request.content}`); } catch {}
+    }
+    await ctx.answerCallbackQuery({ text: "✅ 승인됨" });
+    console.log(`[WorkerAPI] Approval APPROVED id=${approvalId} chat=${chatId}`);
+
+    // Claude에 승인 전달 + 실행 결과 수신
+    try {
+      const response = await askClaudeWithProgress(chatId, "승인합니다. 진행해주세요.");
+
+      // 또 다른 승인이 필요한지 확인
+      const nextApproval = detectApprovalRequest(response);
+      if (nextApproval) {
+        await sendDelegateApprovalRequest(bot, chatId, nextApproval, response, leadUrl, botName, botUsername);
+      } else {
+        reportMessage(leadUrl, { botName, botUsername, chatId, direction: "outbound", messageText: response.slice(0, 10000) });
+        const header = `🤖 @${botUsername} 작업 완료:\n\n`;
+        const chunks = splitMessage(header + response);
+        for (const chunk of chunks) {
+          const html = markdownToTelegramHtml(chunk);
+          try { await bot.api.sendMessage(parseInt(chatId), html, { parse_mode: "HTML" }); } catch {
+            try { await bot.api.sendMessage(parseInt(chatId), chunk); } catch {}
+          }
+        }
+        sendHudAndSession(bot, chatId, leadUrl, botName);
+        notifyLeadIdle(botUsername, leadUrl, chatId).catch(() => {});
+      }
+    } catch (e: any) {
+      await bot.api.sendMessage(parseInt(chatId), `⚠️ @${botUsername} 작업 실패: ${e.message}`).catch(() => {});
+      notifyLeadIdle(botUsername, leadUrl, chatId).catch(() => {});
+    }
+  } else {
+    // 거절
+    try {
+      await ctx.editMessageText(
+        `${emoji} <b>${label}</b> ❌ 거절됨 (@${botUsername})\n\n<pre><code>${escapeHtmlForApproval(request.content)}</code></pre>`,
+        { parse_mode: "HTML" }
+      );
+    } catch {
+      try { await ctx.editMessageText(`${emoji} ${label} ❌ 거절됨\n\n${request.content}`); } catch {}
+    }
+    await ctx.answerCallbackQuery({ text: "❌ 거절됨" });
+    console.log(`[WorkerAPI] Approval REJECTED id=${approvalId} chat=${chatId}`);
+
+    try {
+      await askClaudeWithProgress(chatId, "거절합니다. 실행하지 마세요.");
+    } catch {}
+    notifyLeadIdle(botUsername, leadUrl, chatId).catch(() => {});
+  }
+
+  return true;
 }
 
 /** 리드 봇에 idle 상태 보고 (requestedBy 포함 — 세션 어피니티용) */

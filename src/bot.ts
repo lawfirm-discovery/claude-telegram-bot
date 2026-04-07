@@ -14,6 +14,7 @@ import {
   type ApprovalRequest,
 } from "./approval";
 import { escapeHtml, markdownToTelegramHtml, splitMessage } from "./format";
+import { handleDelegateApprovalCallback } from "./worker-api";
 import { mkdtemp, writeFile, unlink, readFile } from "fs/promises";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -179,6 +180,13 @@ bot.command("pair", async (ctx) => {
 // --- Approval callback handler ---
 bot.on("callback_query:data", async (ctx) => {
   const data = ctx.callbackQuery.data;
+
+  // 위임 작업 승인/거절 먼저 체크
+  if (data.startsWith("delegate_approve:") || data.startsWith("delegate_reject:")) {
+    await handleDelegateApprovalCallback(data, ctx);
+    return;
+  }
+
   const isApprove = data.startsWith("approve:");
   const isReject = data.startsWith("reject:");
 
