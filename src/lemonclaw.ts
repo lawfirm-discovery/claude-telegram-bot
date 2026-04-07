@@ -88,18 +88,27 @@ function getCommitPrefix(): string {
   if (hostname in hostMap) return hostMap[hostname]!;
 
   // 4) macOS 계열 — hostname 패턴 + 사용자명으로 구분
-  if (hostname.includes("davolink")) return "davolink";
+  if (hostname.includes("davolink")) return "m5_mac_pro";
   if (hostname.includes("m4mini")) return "m4mini";
 
   const user = (process.env.USER || process.env.USERNAME || "").toLowerCase();
   const userMap: Record<string, string> = {
     "angrylawyermacminihome": "macmini",
     "ui_macmini": "ui-macmini",
-    "lawbot": "lawbot-macmini",
   };
   if (user in userMap) return userMap[user]!;
 
-  // 5) fallback: hostname 정리
+  // 5) Windows 워커 — lawbot 사용자 + hostname으로 구분
+  if (user === "lawbot") {
+    if (hostname.includes("pc1") || hostname.includes("win-pc1")) return "win-pc1";
+    if (hostname.includes("pc2") || hostname.includes("win_pc2")) return "win-pc2";
+    return "lawbot-macmini";  // macOS lawbot
+  }
+
+  // 6) 3rdwin (3070) — angrylawyer@100.86.44.119, hostname: 3rd-win-server
+  if (hostname.includes("3rd-win") || hostname.includes("3rdwin") || hostname.includes("3070")) return "3070";
+
+  // 7) fallback: hostname 정리
   return hostname.split(".")[0].replace(/server$/i, "").replace(/winserver$/i, "").replace(/ui-macmini$/i, "") || "unknown";
 }
 
