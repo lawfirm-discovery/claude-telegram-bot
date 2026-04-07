@@ -60,7 +60,47 @@ export function loadSystemPrompt(): string {
   if (memory) parts.push(`# 📝 MEMORY\n${memory}`);
   if (shared) parts.push(`# 🔗 SHARED MEMORY (다른 봇들의 최근 작업)\n${shared}`);
 
+  // 커밋 프리픽스 규칙 주입
+  const commitPrefix = getCommitPrefix();
+  if (commitPrefix) {
+    parts.push(`# 🏷️ GIT COMMIT RULE\n모든 git commit 메시지 앞에 반드시 "[${commitPrefix}]" 프리픽스를 붙여라. 예: "[${commitPrefix}] fix: 버그 수정". Co-Authored-By 라인에는 붙이지 않는다.`);
+  }
+
   return parts.join("\n\n---\n\n");
+}
+
+/** 봇 식별용 커밋 프리픽스 결정 */
+function getCommitPrefix(): string {
+  // 1) 환경변수 우선
+  if (process.env.COMMIT_PREFIX) return process.env.COMMIT_PREFIX;
+
+  // 2) 리드봇은 프리픽스 불필요
+  if (process.env.BOT_ROLE === "lead") return "";
+
+  // 3) hostname → 이름 매핑
+  const hostname = require("os").hostname().toLowerCase();
+  const hostMap: Record<string, string> = {
+    "legalmonster": "rtx4090",      // rtx6000은 lead라서 위에서 걸림, 여기 오면 rtx4090
+    "rtx3060winserver": "3060",
+    "rtxa4500-server": "a4500",
+    "rtx4060winserver": "rtx4060",
+  };
+  if (hostname in hostMap) return hostMap[hostname]!;
+
+  // 4) macOS 계열 — hostname 패턴 + 사용자명으로 구분
+  if (hostname.includes("davolink")) return "davolink";
+  if (hostname.includes("m4mini")) return "m4mini";
+
+  const user = (process.env.USER || process.env.USERNAME || "").toLowerCase();
+  const userMap: Record<string, string> = {
+    "angrylawyermacminihome": "macmini",
+    "ui_macmini": "ui-macmini",
+    "lawbot": "lawbot-macmini",
+  };
+  if (user in userMap) return userMap[user]!;
+
+  // 5) fallback: hostname 정리
+  return hostname.split(".")[0].replace(/server$/i, "").replace(/winserver$/i, "").replace(/ui-macmini$/i, "") || "unknown";
 }
 
 /** Append a work summary to shared memory (for cross-bot knowledge sharing) */
