@@ -65,7 +65,9 @@ async function startServices(): Promise<void> {
     startHeartbeat(askClaude, sendTelegram);
     startCron(askClaude, sendTelegram);
   }
-  startSharedMemorySync();
+  if (BOT_ROLE === "lead") {
+    startSharedMemorySync();
+  }
 
   if (BOT_ROLE === "worker") {
     startWorkerApi(bot);
