@@ -89,6 +89,7 @@ async function startServices(): Promise<void> {
 }
 
 // 409 재시도 포함 봇 시작
+let onStartFired = false;
 async function startBot(retries = 5): Promise<void> {
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
@@ -97,6 +98,11 @@ async function startBot(retries = 5): Promise<void> {
         onStart: async (botInfo) => {
           console.log(`Bot @${botInfo.username} is running!`);
           console.log(`Send /start to the bot on Telegram to begin.`);
+
+          // 409 retry 시 onStart가 매번 호출됨 — 서비스/훅은 1회만 실행
+          if (onStartFired) return;
+          onStartFired = true;
+
           appendMemoryLog(`Bot started: @${botInfo.username}`);
 
           await startServices();
