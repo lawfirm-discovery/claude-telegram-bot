@@ -9,6 +9,7 @@ import { askClaudeWithProgress, clearSession } from "./claude-engine";
 import { markdownToTelegramHtml, splitMessage } from "./format";
 import { escapeHtml } from "./format";
 import { getHudInfo } from "./claude-engine";
+import { formatBuildInfo } from "./build-info";
 import {
   detectApprovalRequest,
   getApprovalEmoji,
@@ -383,7 +384,9 @@ function sendHudAndSession(bot: Bot, chatId: string, leadUrl?: string, botName?:
     const pct = hud.contextPercent;
     const bar = "█".repeat(Math.round(pct / 10)) + "░".repeat(10 - Math.round(pct / 10));
     const hudText = `Context: ${bar} ${pct}% | Turn ${hud.turnNumber} | ${hud.durationSec}s`;
-    bot.api.sendMessage(parseInt(chatId), `<code>${escapeHtml(hudText)}</code>`, { parse_mode: "HTML" }).catch(() => {});
+    const buildText = formatBuildInfo();
+    const footer = [hudText, buildText].filter(Boolean).join("\n\n");
+    bot.api.sendMessage(parseInt(chatId), `<code>${escapeHtml(footer)}</code>`, { parse_mode: "HTML" }).catch(() => {});
     reportSession(leadUrl, { botName, chatId, turns: hud.turnNumber, inputTokens: hud.inputTokens, outputTokens: hud.outputTokens, cacheRead: hud.cacheRead, totalCost: 0, durationSec: hud.durationSec });
   }
 }

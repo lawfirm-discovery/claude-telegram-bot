@@ -4,6 +4,7 @@ import { startHeartbeat, startCron, fireHook, stopLemonClaw, appendMemoryLog, st
 import { markdownToTelegramHtml, splitMessage } from "./src/format";
 import { startWorkerApi, stopWorkerApi } from "./src/worker-api";
 import { BOT_ROLE, stopHealthCheck } from "./src/orchestrator";
+import { initBuildInfo } from "./src/build-info";
 import { existsSync, writeFileSync, readFileSync, unlinkSync } from "fs";
 import { join } from "path";
 // ssh-proxy는 리드봇에서만 동적 import (워커에서 키 파일 없어서 크래시 방지)
@@ -31,6 +32,9 @@ function checkAndWritePid(): void {
   writeFileSync(PID_FILE, String(process.pid));
 }
 checkAndWritePid();
+
+// 빌드 정보 캐싱 (프로세스 시작 시 1회)
+await initBuildInfo();
 
 console.log("Starting Claude Telegram Bot (LemonClaw Edition)...");
 console.log(`Model: ${process.env.CLAUDE_MODEL || "claude-opus-4-6"}`);

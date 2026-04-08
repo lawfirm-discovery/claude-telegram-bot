@@ -14,6 +14,7 @@ import {
   type ApprovalRequest,
 } from "./approval";
 import { escapeHtml, markdownToTelegramHtml, splitMessage } from "./format";
+import { formatBuildInfo } from "./build-info";
 import { handleDelegateApprovalCallback } from "./worker-api";
 import { mkdtemp, writeFile, unlink, readFile } from "fs/promises";
 import { join } from "path";
@@ -351,14 +352,16 @@ async function sendResponse(ctx: any, text: string, chatId?: string): Promise<vo
     }
   }
 
-  // HUD footer (after last chunk)
+  // HUD footer (after last chunk) + 빌드 정보
   if (chatId) {
     const hudText = formatHud(chatId);
-    if (hudText) {
+    const buildText = formatBuildInfo();
+    const footer = [hudText, buildText].filter(Boolean).join("\n\n");
+    if (footer) {
       try {
-        await ctx.reply(`<code>${escapeHtml(hudText)}</code>`, { parse_mode: "HTML" });
+        await ctx.reply(`<code>${escapeHtml(footer)}</code>`, { parse_mode: "HTML" });
       } catch {
-        try { await ctx.reply(hudText); } catch {}
+        try { await ctx.reply(footer); } catch {}
       }
     }
   }
