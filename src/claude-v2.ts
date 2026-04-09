@@ -321,6 +321,35 @@ async function runWithSDK(
   attachments?: string[],
   onProgress?: OnProgress,
 ): Promise<string> {
+  // "already in use" 에러 시 세션 리셋 후 1회 자동 재시도
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      return await runWithSDKInner(chatId, message, attachments, onProgress);
+    } catch (err: any) {
+      const isConflict = /already in use/i.test(err.message || "");
+      if (isConflict && attempt === 0) {
+        console.log(`[V2] Session conflict — resetting session and retrying (chat=${chatId})`);
+        // 기존 세션 삭제 → 재시도 시 새 세션으로 시작
+        sessions.delete(chatId);
+        saveSessions();
+        // stale CLI 프로세스 정리
+        const active = activeQueries.get(chatId);
+        if (active) { try { active.abort(); } catch {} activeQueries.delete(chatId); }
+        await new Promise(r => setTimeout(r, 2000));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error("runWithSDK: unreachable");
+}
+
+async function runWithSDKInner(
+  chatId: string,
+  message: string,
+  attachments?: string[],
+  onProgress?: OnProgress,
+): Promise<string> {
   const session = getSession(chatId);
   const routing = selectModel(message, !!(attachments?.length));
 
@@ -470,8 +499,12 @@ async function runWithSDK(
       console.log("[V2] Ignoring exit error after result");
     } else {
       console.error(`[V2] Query error: ${error.message}`);
+      // "already in use" 에러는 throw하여 runWithSDK의 retry가 잡도록
+      if (error.message?.includes("already in use")) {
+        throw error;
+      }
       // On session errors, reset session
-      if (error.message?.includes("session") || error.message?.includes("already in use")) {
+      if (error.message?.includes("session")) {
         sessions.delete(chatId);
         saveSessions();
       }
