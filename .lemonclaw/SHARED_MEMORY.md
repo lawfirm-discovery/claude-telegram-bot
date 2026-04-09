@@ -34,3 +34,7 @@
 Let me look at the screenshots first.이미지 1장만 보입니다 (생성 중 프로그레스 바 화면). 2번째/3번째 스크린샷도 있으면 보내주세요.
 우선 보이는 이슈와 관련 코드를 찾겠습니다
 - [2026. 4. 9. 오후 5:31:09] **angrylawyer_rtx6000_basement_bot**: 그리고 생성한 문서 초안의 내용이 여전히 너무 줄글로 보이고 전혀 문서 형식으로 보이지가 않아~ v7 스키마 문서생성기를 쓴다면 스타일 정보도  → 스크린샷 확인. 계약서가 완전 줄글로 렌더링되고 있네요. v7 스키마 문서생성기와 렌더링 부분을 조사하겠습니다.핵심 렌더링 코드를 확인하겠습니다.이제 v7 리스트 마커 함수도 확인하겠습니다.이제 전체 구조를 파악했습
+- [2026. 4. 9. 오후 6:11:59] **angrylawyer_rtx6000_basement_bot**: se: 2, …}
+overrideMethod @ installHook.js:1
+console.error @ index.js:65
+i.onerro → DOCX 다운로드 에러. `v7NativeToIR`에서 `documentType`을 읽지 못하는 문제. 확인하겠습니다.31줄에서 `doc.metadata.documentType` 접근 시 `doc.metadata`가
