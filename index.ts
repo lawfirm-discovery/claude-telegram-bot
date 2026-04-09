@@ -10,8 +10,9 @@ import { join } from "path";
 // ssh-proxy는 리드봇에서만 동적 import (워커에서 키 파일 없어서 크래시 방지)
 
 // ── PID 파일 기반 중복 실행 방지 ──
-const PID_FILE = join(import.meta.dir, "bot.pid");
-function checkAndWritePid(): void {
+const PID_FILE = join(import.meta.dir, process.env.BOT_PID_FILE || "bot.pid");
+async function checkAndWritePid(): Promise<void> {
+  let killedOldProcess = false;
   if (existsSync(PID_FILE)) {
     const oldPid = parseInt(readFileSync(PID_FILE, "utf-8").trim());
     if (oldPid && !isNaN(oldPid)) {
@@ -24,14 +25,34 @@ function checkAndWritePid(): void {
         Bun.sleepSync(3000);
         try { process.kill(oldPid, "SIGKILL"); } catch {}
         Bun.sleepSync(1000);
+        killedOldProcess = true;
       } catch {
         // 프로세스가 이미 죽어있음 — 정상
       }
     }
   }
   writeFileSync(PID_FILE, String(process.pid));
+
+  // 이전 프로세스를 죽였으면 Telegram의 pending long-polling을 명시적으로 캔슬
+  // getUpdates(offset=-1, timeout=0)으로 서버측 대기 연결을 즉시 끊음
+  if (killedOldProcess) {
+    const token = process.env.TELEGRAM_BOT_TOKEN;
+    if (token) {
+      console.log("[Bot] Cancelling previous Telegram long-polling connection...");
+      try {
+        await fetch(`https://api.telegram.org/bot${token}/getUpdates?offset=-1&timeout=0`, {
+          signal: AbortSignal.timeout(5000),
+        });
+        // 추가 대기: Telegram 서버가 이전 연결을 완전히 정리하도록
+        await new Promise(r => setTimeout(r, 2000));
+        console.log("[Bot] Previous polling cancelled OK");
+      } catch (e: any) {
+        console.log(`[Bot] Polling cancel attempt: ${e.message} (continuing anyway)`);
+      }
+    }
+  }
 }
-checkAndWritePid();
+await checkAndWritePid();
 
 // 빌드 정보 캐싱 (프로세스 시작 시 1회)
 await initBuildInfo();
@@ -116,15 +137,21 @@ async function startBot(retries = 5): Promise<void> {
     } catch (e: any) {
       const is409 = e.error_code === 409 || String(e.message || "").includes("409");
       if (is409 && attempt < retries) {
-        // 이전 프로세스의 long-polling이 Telegram 서버에서 타임아웃될 때까지 대기
-        // Telegram long-polling timeout은 ~30초이므로 충분히 길게 대기
-        const wait = Math.min(attempt * 10, 45); // 10s, 20s, 30s, 40s
-        console.log(`[Bot] 409 conflict — waiting ${wait}s before retry (attempt ${attempt}/${retries})`);
+        console.log(`[Bot] 409 conflict — cancelling stale polling then retry (attempt ${attempt}/${retries})`);
+        // 이전 long-polling을 명시적으로 캔슬 후 재시도
+        const token = process.env.TELEGRAM_BOT_TOKEN;
+        if (token) {
+          try {
+            await fetch(`https://api.telegram.org/bot${token}/getUpdates?offset=-1&timeout=0`, {
+              signal: AbortSignal.timeout(5000),
+            });
+          } catch {}
+        }
+        const wait = Math.min(attempt * 5, 15); // 5s, 10s, 15s, 15s (캔슬 후이므로 짧게)
         await new Promise(r => setTimeout(r, wait * 1000));
         continue;
       }
       console.error(`[Bot] Fatal error after ${attempt} attempts:`, e.message);
-      // PM2 즉시 재시작 시 이전 long-polling이 Telegram에서 아직 살아있어 409 무한루프 발생
       // 45초 대기 후 exit하여 Telegram 쪽 이전 연결이 타임아웃되도록 함
       console.log(`[Bot] Waiting 45s before exit to let Telegram polling timeout...`);
       await new Promise(r => setTimeout(r, 45_000));
