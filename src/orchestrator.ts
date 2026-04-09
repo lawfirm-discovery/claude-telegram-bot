@@ -181,8 +181,10 @@ type SendTelegramFn = (chatId: string, message: string) => Promise<void>;
 
 async function askClaudeLight(prompt: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    const args = ["-p", prompt, "--model", "claude-sonnet-4-6", ...(CLI_SUPPORTS_EFFORT ? ["--effort", "low"] : []), "--no-tool-use", "--output-format", "text", "--permission-mode", "bypassPermissions"];
-    const proc = spawn(process.env.CLAUDE_PATH || "claude", args, { env: { ...process.env, NO_COLOR: "1", TELEGRAM_BOT_TOKEN: "" }, stdio: ["ignore", "pipe", "pipe"] });
+    const args = ["-p", "--model", "claude-sonnet-4-6", ...(CLI_SUPPORTS_EFFORT ? ["--effort", "low"] : []), "--no-tool-use", "--output-format", "text", "--permission-mode", "bypassPermissions"];
+    const proc = spawn(process.env.CLAUDE_PATH || "claude", args, { env: { ...process.env, NO_COLOR: "1", TELEGRAM_BOT_TOKEN: "" }, stdio: ["pipe", "pipe", "pipe"] });
+    proc.stdin?.write(prompt);
+    proc.stdin?.end();
     let stdout = "", stderr = "";
     proc.stdout?.on("data", (d: Buffer) => { stdout += d.toString(); });
     proc.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });

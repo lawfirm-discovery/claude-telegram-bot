@@ -540,8 +540,8 @@ function executeClaudeCli(
 
   console.log(`[Claude] Routing: model=${routing.model} effort=${routing.effort} resume=${useResume} chat=${chatId}`);
 
-  const useStdin = fullPrompt.length > MAX_PROMPT_ARG_CHARS;
-  if (!useStdin) baseArgs.splice(1, 0, fullPrompt);
+  // Always use stdin to avoid messages starting with '-' being parsed as CLI options
+  const useStdin = true;
 
   return new Promise((resolve, reject) => {
     const proc = spawn(CLAUDE_PATH, baseArgs, {
