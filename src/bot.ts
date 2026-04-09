@@ -689,15 +689,78 @@ bot.on("message:text", async (ctx) => {
   await handleMessage(ctx, chatId, text);
 });
 
+// ── Media group (앨범) 버퍼: 같은 media_group_id 사진들을 모아서 한번에 처리 ──
+const mediaGroupBuffer = new Map<string, {
+  chatId: string;
+  ctx: any;
+  caption: string;
+  photos: { file_id: string }[];
+  timer: ReturnType<typeof setTimeout>;
+}>();
+const MEDIA_GROUP_DEBOUNCE_MS = 800;
+
+async function flushMediaGroup(groupId: string): Promise<void> {
+  const group = mediaGroupBuffer.get(groupId);
+  if (!group) return;
+  mediaGroupBuffer.delete(groupId);
+
+  const { chatId, ctx, caption, photos } = group;
+  const tmpPaths: string[] = [];
+  for (const p of photos) {
+    tmpPaths.push(await downloadTelegramFile(p.file_id, "jpg"));
+  }
+
+  if (BOT_ROLE === "lead") {
+    const atts = await Promise.all(tmpPaths.map(async (tp, i) => {
+      const fileData = await readFile(tp);
+      return { file_id: photos[i]!.file_id, type: "photo" as const, data: fileData.toString("base64") };
+    }));
+    const result = await quickDelegate(caption, chatId, atts);
+    if (result) {
+      await ctx.reply(`📨 @${result.workerName} 에 작업 전송 완료\n💬 "${caption.slice(0, 80)}${caption.length > 80 ? "..." : ""}" + 📷 이미지 ${photos.length}장`);
+    } else {
+      await ctx.reply("⚠️ 모든 워커가 작업 중입니다. 잠시 후 다시 시도해주세요.");
+    }
+    for (const tp of tmpPaths) setTimeout(() => cleanupFile(tp), 120_000);
+    return;
+  }
+
+  await handleMessage(ctx, chatId, caption, tmpPaths);
+  for (const tp of tmpPaths) setTimeout(() => cleanupFile(tp), 120_000);
+}
+
 bot.on("message:photo", async (ctx) => {
   const chatId = ctx.chat.id.toString();
   const caption = ctx.message.caption || "이 이미지를 분석해줘";
   const photos = ctx.message.photo;
   const photo = photos[photos.length - 1];
   if (!photo) return;
+
+  const mgId = ctx.message.media_group_id;
+
+  // 앨범(media_group)이면 버퍼에 모아서 일괄 처리
+  if (mgId) {
+    const existing = mediaGroupBuffer.get(mgId);
+    if (existing) {
+      existing.photos.push({ file_id: photo.file_id });
+      if (ctx.message.caption) existing.caption = ctx.message.caption;
+      clearTimeout(existing.timer);
+      existing.timer = setTimeout(() => flushMediaGroup(mgId), MEDIA_GROUP_DEBOUNCE_MS);
+    } else {
+      mediaGroupBuffer.set(mgId, {
+        chatId,
+        ctx,
+        caption,
+        photos: [{ file_id: photo.file_id }],
+        timer: setTimeout(() => flushMediaGroup(mgId), MEDIA_GROUP_DEBOUNCE_MS),
+      });
+    }
+    return;
+  }
+
+  // 단일 사진
   const tmpPath = await downloadTelegramFile(photo.file_id, "jpg");
 
-  // Lead: 첨부파일 포함 메시지도 워커에 위임 (base64로 파일 데이터 직접 전달)
   if (BOT_ROLE === "lead") {
     const fileData = await readFile(tmpPath);
     const result = await quickDelegate(caption, chatId, [{ file_id: photo.file_id, type: "photo", data: fileData.toString("base64") }]);
