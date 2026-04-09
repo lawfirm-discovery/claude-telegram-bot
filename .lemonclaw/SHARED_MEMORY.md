@@ -38,3 +38,6 @@ Let me look at the screenshots first.이미지 1장만 보입니다 (생성 중 
 overrideMethod @ installHook.js:1
 console.error @ index.js:65
 i.onerro → DOCX 다운로드 에러. `v7NativeToIR`에서 `documentType`을 읽지 못하는 문제. 확인하겠습니다.31줄에서 `doc.metadata.documentType` 접근 시 `doc.metadata`가
+- [2026. 4. 9. 오후 6:18:12] **angrylawyer_rtx6000_basement_bot**: 그리고 지금 생성된 문서를 첨부해서 상담을 받을때, 문서생성의 경우에 생성된 문서를 일반 텍스트가 아니라 v7 에디터와 호환되는 문서로 취급해서 → 스크린샷 확인. 2가지 요청:
+1. **전문가 상담 시 v7 문서를 에디터 호환 형태로 전달** — 전문가가 클릭해서 문서작성에서 열 수 있도록
+2. **상담 모달의 "AI 대화" 영역에 보더/카드 효과로 가독성 개
