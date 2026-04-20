@@ -20,6 +20,7 @@ import { spawn } from "child_process";
 const LEMONCLAW_DIR = join(import.meta.dir, "..", ".lemonclaw");
 const SOUL_PATH = join(LEMONCLAW_DIR, "SOUL.md");
 const AGENTS_PATH = join(LEMONCLAW_DIR, "AGENTS.md");
+const EXPERT_TYPES_PATH = join(LEMONCLAW_DIR, "EXPERT_TYPES.md");
 const HEARTBEAT_PATH = join(LEMONCLAW_DIR, "HEARTBEAT.md");
 const CRON_PATH = join(LEMONCLAW_DIR, "CRON.md");
 const HOOKS_PATH = join(LEMONCLAW_DIR, "HOOKS.md");
@@ -47,16 +48,18 @@ function readMd(path: string): string {
   }
 }
 
-/** Load SOUL.md + AGENTS.md + MEMORY.md + SHARED_MEMORY.md as combined system prompt */
+/** Load SOUL.md + AGENTS.md + EXPERT_TYPES.md + MEMORY.md + SHARED_MEMORY.md as combined system prompt */
 export function loadSystemPrompt(): string {
   const soul = readMd(SOUL_PATH);
   const agents = readMd(AGENTS_PATH);
+  const expertTypes = readMd(EXPERT_TYPES_PATH);
   const memory = readMd(MEMORY_PATH);
   const shared = readMd(SHARED_MEMORY_PATH);
 
   const parts: string[] = [];
   if (soul) parts.push(`# 🧠 SOUL\n${soul}`);
   if (agents) parts.push(`# 📋 AGENTS\n${agents}`);
+  if (expertTypes) parts.push(`# 👥 EXPERT TYPES\n${expertTypes}`);
   if (memory) parts.push(`# 📝 MEMORY\n${memory}`);
   if (shared) parts.push(`# 🔗 SHARED MEMORY (다른 봇들의 최근 작업)\n${shared}`);
 
