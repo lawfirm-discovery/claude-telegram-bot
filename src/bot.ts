@@ -340,6 +340,16 @@ function formatHud(chatId: string): string | null {
 
 // LemonClaw style: send response as HTML with auto-chunking, fallback to plain text
 async function sendResponse(ctx: any, text: string, chatId?: string): Promise<void> {
+  // [SEND_FILE: /path/to/file] 태그 감지 → 파일 전송
+  const FILE_TAG_RE = /\[SEND_FILE:\s*([^\]]+)\]/g;
+  const filePaths: string[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = FILE_TAG_RE.exec(text)) !== null) {
+    if (match[1]) filePaths.push(match[1].trim());
+  }
+  // 태그 제거 후 텍스트 정리
+  text = text.replace(/\[SEND_FILE:[^\]]+\]/g, "").trim();
+
   // Chunk raw markdown first, then convert each chunk to HTML
   const chunks = splitMessage(text);
   for (const chunk of chunks) {
@@ -349,6 +359,21 @@ async function sendResponse(ctx: any, text: string, chatId?: string): Promise<vo
     } catch {
       // Fallback: plain text (no formatting)
       await ctx.reply(chunk);
+    }
+  }
+
+  // 파일 전송
+  for (const filePath of filePaths) {
+    try {
+      const { createReadStream, existsSync } = await import("fs");
+      if (!existsSync(filePath)) {
+        await ctx.reply(`⚠️ 파일 없음: ${filePath}`);
+        continue;
+      }
+      const fileName = filePath.split("/").pop() || "file";
+      await ctx.replyWithDocument({ source: createReadStream(filePath), filename: fileName });
+    } catch (e: any) {
+      await ctx.reply(`⚠️ 파일 전송 실패: ${e.message}`);
     }
   }
 
