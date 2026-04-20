@@ -47,7 +47,7 @@ const SYSTEM_PROMPT = [LEMONCLAW_PROMPT, APPROVAL_SYSTEM_PROMPT, USER_SYSTEM_PRO
   .filter(Boolean)
   .join("\n\n");
 
-export let CLI_SUPPORTS_EFFORT = true; // SDK handles this internally
+export let CLI_SUPPORTS_EFFORT = false; // overridden by version check below
 
 console.log("[Claude V2] Agent SDK engine loaded");
 

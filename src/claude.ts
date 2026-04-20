@@ -18,7 +18,7 @@ try {
   const match = ver.match(/(\d+)\.(\d+)\.(\d+)/);
   if (match) {
     const [, major, minor, patch] = match.map(Number);
-    if (major < 2 || (major === 2 && minor < 2 && patch < 7)) {
+    if (major < 2 || (major === 2 && (minor < 1 || (minor === 1 && patch < 7)))) {
       CLI_SUPPORTS_EFFORT = false;
       console.log(`[Claude] CLI v${ver} — --effort not supported, will be omitted`);
     } else {

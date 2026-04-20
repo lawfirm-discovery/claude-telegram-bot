@@ -242,6 +242,81 @@ curl -u "bot:lemon2024!" http://100.117.168.53:8070/api/env/SERVER_NAME
 
 ---
 
+## n100 코딩 봇 규칙
+
+### 토큰 절약 5가지 규칙
+1. 이미 읽은 파일은 다시 읽지 않기
+2. 컨텍스트에 있는 정보는 툴 없이 답변
+3. 독립적인 툴 콜은 병렬 실행
+4. 결과가 클 경우 서브에이전트에 위임
+5. 사용자가 설명한 내용 반복 금지
+
+### 응답 스타일
+- 짧고 직관적으로
+- 코드 변경 시 diff 형태로 핵심만
+- 불필요한 설명 없이 바로 실행
+- Telegram에서 작업 시작 시 즉시 reply로 "⏳ 처리 중..." 메시지 먼저 보내고, 완료 시 새 reply 전송 (push 알림 발생)
+
+### 작업 원칙
+- 파일 읽기 전 필요한 부분만 타겟 검색
+- 에러는 원인 분석 후 최소 변경으로 수정
+- 추가 기능 요청 없으면 범위 확장 금지
+
+### 인프라 구조
+
+#### 맥미니 M4 (앱 서버 + 개발 환경)
+- Tailscale IP: 100.88.75.47
+- 사용자: pylon / 홈: /Users/pylon/
+- 프로젝트: /Users/pylon/my_project_v3/ ← **유일한 실서비스 버전. 항상 v3만 수정할 것**
+  - ⚠️ /Users/pylon/my_project_v2/ 는 절대 건드리지 말 것 (구버전, 미사용)
+  - 프론트엔드: frontend/ (React + Vite + TypeScript)
+  - 백엔드: backend/ (FastAPI + Python 3.14)
+- 실행: uvicorn 포트 8888
+  - 백엔드 API + frontend/dist/ 정적파일 동시 서빙
+  - SPA fallback: API 아닌 GET 요청 → index.html 반환
+- 배포:
+  - 프론트엔드: `cd /Users/pylon/my_project_v3/frontend && npm run build`
+  - 서버 재시작: `cd /Users/pylon/my_project_v3 && nohup ./start.sh > backend_start.log 2>&1 &`
+  - 프론트는 빌드만 하면 재시작 불필요
+- 주요 도구: Node.js v25.6.1 / npm 11.9.0 / Python 3.14 / Bun 1.3.11
+
+#### n100 (DB 서버 + 크롤러 서버)
+- Tailscale IP: 100.65.20.81
+- SSH: `ssh pylon@100.65.20.81`
+- DB (PostgreSQL): 포트 5432 / DB명: pylon / user: pylon / PW: 415416
+- 크롤러 경로: /home/pylon/Crawlers/
+
+#### 데이터 흐름
+크롤러(n100) → n100 PostgreSQL → 맥미니 uvicorn 백엔드 조회 → 프론트엔드 표시
+
+### 🚨 맥미니 긴급 복구 공식
+
+맥미니가 빌드 과부하/Tailscale 끊김으로 응답 없을 때 N100 경유 복구:
+
+**1단계: N100에서 맥미니 내부 IP 확인**
+```bash
+ssh pylon@100.65.20.81 "arp -a"
+```
+
+**2단계: N100 점프 호스트로 맥미니 접속 (비밀번호: 147800)**
+```bash
+ssh -J pylon@100.65.20.81 pylon@192.168.0.70
+```
+
+**3단계: 맥미니에서 서비스 복구**
+```bash
+# Tailscale 강제 활성화
+echo '147800' | sudo -S tailscale up --accept-routes
+
+# 프로세스 정리 및 재시작
+pkill -9 -f uvicorn
+pkill -9 -f start.sh
+pkill -9 -f uvicorn; pkill -9 -f start.sh
+cd ~/my_project_v3 && nohup ./start.sh > backend_start.log 2>&1 &
+```
+
+---
+
 ## Bun 프로젝트 규칙
 
 Default to using Bun instead of Node.js.
