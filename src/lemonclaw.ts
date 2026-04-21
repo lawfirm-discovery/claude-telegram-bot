@@ -424,15 +424,19 @@ function runGit(args: string[]): Promise<string> {
 
 async function syncSharedMemory(): Promise<void> {
   try {
+    // 현재 체크아웃 브랜치를 대상으로 동기화 (하드코딩된 'main' 사용 시 다른 브랜치에서 rebase drift 발생)
+    const branch = await runGit(["rev-parse", "--abbrev-ref", "HEAD"]);
+    if (!branch || branch === "HEAD") return;
+
     // 1) Pull latest (다른 봇의 shared memory 반영)
-    await runGit(["pull", "--rebase", "--autostash", "origin", "main"]);
+    await runGit(["pull", "--rebase", "--autostash", "origin", branch]);
 
     // 2) 로컬 변경이 있으면 push
     const status = await runGit(["status", "--porcelain", ".lemonclaw/SHARED_MEMORY.md"]);
     if (status) {
       await runGit(["add", ".lemonclaw/SHARED_MEMORY.md"]);
       await runGit(["commit", "-m", "chore: sync shared memory"]);
-      await runGit(["push", "origin", "main"]);
+      await runGit(["push", "origin", branch]);
       console.log("[LemonClaw] Shared memory synced to remote");
     }
   } catch (e: any) {
