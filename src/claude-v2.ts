@@ -135,6 +135,10 @@ export function clearSession(chatId: string): void {
   lastHud.delete(chatId);
   activeQueries.delete(chatId);
   saveSessions();
+  try {
+    const ctxPath = contextFilePath(chatId);
+    if (existsSync(ctxPath)) unlinkSync(ctxPath);
+  } catch {}
 }
 
 // ═══════════════════════════════════════════════════════════════
