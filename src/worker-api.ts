@@ -183,9 +183,9 @@ export function startWorkerApi(bot: Bot): void {
           const lines = text.split("\n");
           const activities: any[] = [];
 
-          // Claude 세션 완료 로그 파싱: [Claude] chat=X turns=Y in=Z out=W cost=$C duration=Ds
+          // Claude 세션 완료 로그 파싱: [Claude]/[V2] chat=X turns=Y in=Z out=W cost=$C duration=Ds
           for (const line of lines) {
-            const match = line.match(/\[Claude\] chat=(\S+) turns=(\d+) in=(\d+) out=(\d+).*cost=\$([0-9.]+).*duration=(\S+)/);
+            const match = line.match(/\[(?:Claude|V2)\] chat=(\S+) turns=(\d+) in=(\d+) out=(\d+).*cost=\$([0-9.]+).*duration=(\S+)/);
             if (match) {
               activities.push({
                 chatId: match[1], turns: parseInt(match[2]),
@@ -259,7 +259,7 @@ async function processDelegate(bot: Bot, req: DelegateRequest): Promise<void> {
         } else {
           // file_id로 폴백 (같은 봇이거나 레거시 호환)
           const file = await bot.api.getFile(att.file_id);
-          const fileUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
+          const fileUrl = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${file.file_path}`;
           const resp = await fetch(fileUrl);
           const buf = Buffer.from(await resp.arrayBuffer());
           await writeFile(tmpPath, buf);

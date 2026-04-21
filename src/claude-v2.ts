@@ -334,7 +334,7 @@ async function runWithSDK(
         saveSessions();
         // stale CLI 프로세스 정리
         const active = activeQueries.get(chatId);
-        if (active) { try { active.abort(); } catch {} activeQueries.delete(chatId); }
+        if (active) { try { await active.interrupt(); } catch {} activeQueries.delete(chatId); }
         await new Promise(r => setTimeout(r, 2000));
         continue;
       }
@@ -366,7 +366,7 @@ async function runWithSDKInner(
     .join("\n\n");
 
   const controller = new AbortController();
-  const permissionMode: PermissionMode = DANGEROUS_MODE ? "bypassPermissions" : "bypassPermissions";
+  const permissionMode: PermissionMode = "bypassPermissions";
   // 봇은 항상 bypassPermissions — 사용자 승인 UI가 Telegram에서 불가능
 
   const cwd = process.cwd();
@@ -538,6 +538,16 @@ async function runWithSDKInner(
     turnNumber,
     durationSec: Math.round(durationMs / 1000),
   });
+
+  // Cost estimate (Opus: $15/$75/M, Sonnet: $3/$15/M, cache: $1.5/M)
+  const isOpus = routing.model.includes("opus");
+  const inRate = isOpus ? 15 : 3;
+  const outRate = isOpus ? 75 : 15;
+  const estimatedCost = (resultUsage.inputTokens * inRate + resultUsage.outputTokens * outRate + resultUsage.cacheRead * 1.5) / 1_000_000;
+  console.log(
+    `[V2] chat=${chatId} turns=${turnNumber} in=${resultUsage.inputTokens} out=${resultUsage.outputTokens}` +
+    ` cache_read=${resultUsage.cacheRead} cost=$${estimatedCost.toFixed(4)} duration=${Math.round(durationMs / 1000)}s`
+  );
 
   if (!fullText.trim()) {
     fullText = "(빈 응답)";
