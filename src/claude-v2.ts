@@ -481,10 +481,8 @@ async function runWithSDKInner(
         } else {
           // Error — clear session for fresh start
           console.error(`[V2] Result error: ${resultMsg.subtype}`);
-          if (resultMsg.subtype !== "error_during_execution") {
-            sessions.delete(chatId);
-            saveSessions();
-          }
+          sessions.delete(chatId);
+          saveSessions();
           if (!fullText) {
             fullText = `⚠️ 오류 발생: ${resultMsg.subtype}`;
           }

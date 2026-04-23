@@ -44,21 +44,15 @@
 - 새 정보가 계획을 무효화하면 → 중단, 계획 업데이트 후 재개
 
 ### 멀티서버 작업 규칙
-- **rtx6000 = 중앙 개발 서버**: 개발 서비스(Frontend, Spring, FastAPI)를 실행하는 유일한 서버
-- **다른 서버(A4500, 3060 등)**: 코드 수정 & 푸시만 담당, 서비스 실행 및 빌드 금지
-- **다른 서버 작업 절차**:
-  1. `git pull origin dev-hs-rtx6000-new` — 최신 코드 가져오기
-  2. 코드 수정 (타입체크/린트 수준만 확인, 빌드 실행 금지)
-  3. `git push origin dev-hs-rtx6000-new` — rtx6000에 변경 전달
-  4. rtx6000이 1분마다 자동 pull → 빌드·서비스 자동 반영
-- **서비스 재시작 필요 시**: rtx6000 봇(@rtx6000_claude_style_bot)에게 요청
-- **다른 서버에서 절대 금지**:
-  - 서비스 실행: `pm2 start`, `systemctl start`, `bootRun`
-  - Frontend 빌드: `npm run build`, `npx craco build`, `npx vite build`
-  - Spring 빌드: `./gradlew build`, `./gradlew bootRun`, `./gradlew compileJava`
-  - Flutter 빌드: `flutter build web`
-  - 빌드는 rtx6000의 auto-pull이 자동 검증함. 에러 시 텔레그램 알림 발송
-- **rtx6000 로컬 작업 시 반드시 push**: rtx6000에서 직접 코드를 수정·커밋한 경우 **즉시 push**할 것. auto-pull이 `--ff-only`로 동작하므로, unpushed 로컬 커밋이 남아있으면 다른 서버의 push를 pull할 수 없어 동기화가 멈춤
+- **맥미니 M4 = 중앙 개발/서비스 서버**: 프론트엔드(React+Vite) + 백엔드(FastAPI+uvicorn)를 실행하는 유일한 서버
+- **n100**: DB 서버(PostgreSQL) + 크롤러 서버. 코드 수정 시 맥미니에 SSH로 접속하여 작업
+- **n100에서 맥미니 작업 절차**:
+  1. `ssh pylon@100.88.75.47` — 맥미니 접속
+  2. `/Users/pylon/my_project_v3/`에서 코드 수정
+  3. 커밋 & 푸시
+- **서비스 재시작 필요 시**: 맥미니에서 직접 실행
+  - 프론트엔드: `cd /Users/pylon/my_project_v3/frontend && npm run build`
+  - 서버: `cd /Users/pylon/my_project_v3 && nohup ./start.sh > backend_start.log 2>&1 &`
 
 ### 점진적 작업 (리스크 최소화)
 - 얇은 수직 슬라이스 선호
@@ -132,77 +126,31 @@
 
 ---
 
-## 리걸몬스터 프로젝트 규칙
+## 프로젝트 규칙 (맥미니 M4 my_project_v3)
 
 ### 🚨 절대 규칙 (위반 금지)
-- **`ddl-auto`는 반드시 `validate`** — 절대로 `update`로 변경 금지
-- **포트 3000 사용 금지** — Docker open-webui 점유 중
-- **JAR 빌드(`bootJar`) 금지** — `bootRun` 사용
-- **세 레포 모두 `dev-hs-rtx6000-new` 브랜치** — 다른 브랜치 checkout 금지
-
-### 🚨 응답 필수 포함 (Response Footer) — 예외 없음!
-리걸몬스터 관련 **모든** 응답 끝에 아래 2줄 필수:
-```
----
-🔗 테스트 서버: http://100.108.86.92:3011
-📌 브랜치: `dev-hs-rtx6000-new`
-```
+- **프로젝트는 반드시 `/Users/pylon/my_project_v3/`에서 작업** — v2 절대 금지
+- **포트 8888 = uvicorn** — 변경 금지
 
 ### 서버 & 환경
 | 항목 | 값 |
 |------|-----|
-| 테스트 서버 | http://100.108.86.92:3011 |
-| 기존 테섭 | https://test.legalmonster.co.kr |
-| Flutter 웹 앱 | http://100.108.86.92:8088 |
-| Spring | /home/angrylawyer/lemon-api-server-spring (systemd: lemon-spring-api) |
-| Frontend | /home/angrylawyer/lemon-front (pm2: lemon-front-dev) |
-| FastAPI | /home/angrylawyer/lemon-ai-server-FastAPI (pm2: lemon-fastapi) |
-| Flutter | /home/angrylawyer/lemon_flutter |
-| 작업 브랜치 | `dev-hs-rtx6000-new` (모든 저장소) |
+| 맥미니 M4 | Tailscale IP: 100.88.75.47 |
+| 프로젝트 경로 | `/Users/pylon/my_project_v3/` |
+| 프론트엔드 | `frontend/` (React + Vite + TypeScript) |
+| 백엔드 | `backend/` (FastAPI + Python 3.14) |
+| uvicorn 포트 | 8888 (API + 정적파일 서빙) |
+| n100 DB | PostgreSQL 100.65.20.81:5432 (pylon/415416) |
 | Config Vault | http://100.117.168.53:8070 (bot:lemon2024!) |
 
-### 빌드 & 실행
+### 빌드 & 실행 (맥미니에서)
 ```bash
-# Spring 실행
-sudo systemctl restart lemon-spring-api
+# 프론트엔드 빌드 (빌드만 하면 재시작 불필요)
+cd /Users/pylon/my_project_v3/frontend && npm run build
 
-# Frontend (pm2)
-pm2 restart lemon-front-dev
-
-# FastAPI
-pm2 restart lemon-fastapi
-
-# Flutter 웹 빌드 (~100초)
-cd /home/angrylawyer/lemon_flutter && /home/angrylawyer/flutter/bin/flutter build web --release --no-wasm-dry-run
+# 서버 재시작
+cd /Users/pylon/my_project_v3 && nohup ./start.sh > backend_start.log 2>&1 &
 ```
-
-### Gradle 빌드 환경변수
-```bash
-LEMON_FORK_JAVAC=true LEMON_JAVAC_XMX=24g
-```
-
-### nginx 프록시 설정
-| 경로 | 대상 |
-|------|------|
-| :3011 → | localhost:3001 (Frontend) |
-| :3011/api → | localhost:8080 (Spring) |
-| :3011/globallaw-api → | 100.117.168.53:8090 |
-
-### 표준 포트 (변경 금지!)
-| 서비스 | 포트 |
-|--------|------|
-| nginx 외부 | 3011 |
-| Frontend (pm2) | 3001 |
-| Spring | 8080 |
-| FastAPI | 8001 |
-| Docker open-webui | 3000 (사용 금지!) |
-
-### 브랜치 & Pull 소스
-| 저장소 | 작업 브랜치 | pull 소스 |
-|--------|------------|-----------|
-| FastAPI | `dev-hs-rtx6000-new` | `master` |
-| Frontend | `dev-hs-rtx6000-new` | `dev` |
-| Spring | `dev-hs-rtx6000-new` | `dev` |
 
 ### Config Vault (API 키 저장소)
 ```bash
@@ -283,6 +231,7 @@ curl -u "bot:lemon2024!" http://100.117.168.53:8070/api/env/SERVER_NAME
 #### n100 (DB 서버 + 크롤러 서버)
 - Tailscale IP: 100.65.20.81
 - SSH: `ssh pylon@100.65.20.81`
+- sudo 비밀번호: vmfhrmfoa2@
 - DB (PostgreSQL): 포트 5432 / DB명: pylon / user: pylon / PW: 415416
 - 크롤러 경로: /home/pylon/Crawlers/
 
