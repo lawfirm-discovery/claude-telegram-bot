@@ -57,10 +57,10 @@ export function markdownToTelegramHtml(markdown: string): string {
   // 6. Strikethrough: ~~text~~
   html = html.replace(/~~(.+?)~~/g, "<s>$1</s>");
 
-  // 7. Links: [text](url) — escape quotes in URL to prevent attribute breakage
+  // 7. Links: [text](url)
   html = html.replace(
     /\[([^\]]+)\]\(([^)]+)\)/g,
-    (_m, text, url) => `<a href="${url.replace(/"/g, "&quot;")}">${text}</a>`
+    '<a href="$2">$1</a>'
   );
 
   // 8. Blockquotes: > text (at line start)

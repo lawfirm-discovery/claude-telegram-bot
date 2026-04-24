@@ -321,30 +321,7 @@ export function handleWorkerReport(msg: string): TaskCompletionResult | null {
 function runGit(cwd: string, args: string[]): Promise<{ code: number; output: string }> {
   return new Promise(r => { const p = spawn("git", args, { cwd, stdio: ["ignore", "pipe", "pipe"] }); let o = ""; p.stdout?.on("data", d => o += d); p.stderr?.on("data", d => o += d); p.on("close", c => r({ code: c ?? 1, output: o.trim() })); p.on("error", e => r({ code: 1, output: e.message })); });
 }
-// REPO_PATHS: env "REPO_PATHS=name1=/path1,name2=/path2" 로 오버라이드 가능
-// 기본값은 하드코딩된 경로
-function parseRepoPaths(): Record<string, string> {
-  const raw = process.env.REPO_PATHS || "";
-  if (raw) {
-    const paths: Record<string, string> = {};
-    for (const entry of raw.split(",")) {
-      const eqIdx = entry.indexOf("=");
-      if (eqIdx === -1) continue;
-      const name = entry.slice(0, eqIdx).trim();
-      const path = entry.slice(eqIdx + 1).trim();
-      if (name && path) paths[name] = path;
-    }
-    if (Object.keys(paths).length > 0) return paths;
-  }
-  // 기본값 (기존 하드코딩)
-  return {
-    "lemon-front": "/home/angrylawyer/lemon-front",
-    "lemon-api-server-spring": "/home/angrylawyer/lemon-api-server-spring",
-    "lemon-ai-server-FastAPI": "/home/angrylawyer/lemon-ai-server-FastAPI",
-    "lemon_flutter": "/home/angrylawyer/lemon_flutter",
-  };
-}
-const REPO_PATHS: Record<string, string> = parseRepoPaths();
+const REPO_PATHS: Record<string, string> = { "lemon-front": "/home/angrylawyer/lemon-front", "lemon-api-server-spring": "/home/angrylawyer/lemon-api-server-spring", "lemon-ai-server-FastAPI": "/home/angrylawyer/lemon-ai-server-FastAPI", "lemon_flutter": "/home/angrylawyer/lemon_flutter" };
 
 export async function mergeCompletedTask(task: OrchestratedTask, _ac: AskClaudeFn, sendTg: SendTelegramFn): Promise<string> {
   task.status = "merging"; const results: string[] = [];
@@ -487,7 +464,7 @@ export function startLeadApi(): void {
         const body = await req.json() as any;
         const w = workerBots.find(w => w.name === body.worker);
         if (!w) return json({ ok: false, error: "worker not found" }, 404);
-        const resp = await fetch(`${w.apiUrl}/logs?lines=${body.lines || 100}&secret=${encodeURIComponent(RESTART_SECRET)}`, { signal: AbortSignal.timeout(10_000) });
+        const resp = await fetch(`${w.apiUrl}/logs?lines=${body.lines || 100}`, { signal: AbortSignal.timeout(10_000) });
         return json(await resp.json());
       } catch (e: any) { return json({ ok: false, error: e.message }, 500); }
     }

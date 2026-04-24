@@ -126,11 +126,8 @@ export function startWorkerApi(bot: Bot): void {
         }
       }
 
-      // 로그 조회: GET /logs?lines=100&secret=...
+      // 로그 조회: GET /logs?lines=100
       if (url.pathname === "/logs") {
-        if (url.searchParams.get("secret") !== RESTART_SECRET) {
-          return Response.json({ ok: false, error: "unauthorized" }, { status: 403 });
-        }
         const lines = parseInt(url.searchParams.get("lines") || "100");
         try {
           const logPath = join(import.meta.dir, "..", "bot.log");
@@ -157,7 +154,7 @@ export function startWorkerApi(bot: Bot): void {
           const timeoutMs = Math.min(body.timeout || 30000, 60000);
           const proc = Bun.spawn(["bash", "-c", body.command], {
             cwd: join(import.meta.dir, ".."),
-            env: { ...process.env, NO_COLOR: "1", PATH: `${process.env.HOME}/.bun/bin:${process.env.HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin:${process.env.PATH}` },
+            env: { ...process.env, NO_COLOR: "1", PATH: `${process.env.HOME}/.bun/bin:${process.env.HOME}/.local/bin:${process.env.HOME}/.nvm/versions/node/v22.22.0/bin:/usr/local/bin:/usr/bin:/bin:${process.env.PATH}` },
             stdout: "pipe",
             stderr: "pipe",
           });
@@ -394,6 +391,11 @@ function sendHudAndSession(bot: Bot, chatId: string, leadUrl?: string, botName?:
   }
 }
 
+/** Escape HTML for approval card content */
+function escapeHtmlForApproval(text: string): string {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
 /** 위임 작업의 승인 요청 전송 */
 async function sendDelegateApprovalRequest(
   bot: Bot,
@@ -437,7 +439,7 @@ async function sendDelegateApprovalRequest(
 
   const approvalMsg =
     `${emoji} <b>${label} - 승인 필요</b> (@${botUsername})\n\n` +
-    `<pre><code>${escapeHtml(approval.content)}</code></pre>`;
+    `<pre><code>${escapeHtmlForApproval(approval.content)}</code></pre>`;
 
   try {
     await bot.api.sendMessage(parseInt(chatId), approvalMsg, { parse_mode: "HTML", reply_markup: keyboard });
@@ -470,7 +472,7 @@ export async function handleDelegateApprovalCallback(data: string, ctx: any): Pr
   if (isApprove) {
     try {
       await ctx.editMessageText(
-        `${emoji} <b>${label}</b> ✅ 승인됨 (@${botUsername})\n\n<pre><code>${escapeHtml(request.content)}</code></pre>`,
+        `${emoji} <b>${label}</b> ✅ 승인됨 (@${botUsername})\n\n<pre><code>${escapeHtmlForApproval(request.content)}</code></pre>`,
         { parse_mode: "HTML" }
       );
     } catch {
@@ -508,7 +510,7 @@ export async function handleDelegateApprovalCallback(data: string, ctx: any): Pr
     // 거절
     try {
       await ctx.editMessageText(
-        `${emoji} <b>${label}</b> ❌ 거절됨 (@${botUsername})\n\n<pre><code>${escapeHtml(request.content)}</code></pre>`,
+        `${emoji} <b>${label}</b> ❌ 거절됨 (@${botUsername})\n\n<pre><code>${escapeHtmlForApproval(request.content)}</code></pre>`,
         { parse_mode: "HTML" }
       );
     } catch {

@@ -12,7 +12,6 @@
 import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync } from "fs";
 import { join } from "path";
 import { spawn } from "child_process";
-import { hostname } from "os";
 
 // ═══════════════════════════════════════════════════════════════
 // Paths
@@ -82,18 +81,18 @@ function getCommitPrefix(): string {
   if (process.env.BOT_ROLE === "lead") return "";
 
   // 3) hostname → 이름 매핑
-  const host = hostname().toLowerCase();
+  const hostname = require("os").hostname().toLowerCase();
   const hostMap: Record<string, string> = {
     "legalmonster": "rtx4090",      // rtx6000은 lead라서 위에서 걸림, 여기 오면 rtx4090
     "rtx3060winserver": "3060",
     "rtxa4500-server": "a4500",
     "rtx4060winserver": "rtx4060",
   };
-  if (host in hostMap) return hostMap[host]!;
+  if (hostname in hostMap) return hostMap[hostname]!;
 
   // 4) macOS 계열 — hostname 패턴 + 사용자명으로 구분
-  if (host.includes("davolink")) return "m5_mac_pro";
-  if (host.includes("m4mini")) return "m4mini";
+  if (hostname.includes("davolink")) return "m5_mac_pro";
+  if (hostname.includes("m4mini")) return "m4mini";
 
   const user = (process.env.USER || process.env.USERNAME || "").toLowerCase();
   const userMap: Record<string, string> = {
@@ -104,16 +103,16 @@ function getCommitPrefix(): string {
 
   // 5) Windows 워커 — lawbot 사용자 + hostname으로 구분
   if (user === "lawbot") {
-    if (host.includes("pc1") || host.includes("win-pc1")) return "win-pc1";
-    if (host.includes("pc2") || host.includes("win_pc2")) return "win-pc2";
+    if (hostname.includes("pc1") || hostname.includes("win-pc1")) return "win-pc1";
+    if (hostname.includes("pc2") || hostname.includes("win_pc2")) return "win-pc2";
     return "lawbot-macmini";  // macOS lawbot
   }
 
   // 6) 3rdwin (3070) — angrylawyer@100.86.44.119, hostname: 3rd-win-server
-  if (host.includes("3rd-win") || host.includes("3rdwin") || host.includes("3070")) return "3070";
+  if (hostname.includes("3rd-win") || hostname.includes("3rdwin") || hostname.includes("3070")) return "3070";
 
   // 7) fallback: hostname 정리
-  return (host.split(".")[0] ?? host).replace(/server$/i, "").replace(/winserver$/i, "").replace(/ui-macmini$/i, "") || "unknown";
+  return hostname.split(".")[0].replace(/server$/i, "").replace(/winserver$/i, "").replace(/ui-macmini$/i, "") || "unknown";
 }
 
 /** Append a work summary to shared memory (for cross-bot knowledge sharing) */
