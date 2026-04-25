@@ -463,6 +463,12 @@ async function syncSharedMemory(): Promise<void> {
 }
 
 export function startSharedMemorySync(): void {
+  // 외부 프로젝트 봇(pylon 등)이 lawfirm-discovery 레포에 잘못 push하는 사고를 막기 위한 kill-switch.
+  // pylon 측 .env에 DISABLE_SHARED_MEMORY_SYNC=true 두면 git pull/push 자체를 안 함.
+  if (process.env.DISABLE_SHARED_MEMORY_SYNC === "true") {
+    console.log("[LemonClaw] Shared memory sync DISABLED (DISABLE_SHARED_MEMORY_SYNC=true)");
+    return;
+  }
   // 시작 시 즉시 pull
   syncSharedMemory().catch(() => {});
   syncTimer = setInterval(() => syncSharedMemory().catch(() => {}), SYNC_INTERVAL_MS);
@@ -477,7 +483,9 @@ export function stopLemonClaw(): void {
   if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
   if (cronTimer) { clearInterval(cronTimer); cronTimer = null; }
   if (syncTimer) { clearInterval(syncTimer); syncTimer = null; }
-  // 종료 전 마지막 sync
-  syncSharedMemory().catch(() => {});
+  // 종료 전 마지막 sync (kill-switch 활성 시 skip)
+  if (process.env.DISABLE_SHARED_MEMORY_SYNC !== "true") {
+    syncSharedMemory().catch(() => {});
+  }
   console.log("[LemonClaw] Stopped");
 }
