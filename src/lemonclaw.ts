@@ -36,6 +36,19 @@ const HEARTBEAT_INTERVAL_MS = parseInt(process.env.HEARTBEAT_INTERVAL_MS || "180
 const HEARTBEAT_CHAT_ID = process.env.HEARTBEAT_CHAT_ID || process.env.ALLOWED_USERS?.split(",")[0] || "";
 const CRON_CHECK_INTERVAL_MS = 60_000; // 1 min
 
+// SHARED_MEMORY 라인 필터 — 외부 프로젝트(pylon 등) 항목을 system prompt와 로컬 누적에서 제외
+// 라인 단위 정규식. .env의 SHARED_MEMORY_EXCLUDE_PATTERNS가 비면 필터링 안 함.
+const SHARED_MEMORY_EXCLUDE_RE: RegExp | null = (() => {
+  const raw = (process.env.SHARED_MEMORY_EXCLUDE_PATTERNS || "").trim();
+  if (!raw) return null;
+  try { return new RegExp(raw); } catch { return null; }
+})();
+
+function filterSharedMemoryLines(lines: string[]): string[] {
+  if (!SHARED_MEMORY_EXCLUDE_RE) return lines;
+  return lines.filter(l => !SHARED_MEMORY_EXCLUDE_RE.test(l));
+}
+
 // ═══════════════════════════════════════════════════════════════
 // File loaders (safe read with fallback)
 // ═══════════════════════════════════════════════════════════════
@@ -54,7 +67,10 @@ export function loadSystemPrompt(): string {
   const agents = readMd(AGENTS_PATH);
   const expertTypes = readMd(EXPERT_TYPES_PATH);
   const memory = readMd(MEMORY_PATH);
-  const shared = readMd(SHARED_MEMORY_PATH);
+  const sharedRaw = readMd(SHARED_MEMORY_PATH);
+  const shared = sharedRaw && SHARED_MEMORY_EXCLUDE_RE
+    ? filterSharedMemoryLines(sharedRaw.split("\n")).join("\n")
+    : sharedRaw;
 
   const parts: string[] = [];
   if (soul) parts.push(`# 🧠 SOUL\n${soul}`);
@@ -128,7 +144,9 @@ export function appendSharedMemory(botName: string, summary: string): void {
       const existing = readFileSync(SHARED_MEMORY_PATH, "utf-8");
       const lines = existing.split("\n");
       const header = lines.slice(0, 4).join("\n"); // 헤더 보존
-      const entries = lines.slice(4).filter(l => l.trim());
+      let entries = lines.slice(4).filter(l => l.trim());
+      // 외부 프로젝트(pylon 등) 항목 제거 — pull로 들어온 다른 환경 라인은 누적하지 않음
+      entries = filterSharedMemoryLines(entries);
       entries.push(line.trim());
       const recent = entries.slice(-50); // 최근 50개만
       writeFileSync(SHARED_MEMORY_PATH, `${header}\n${recent.join("\n")}\n`);

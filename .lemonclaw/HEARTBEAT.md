@@ -3,16 +3,18 @@
 하트비트 시 아래 항목을 Bash 도구로 실제 확인하세요.
 문제가 있으면 즉시 텔레그램으로 알려주세요.
 
-## 1. n100 로컬 상태
-- [ ] 디스크 사용량 90% 미만인지 확인 (Filesystem                         Size  Used Avail Use% Mounted on
-/dev/mapper/ubuntu--vg-ubuntu--lv  232G  131G   91G  59% /)
-- [ ] 메모리 사용량 95% 미만인지 확인 (               total        used        free      shared  buff/cache   available
-Mem:            7681        2902         433         199        4856        4779
-Swap:           4095         640        3455)
-- [ ] PostgreSQL 동작 확인: localhost:5432 - accepting connections → accepting connections
+## 1. 개발서버 (rtx6000) 서비스 상태 — 모든 봇 공통
+외부에서 접근 가능한 URL로 확인:
+- [ ] 테스트 서버 접속: `curl -sf -o /dev/null -w '%{http_code}' http://100.108.86.92:3011` → 200 또는 30x
+- [ ] Spring API: `curl -sf -o /dev/null -w '%{http_code}' http://100.108.86.92:3011/api/health` → 200 (실패 시 `http://100.108.86.92:8080` 직접 시도)
+- [ ] FastAPI: `curl -sf -o /dev/null -w '%{http_code}' http://100.108.86.92:8001/docs` → 200
+
+## 2. 로컬 서버 기본 헬스
+- [ ] 디스크 사용량 90% 미만인지 확인 (`df -h /`)
+- [ ] 메모리 사용량 95% 미만인지 확인 (`free -m` 또는 macOS는 `vm_stat`)
 
 ## 판정 규칙
-- 모든 항목 정상 → HEARTBEAT_OK만 응답 (사용자에게 메시지 보내지 않음)
-- PostgreSQL 다운 → 즉시 알림
+- 모든 항목 정상 → "HEARTBEAT_OK"만 응답 (사용자에게 메시지 보내지 않음)
+- 개발서버 서비스 다운 → 즉시 알림 (어떤 서비스가 다운인지 명시)
 - 디스크/메모리 위험 → 즉시 알림
 - curl 타임아웃(5초 이상)도 비정상으로 간주

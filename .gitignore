@@ -39,3 +39,7 @@ sessions.json
 
 # LemonClaw daily logs (auto-generated per server)
 .lemonclaw/memory/
+
+# Bot workspace rules — 환경별로 다를 수 있음. 신규 setup 시 CLAUDE.md.template 복사.
+# 다른 프로젝트(pylon 등)의 규칙으로 덮어써져 push되는 것을 방지.
+CLAUDE.md
