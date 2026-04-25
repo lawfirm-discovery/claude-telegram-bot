@@ -17,7 +17,10 @@ import { spawn } from "child_process";
 // Paths
 // ═══════════════════════════════════════════════════════════════
 
-const LEMONCLAW_DIR = join(import.meta.dir, "..", ".lemonclaw");
+// LEMONCLAW_DIR/REPO_DIR override — 같은 src를 심볼릭 링크로 공유하는 별도 봇(pylon 등)이
+// 자기 디렉토리의 .lemonclaw / git repo를 사용하도록 환경변수로 분리 가능.
+// 미지정 시 import.meta.dir 기준(심볼릭 링크 따라간 실제 경로)으로 fallback.
+const LEMONCLAW_DIR = process.env.LEMONCLAW_DIR || join(import.meta.dir, "..", ".lemonclaw");
 const SOUL_PATH = join(LEMONCLAW_DIR, "SOUL.md");
 const AGENTS_PATH = join(LEMONCLAW_DIR, "AGENTS.md");
 const EXPERT_TYPES_PATH = join(LEMONCLAW_DIR, "EXPERT_TYPES.md");
@@ -425,7 +428,7 @@ export async function fireHook(
 // Shared Memory Sync (git pull/push)
 // ═══════════════════════════════════════════════════════════════
 
-const REPO_DIR = join(import.meta.dir, "..");
+const REPO_DIR = process.env.REPO_DIR || join(import.meta.dir, "..");
 let syncTimer: ReturnType<typeof setInterval> | null = null;
 const SYNC_INTERVAL_MS = 5 * 60_000; // 5분마다
 
