@@ -33,22 +33,20 @@ async function checkAndWritePid(): Promise<void> {
   }
   writeFileSync(PID_FILE, String(process.pid));
 
-  // 이전 프로세스를 죽였으면 Telegram의 pending long-polling을 명시적으로 캔슬
-  // getUpdates(offset=-1, timeout=0)으로 서버측 대기 연결을 즉시 끊음
-  if (killedOldProcess) {
-    const token = process.env.TELEGRAM_BOT_TOKEN;
-    if (token) {
-      console.log("[Bot] Cancelling previous Telegram long-polling connection...");
-      try {
-        await fetch(`https://api.telegram.org/bot${token}/getUpdates?offset=-1&timeout=0`, {
-          signal: AbortSignal.timeout(5000),
-        });
-        // 추가 대기: Telegram 서버가 이전 연결을 완전히 정리하도록
-        await new Promise(r => setTimeout(r, 2000));
-        console.log("[Bot] Previous polling cancelled OK");
-      } catch (e: any) {
-        console.log(`[Bot] Polling cancel attempt: ${e.message} (continuing anyway)`);
-      }
+  // 이전 프로세스 생사 여부와 관계없이 항상 Telegram long-polling cancel 시도
+  // launchd 재시작 시 이전 프로세스가 이미 죽어있어도 서버 사이드 연결이 남아있을 수 있음
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (token) {
+    console.log("[Bot] Cancelling any pending Telegram long-polling connection...");
+    try {
+      await fetch(`https://api.telegram.org/bot${token}/getUpdates?offset=-1&timeout=0`, {
+        signal: AbortSignal.timeout(5000),
+      });
+      // 추가 대기: Telegram 서버가 이전 연결을 완전히 정리하도록
+      await new Promise(r => setTimeout(r, 5000));
+      console.log("[Bot] Polling cancelled OK");
+    } catch (e: any) {
+      console.log(`[Bot] Polling cancel attempt: ${e.message} (continuing anyway)`);
     }
   }
 }
