@@ -9,23 +9,48 @@ import { existsSync, writeFileSync, readFileSync, unlinkSync } from "fs";
 import { join } from "path";
 // ssh-proxy는 리드봇에서만 동적 import (워커에서 키 파일 없어서 크래시 방지)
 
+// ── Telegram polling 슬롯 대기 (409 방지) ──
+async function waitForPollingSlot(token: string, maxWaitMs = 60_000): Promise<boolean> {
+  const start = Date.now();
+  let attempt = 0;
+  while (Date.now() - start < maxWaitMs) {
+    attempt++;
+    try {
+      const resp = await fetch(`https://api.telegram.org/bot${token}/getUpdates?offset=-1&timeout=0`, {
+        signal: AbortSignal.timeout(5000),
+      });
+      const data = await resp.json() as any;
+      if (data.ok) {
+        console.log(`[Bot] Polling slot clear (attempt ${attempt})`);
+        return true;
+      }
+      if (data.error_code === 409) {
+        console.log(`[Bot] Polling slot busy (409) — waiting... (${attempt})`);
+      } else {
+        console.log(`[Bot] Polling check: ${data.description || "unknown"} — waiting... (${attempt})`);
+      }
+    } catch (e: any) {
+      console.log(`[Bot] Polling check error: ${e.message} — waiting... (${attempt})`);
+    }
+    await new Promise(r => setTimeout(r, 3000));
+  }
+  console.log(`[Bot] Polling slot wait timed out after ${Math.round((Date.now() - start) / 1000)}s — proceeding anyway`);
+  return false;
+}
+
 // ── PID 파일 기반 중복 실행 방지 ──
 const PID_FILE = join(import.meta.dir, process.env.BOT_PID_FILE || "bot.pid");
 async function checkAndWritePid(): Promise<void> {
-  let killedOldProcess = false;
   if (existsSync(PID_FILE)) {
     const oldPid = parseInt(readFileSync(PID_FILE, "utf-8").trim());
     if (oldPid && !isNaN(oldPid)) {
       try {
-        // 프로세스 존재 확인 (signal 0 = 확인만)
         process.kill(oldPid, 0);
-        // 프로세스가 살아있으면 죽이고 대기
         console.log(`[Bot] Killing previous instance (PID ${oldPid})...`);
         process.kill(oldPid, "SIGTERM");
         Bun.sleepSync(3000);
         try { process.kill(oldPid, "SIGKILL"); } catch {}
         Bun.sleepSync(1000);
-        killedOldProcess = true;
       } catch {
         // 프로세스가 이미 죽어있음 — 정상
       }
@@ -33,21 +58,11 @@ async function checkAndWritePid(): Promise<void> {
   }
   writeFileSync(PID_FILE, String(process.pid));
 
-  // 이전 프로세스 생사 여부와 관계없이 항상 Telegram long-polling cancel 시도
-  // launchd 재시작 시 이전 프로세스가 이미 죽어있어도 서버 사이드 연결이 남아있을 수 있음
+  // polling 슬롯이 실제로 비었는지 루프로 확인 (최대 60초)
   const token = process.env.TELEGRAM_BOT_TOKEN;
   if (token) {
-    console.log("[Bot] Cancelling any pending Telegram long-polling connection...");
-    try {
-      await fetch(`https://api.telegram.org/bot${token}/getUpdates?offset=-1&timeout=0`, {
-        signal: AbortSignal.timeout(5000),
-      });
-      // 추가 대기: Telegram 서버가 이전 연결을 완전히 정리하도록
-      await new Promise(r => setTimeout(r, 5000));
-      console.log("[Bot] Polling cancelled OK");
-    } catch (e: any) {
-      console.log(`[Bot] Polling cancel attempt: ${e.message} (continuing anyway)`);
-    }
+    console.log("[Bot] Waiting for Telegram polling slot to clear...");
+    await waitForPollingSlot(token, 60_000);
   }
 }
 await checkAndWritePid();
@@ -107,53 +122,57 @@ async function startServices(): Promise<void> {
   }
 }
 
-// 409 재시도 포함 봇 시작
+// 409 재시도 포함 봇 시작 — 409는 exit하지 않고 무한 재시도 (restart 폭풍 방지)
 let onStartFired = false;
-async function startBot(retries = 5): Promise<void> {
-  for (let attempt = 1; attempt <= retries; attempt++) {
-    try {
-      await bot.start({
-        drop_pending_updates: true,
-        onStart: async (botInfo) => {
-          console.log(`Bot @${botInfo.username} is running!`);
-          console.log(`Send /start to the bot on Telegram to begin.`);
+async function startBot(): Promise<void> {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  let round = 0;
 
-          // 409 retry 시 onStart가 매번 호출됨 — 서비스/훅은 1회만 실행
-          if (onStartFired) return;
-          onStartFired = true;
+  while (true) {
+    round++;
+    const maxAttempts = 8;
 
-          appendMemoryLog(`Bot started: @${botInfo.username}`);
-
-          await startServices();
-
-          fireHook("on_start", askClaude, sendTelegram).catch((e) =>
-            console.error(`[LemonClaw] on_start hook error: ${e.message}`)
-          );
-        },
-      });
-      return; // start()가 정상 종료하면 (bot.stop() 호출 시) 리턴
-    } catch (e: any) {
-      const is409 = e.error_code === 409 || String(e.message || "").includes("409");
-      if (is409 && attempt < retries) {
-        console.log(`[Bot] 409 conflict — cancelling stale polling then retry (attempt ${attempt}/${retries})`);
-        // 이전 long-polling을 명시적으로 캔슬 후 재시도
-        const token = process.env.TELEGRAM_BOT_TOKEN;
-        if (token) {
-          try {
-            await fetch(`https://api.telegram.org/bot${token}/getUpdates?offset=-1&timeout=0`, {
-              signal: AbortSignal.timeout(5000),
-            });
-          } catch {}
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        await bot.start({
+          drop_pending_updates: true,
+          onStart: async (botInfo) => {
+            console.log(`Bot @${botInfo.username} is running!`);
+            console.log(`Send /start to the bot on Telegram to begin.`);
+            if (onStartFired) return;
+            onStartFired = true;
+            appendMemoryLog(`Bot started: @${botInfo.username}`);
+            await startServices();
+            fireHook("on_start", askClaude, sendTelegram).catch((e) =>
+              console.error(`[LemonClaw] on_start hook error: ${e.message}`)
+            );
+          },
+        });
+        return; // bot.stop() 호출 시 정상 리턴
+      } catch (e: any) {
+        const is409 = e.error_code === 409 || String(e.message || "").includes("409");
+        if (is409 && attempt < maxAttempts) {
+          console.log(`[Bot] 409 conflict (round ${round}, attempt ${attempt}/${maxAttempts}) — waiting for slot...`);
+          if (token) await waitForPollingSlot(token, 35_000);
+          continue;
         }
-        const wait = Math.min(attempt * 5, 15); // 5s, 10s, 15s, 15s (캔슬 후이므로 짧게)
-        await new Promise(r => setTimeout(r, wait * 1000));
-        continue;
+        if (is409) {
+          // 409로 모든 시도 소진 — exit하지 않고 60초 대기 후 처음부터 재시도
+          console.error(`[Bot] 409 persisted through ${maxAttempts} attempts (round ${round}) — waiting 60s then retry`);
+          break;
+        }
+        // 409가 아닌 에러 — 진짜 문제이므로 exit
+        console.error(`[Bot] Fatal non-409 error:`, e.message);
+        process.exit(1);
       }
-      console.error(`[Bot] Fatal error after ${attempt} attempts:`, e.message);
-      // 45초 대기 후 exit하여 Telegram 쪽 이전 연결이 타임아웃되도록 함
-      console.log(`[Bot] Waiting 45s before exit to let Telegram polling timeout...`);
-      await new Promise(r => setTimeout(r, 45_000));
-      process.exit(1);
+    }
+
+    // 409 라운드 실패 — 60초 후 다시 시도
+    if (token) {
+      console.log("[Bot] Waiting 60s for polling slot to fully clear...");
+      await waitForPollingSlot(token, 60_000);
+    } else {
+      await new Promise(r => setTimeout(r, 60_000));
     }
   }
 }
