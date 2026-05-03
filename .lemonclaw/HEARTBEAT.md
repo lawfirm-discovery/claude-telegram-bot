@@ -5,8 +5,9 @@
 
 ## 1. 개발서버 (rtx6000) 서비스 상태 — 모든 봇 공통
 외부에서 접근 가능한 URL로 확인:
-- [ ] 테스트 서버 접속: `curl -sf -o /dev/null -w '%{http_code}' http://100.108.86.92:3011` → 200 또는 30x
-- [ ] Spring API: `curl -sf -o /dev/null -w '%{http_code}' http://100.108.86.92:3011/api/health` → 200 (실패 시 `http://100.108.86.92:8080` 직접 시도)
+- 3011은 **HTTPS 전용** (자체서명 인증서) — 반드시 `https://` + `-k` (인증서 검증 무시) 사용
+- [ ] 테스트 서버 접속: `curl -ksf -o /dev/null -w '%{http_code}' https://100.108.86.92:3011` → 200 또는 30x
+- [ ] Spring API: `curl -ksf -o /dev/null -w '%{http_code}' https://100.108.86.92:3011/api/health` → 200 (실패 시 `http://100.108.86.92:8080` 직접 시도)
 - [ ] FastAPI: `curl -sf -o /dev/null -w '%{http_code}' http://100.108.86.92:8001/docs` → 200
 
 ## 2. 로컬 서버 기본 헬스
