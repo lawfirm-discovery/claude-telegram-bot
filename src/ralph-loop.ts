@@ -62,7 +62,9 @@ const TASKS_DIR = join(import.meta.dir, "..", "tasks");
 const MAX_ITERATIONS = parseInt(process.env.RALPH_MAX_ITERATIONS || "10");
 const COMPRESS_THRESHOLD = 60;
 const EVALUATOR_MODEL = process.env.RALPH_EVALUATOR_MODEL || "claude-sonnet-4-6";
-const SKIP_EVALUATOR = process.env.RALPH_SKIP_EVALUATOR === "true";
+// process.env를 매번 읽어야 테스트에서 동적 변경 가능
+const getSkipEvaluator = () => process.env.RALPH_SKIP_EVALUATOR === "true";
+const getEvaluatorTimeout = () => parseInt(process.env.RALPH_EVALUATOR_TIMEOUT || "45000");
 
 const REPO_PATHS: Record<string, string> = {
   "lemon-front": "/home/angrylawyer/lemon-front",
@@ -243,7 +245,7 @@ interface EvalResult {
 }
 
 async function runEvaluator(taskId: string, item: TaskItem, testResult: string): Promise<EvalResult> {
-  if (SKIP_EVALUATOR) return { complete: true, reason: "evaluator skipped" };
+  if (getSkipEvaluator()) return { complete: true, reason: "evaluator skipped" };
 
   const context = readContext(taskId);
   const recentLog = readProgressLines(taskId).slice(-10).join("\n");
@@ -273,7 +275,7 @@ JSON만 응답 (다른 텍스트 없이):
 {"complete": false, "reason": "미완료 이유", "remainingWork": "남은 작업"}`;
 
   try {
-    const raw = await askClaudeLight(prompt);
+    const raw = await askClaudeLight(prompt, getEvaluatorTimeout());
     const match = raw.match(/\{[\s\S]*\}/);
     if (match) return JSON.parse(match[0]) as EvalResult;
     return { complete: false, reason: "JSON parse failed", remainingWork: raw.slice(0, 200) };
