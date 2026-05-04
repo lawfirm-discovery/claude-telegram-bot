@@ -7,6 +7,7 @@ import {
   executeWorkerTask, getWorkerBots, formatAffinityReport,
   quickDelegate, detectDelegateMessage,
 } from "./orchestrator";
+import { formatRalphStatus, listTasks } from "./ralph-loop";
 import {
   detectApprovalRequest,
   getApprovalEmoji,
@@ -155,6 +156,44 @@ bot.command("workers", async (ctx) => {
     `${w.status === "idle" ? "🟢" : "🔴"} ${w.name} (@${w.username}) — ${w.repos.join(", ")}`
   );
   await ctx.reply(`🤖 워커 봇 목록:\n\n${lines.join("\n")}`);
+});
+
+// --- Ralph Loop Commands ---
+bot.command("ralph", async (ctx) => {
+  const arg = ctx.match?.trim();
+  if (!arg) {
+    const tasks = listTasks(5);
+    if (!tasks.length) {
+      await ctx.reply("📋 Ralph 태스크 없음\n\n사용법:\n/ralph status <taskId>\n/ralph list");
+      return;
+    }
+    const lines = tasks.map(t => {
+      const icon = t.status === "completed" ? "✅" : t.status === "running" ? "🔄" : t.status === "failed" ? "❌" : "⏸";
+      return `${icon} #${t.taskId}: ${t.originalPrompt.slice(0, 60)}`;
+    });
+    await ctx.reply(`📋 최근 Ralph 태스크:\n\n${lines.join("\n")}`);
+    return;
+  }
+
+  if (arg.startsWith("status ")) {
+    const taskId = arg.slice(7).trim();
+    await ctx.reply(formatRalphStatus(taskId));
+    return;
+  }
+
+  if (arg === "list") {
+    const tasks = listTasks(10);
+    if (!tasks.length) { await ctx.reply("태스크 없음"); return; }
+    const lines = tasks.map(t => {
+      const icon = t.status === "completed" ? "✅" : t.status === "running" ? "🔄" : t.status === "failed" ? "❌" : "⏸";
+      const elapsed = Math.round(((t.completedAt || Date.now()) - t.createdAt) / 1000);
+      return `${icon} #${t.taskId} (${elapsed}s) — ${t.originalPrompt.slice(0, 50)}`;
+    });
+    await ctx.reply(`📋 Ralph 태스크 목록:\n\n${lines.join("\n")}`);
+    return;
+  }
+
+  await ctx.reply("사용법:\n/ralph — 최근 태스크\n/ralph status <taskId>\n/ralph list");
 });
 
 // Pending orchestration approvals
@@ -463,22 +502,39 @@ async function handleMessage(
   };
 
   const onProgress = (info: ProgressInfo) => {
+    let shouldUpdate = false;
+
     if (info.type === "tool_use" && info.toolName) {
       const emoji = TOOL_EMOJI[info.toolName] || "🔧";
-      toolHistory.push(`${emoji} ${info.toolName}`);
-      // 최근 5개만 표시
-      const recent = toolHistory.slice(-5);
-      const elapsed = Math.round((Date.now() - startTime) / 1000);
-      const elapsedStr = elapsed >= 60 ? `${Math.floor(elapsed / 60)}m${elapsed % 60}s` : `${elapsed}s`;
-      const progressText = `⏳ 작업 중... (turn ${info.turnNumber}, ${elapsedStr})\n${recent.join(" → ")}`;
-
-      // 쓰로틀링: 3초마다 최대 1번 업데이트
-      if (!progressThrottleTimer) {
-        progressThrottleTimer = setTimeout(() => {
-          progressThrottleTimer = null;
-          updateProgressMessage(progressText);
-        }, PROGRESS_THROTTLE_MS);
+      const inputSnippet = info.toolInput ? `: ${info.toolInput.slice(0, 60)}` : "";
+      toolHistory.push(`${emoji} ${info.toolName}${inputSnippet}`);
+      shouldUpdate = true;
+    } else if (info.type === "tool_result" && info.toolOutput) {
+      const shortOutput = info.toolOutput.slice(0, 80).replace(/\n/g, " ").trim();
+      if (shortOutput) {
+        toolHistory.push(`  → ${shortOutput}`);
+        shouldUpdate = true;
       }
+    } else if (info.type === "text_chunk" && info.text) {
+      const snippet = info.text.slice(0, 60).replace(/\n/g, " ").trim();
+      if (snippet && !toolHistory.some(t => t.startsWith("💬"))) {
+        toolHistory.push(`💬 "${snippet}..."`);
+        shouldUpdate = true;
+      }
+    }
+
+    if (!shouldUpdate) return;
+
+    const recent = toolHistory.slice(-8);
+    const elapsed = Math.round((Date.now() - startTime) / 1000);
+    const elapsedStr = elapsed >= 60 ? `${Math.floor(elapsed / 60)}m${elapsed % 60}s` : `${elapsed}s`;
+    const progressText = `⏳ Turn ${info.turnNumber} 진행 중 (${elapsedStr})\n${recent.join("\n")}`;
+
+    if (!progressThrottleTimer) {
+      progressThrottleTimer = setTimeout(() => {
+        progressThrottleTimer = null;
+        updateProgressMessage(progressText);
+      }, PROGRESS_THROTTLE_MS);
     }
   };
 

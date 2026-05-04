@@ -11,6 +11,7 @@ import { readFileSync, writeFileSync, existsSync } from "fs";
 import { join } from "path";
 import { saveMessage, saveSession, getMessages, getSessions, getStats, testConnection, type SaveMessageParams, type SaveSessionParams } from "./db";
 import { CLI_SUPPORTS_EFFORT } from "./claude-engine";
+import { createTask, runRalphLoop } from "./ralph-loop";
 
 export type BotRole = "lead" | "worker";
 
@@ -354,9 +355,26 @@ export async function executeWorkerTask(task: DetectedTask, askClaude: AskClaude
   const rp = REPO_PATHS[task.repo]; if (!rp) { await sendTg(LEAD_BOT_CHAT_ID, `[FAIL:${task.taskId}:${task.subtaskId}] 레포 없음`); return; }
   try {
     await runGit(rp, ["checkout", DEV_BRANCH]); await runGit(rp, ["pull", "origin", DEV_BRANCH]); await runGit(rp, ["checkout", "-b", task.branch]);
-    await askClaude(LEAD_BOT_CHAT_ID, `워커: ${task.description}\n레포: ${task.repo} (${rp})\n브랜치: ${task.branch}\n${task.files.length ? `파일: ${task.files.join(", ")}` : ""}`);
+
+    // Ralph Loop: 단일 Claude 호출 대신 반복 실행
+    const ralphTaskId = `${task.taskId}-${task.subtaskId}`;
+    createTask({
+      taskId: ralphTaskId,
+      originalPrompt: task.description,
+      requestedBy: LEAD_BOT_CHAT_ID,
+      repo: task.repo,
+      branch: task.branch,
+      files: task.files,
+      items: [{ description: `워커: ${task.description}\n레포: ${task.repo} (${rp})\n브랜치: ${task.branch}\n${task.files.length ? `파일: ${task.files.join(", ")}` : ""}` }],
+    });
+    const result = await runRalphLoop(ralphTaskId, askClaude, sendTg);
+
     const pr = await runGit(rp, ["push", "origin", task.branch]); await runGit(rp, ["checkout", DEV_BRANCH]);
-    await sendTg(LEAD_BOT_CHAT_ID, pr.code === 0 || pr.output.includes("up-to-date") ? `[DONE:${task.taskId}:${task.subtaskId}]` : `[FAIL:${task.taskId}:${task.subtaskId}] push fail`);
+    if (result.completed && (pr.code === 0 || pr.output.includes("up-to-date"))) {
+      await sendTg(LEAD_BOT_CHAT_ID, `[DONE:${task.taskId}:${task.subtaskId}] Ralph ${result.totalIterations} iterations`);
+    } else {
+      await sendTg(LEAD_BOT_CHAT_ID, `[FAIL:${task.taskId}:${task.subtaskId}] ${result.error || "push fail"}`);
+    }
   } catch (e: any) { await runGit(rp, ["checkout", DEV_BRANCH]).catch(() => {}); await sendTg(LEAD_BOT_CHAT_ID, `[FAIL:${task.taskId}:${task.subtaskId}] ${e.message}`); }
 }
 

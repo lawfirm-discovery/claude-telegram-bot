@@ -234,10 +234,13 @@ export async function cancelQuery(chatId: string): Promise<boolean> {
 // ═══════════════════════════════════════════════════════════════
 
 export interface ProgressInfo {
-  type: "tool_use" | "tool_result" | "thinking" | "text_chunk";
+  type: "tool_use" | "tool_result" | "thinking" | "text_chunk" | "tool_progress";
   toolName?: string;
+  toolInput?: string;
+  toolOutput?: string;
   text?: string;
   turnNumber: number;
+  elapsedSeconds?: number;
 }
 
 export type OnProgress = (info: ProgressInfo) => void;
@@ -437,12 +440,38 @@ async function runWithSDKInner(
           } else if (block.type === "tool_use") {
             turnNumber++;
             toolsUsed.push(block.name);
-            onProgress?.({ type: "tool_use", toolName: block.name, turnNumber });
+            let inputSummary = "";
+            try {
+              const inp = block.input as Record<string, any>;
+              if (inp.command) inputSummary = String(inp.command).slice(0, 200);
+              else if (inp.file_path) inputSummary = inp.file_path;
+              else if (inp.pattern) inputSummary = `${inp.pattern}`;
+              else if (inp.query) inputSummary = String(inp.query).slice(0, 150);
+              else inputSummary = JSON.stringify(inp).slice(0, 150);
+            } catch {}
+            onProgress?.({ type: "tool_use", toolName: block.name, toolInput: inputSummary, turnNumber });
           }
         }
       } else if (msg.type === "user") {
-        // Tool result returned
-        onProgress?.({ type: "tool_result", turnNumber });
+        let outputSummary = "";
+        try {
+          const content = (msg as any).message?.content;
+          if (Array.isArray(content)) {
+            for (const block of content) {
+              if (typeof block.content === "string") {
+                outputSummary = block.content.slice(0, 300);
+                break;
+              } else if (Array.isArray(block.content)) {
+                const textPart = block.content.find((c: any) => c.type === "text");
+                if (textPart) { outputSummary = textPart.text?.slice(0, 300) || ""; break; }
+              }
+            }
+          }
+        } catch {}
+        onProgress?.({ type: "tool_result", toolOutput: outputSummary, turnNumber });
+      } else if ((msg as any).type === "tool_progress") {
+        const tp = msg as any;
+        onProgress?.({ type: "tool_progress", toolName: tp.tool_name, elapsedSeconds: tp.elapsed_time_seconds, turnNumber });
       } else if (msg.type === "system") {
         if (msg.subtype === "init") {
           const sysMsg = msg as SDKSystemMessage;

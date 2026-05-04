@@ -120,6 +120,14 @@ async function startServices(): Promise<void> {
     const { startSshProxy } = await import("./src/ssh-proxy");
     startSshProxy();
   }
+
+  // Ralph Loop: 미완료 태스크 재개 (워커만 — 리드는 직접 작업 안 함)
+  if (BOT_ROLE === "worker") {
+    const { resumeInProgressTasks } = await import("./src/ralph-loop");
+    resumeInProgressTasks(askClaude, sendTelegram).catch(e =>
+      console.error(`[RalphLoop] Resume error: ${e.message}`)
+    );
+  }
 }
 
 // 409 재시도 포함 봇 시작 — 409는 exit하지 않고 무한 재시도 (restart 폭풍 방지)

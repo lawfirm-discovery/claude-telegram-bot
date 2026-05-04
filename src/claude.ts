@@ -408,10 +408,13 @@ interface StreamEvent {
 // ═══════════════════════════════════════════════════════════════
 
 export interface ProgressInfo {
-  type: "tool_use" | "tool_result" | "thinking" | "text_chunk";
+  type: "tool_use" | "tool_result" | "thinking" | "text_chunk" | "tool_progress";
   toolName?: string;
+  toolInput?: string;
+  toolOutput?: string;
   text?: string;
   turnNumber: number;
+  elapsedSeconds?: number;
 }
 
 // Exported so bot.ts can pass an onProgress callback
