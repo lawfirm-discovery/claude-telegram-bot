@@ -35,6 +35,8 @@ export interface OrchestratedTask {
 
 export const BOT_ROLE: BotRole = (process.env.BOT_ROLE || "worker") as BotRole;
 export const DEV_BRANCH = process.env.DEV_BRANCH || "dev-hs-rtx6000-new";
+// Ralph Loop는 default ON. emergency 시 RALPH_ENABLED=false로 단발 askClaude 모드 fallback.
+const RALPH_ENABLED = process.env.RALPH_ENABLED !== "false";
 const LEAD_BOT_CHAT_ID = process.env.LEAD_BOT_CHAT_ID || "";
 const LEAD_API_PORT = parseInt(process.env.LEAD_API_PORT || "18801");
 
@@ -356,24 +358,36 @@ export async function executeWorkerTask(task: DetectedTask, askClaude: AskClaude
   try {
     await runGit(rp, ["checkout", DEV_BRANCH]); await runGit(rp, ["pull", "origin", DEV_BRANCH]); await runGit(rp, ["checkout", "-b", task.branch]);
 
-    // Ralph Loop: 단일 Claude 호출 대신 반복 실행
-    const ralphTaskId = `${task.taskId}-${task.subtaskId}`;
-    createTask({
-      taskId: ralphTaskId,
-      originalPrompt: task.description,
-      requestedBy: LEAD_BOT_CHAT_ID,
-      repo: task.repo,
-      branch: task.branch,
-      files: task.files,
-      items: [{ description: `워커: ${task.description}\n레포: ${task.repo} (${rp})\n브랜치: ${task.branch}\n${task.files.length ? `파일: ${task.files.join(", ")}` : ""}` }],
-    });
-    const result = await runRalphLoop(ralphTaskId, askClaude, sendTg);
+    if (RALPH_ENABLED) {
+      // Ralph Loop: 반복 실행 + ratchet + evaluator
+      const ralphTaskId = `${task.taskId}-${task.subtaskId}`;
+      createTask({
+        taskId: ralphTaskId,
+        originalPrompt: task.description,
+        requestedBy: LEAD_BOT_CHAT_ID,
+        repo: task.repo,
+        branch: task.branch,
+        files: task.files,
+        items: [{ description: `워커: ${task.description}\n레포: ${task.repo} (${rp})\n브랜치: ${task.branch}\n${task.files.length ? `파일: ${task.files.join(", ")}` : ""}` }],
+      });
+      const result = await runRalphLoop(ralphTaskId, askClaude, sendTg);
 
-    const pr = await runGit(rp, ["push", "origin", task.branch]); await runGit(rp, ["checkout", DEV_BRANCH]);
-    if (result.completed && (pr.code === 0 || pr.output.includes("up-to-date"))) {
-      await sendTg(LEAD_BOT_CHAT_ID, `[DONE:${task.taskId}:${task.subtaskId}] Ralph ${result.totalIterations} iterations`);
+      const pr = await runGit(rp, ["push", "origin", task.branch]); await runGit(rp, ["checkout", DEV_BRANCH]);
+      if (result.completed && (pr.code === 0 || pr.output.includes("up-to-date"))) {
+        await sendTg(LEAD_BOT_CHAT_ID, `[DONE:${task.taskId}:${task.subtaskId}] Ralph ${result.totalIterations} iterations`);
+      } else {
+        await sendTg(LEAD_BOT_CHAT_ID, `[FAIL:${task.taskId}:${task.subtaskId}] ${result.error || "push fail"}`);
+      }
     } else {
-      await sendTg(LEAD_BOT_CHAT_ID, `[FAIL:${task.taskId}:${task.subtaskId}] ${result.error || "push fail"}`);
+      // RALPH_ENABLED=false: 단발 askClaude 모드 (emergency fallback)
+      const prompt = `워커: ${task.description}\n레포: ${task.repo} (${rp})\n브랜치: ${task.branch}\n${task.files.length ? `파일: ${task.files.join(", ")}` : ""}\n\n작업 후 git commit + push 하세요.`;
+      await askClaude(`worker-${task.taskId}-${task.subtaskId}`, prompt);
+      const pr = await runGit(rp, ["push", "origin", task.branch]); await runGit(rp, ["checkout", DEV_BRANCH]);
+      if (pr.code === 0 || pr.output.includes("up-to-date")) {
+        await sendTg(LEAD_BOT_CHAT_ID, `[DONE:${task.taskId}:${task.subtaskId}] (ralph disabled)`);
+      } else {
+        await sendTg(LEAD_BOT_CHAT_ID, `[FAIL:${task.taskId}:${task.subtaskId}] push fail (ralph disabled)`);
+      }
     }
   } catch (e: any) { await runGit(rp, ["checkout", DEV_BRANCH]).catch(() => {}); await sendTg(LEAD_BOT_CHAT_ID, `[FAIL:${task.taskId}:${task.subtaskId}] ${e.message}`); }
 }

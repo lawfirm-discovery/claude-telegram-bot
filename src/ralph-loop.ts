@@ -12,8 +12,9 @@
 import { randomUUID } from "crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, readdirSync, renameSync } from "fs";
 import { join } from "path";
-import { spawn } from "child_process";
-import { clearSession, CLI_SUPPORTS_EFFORT } from "./claude-engine";
+import { clearSession } from "./claude-engine";
+import { askClaudeLight, runEvaluator } from "./evaluator";
+import { runRatchet } from "./test-ratchet";
 
 // ═══════════════════════════════════════════════════════════════
 // Types
@@ -61,10 +62,6 @@ export interface RalphLoopResult {
 const TASKS_DIR = join(import.meta.dir, "..", "tasks");
 const MAX_ITERATIONS = parseInt(process.env.RALPH_MAX_ITERATIONS || "10");
 const COMPRESS_THRESHOLD = 60;
-const EVALUATOR_MODEL = process.env.RALPH_EVALUATOR_MODEL || "claude-sonnet-4-6";
-// process.env를 매번 읽어야 테스트에서 동적 변경 가능
-const getSkipEvaluator = () => process.env.RALPH_SKIP_EVALUATOR === "true";
-const getEvaluatorTimeout = () => parseInt(process.env.RALPH_EVALUATOR_TIMEOUT || "45000");
 
 const REPO_PATHS: Record<string, string> = {
   "lemon-front": "/home/angrylawyer/lemon-front",
@@ -162,130 +159,6 @@ export function createTask(params: {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Light Claude Call (evaluator + compression)
-// ═══════════════════════════════════════════════════════════════
-
-function askClaudeLight(prompt: string, timeoutMs = 45_000): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const args = [
-      "-p",
-      "--model", EVALUATOR_MODEL,
-      ...(CLI_SUPPORTS_EFFORT ? ["--effort", "low"] : []),
-      "--no-tool-use",
-      "--output-format", "text",
-      "--permission-mode", "bypassPermissions",
-    ];
-    const proc = spawn(process.env.CLAUDE_PATH || "claude", args, {
-      env: { ...process.env, NO_COLOR: "1", TELEGRAM_BOT_TOKEN: "" },
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    proc.stdin?.write(prompt);
-    proc.stdin?.end();
-    let stdout = "", stderr = "";
-    proc.stdout?.on("data", (d: Buffer) => { stdout += d.toString(); });
-    proc.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
-    const timer = setTimeout(() => {
-      try { proc.kill("SIGKILL"); } catch {}
-      reject(new Error("evaluator timeout"));
-    }, timeoutMs);
-    proc.on("close", (code) => {
-      clearTimeout(timer);
-      code === 0 && stdout.trim() ? resolve(stdout.trim()) : reject(new Error(stderr.slice(0, 200) || "evaluator failed"));
-    });
-    proc.on("error", (e) => { clearTimeout(timer); reject(e); });
-  });
-}
-
-// ═══════════════════════════════════════════════════════════════
-// Test Ratchet
-// ═══════════════════════════════════════════════════════════════
-
-async function runTestRatchet(repo: string): Promise<{ passed: boolean; output: string }> {
-  const rp = REPO_PATHS[repo];
-  if (!rp) return { passed: true, output: "no repo" };
-
-  let cmd: string[];
-  if (repo === "lemon_flutter") cmd = ["/home/angrylawyer/flutter/bin/flutter", "analyze", "--no-pub"];
-  else if (repo === "lemon-front") cmd = ["npx", "tsc", "--noEmit"];
-  else if (repo.includes("spring")) cmd = ["./gradlew", "compileJava"];
-  else return { passed: true, output: "no test configured" };
-
-  return new Promise((resolve) => {
-    const p = spawn(cmd[0]!, cmd.slice(1), {
-      cwd: rp,
-      stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, LEMON_FORK_JAVAC: "true" },
-    });
-    let output = "";
-    p.stdout?.on("data", (d) => { output += d.toString(); });
-    p.stderr?.on("data", (d) => { output += d.toString(); });
-    const timer = setTimeout(() => {
-      try { p.kill("SIGKILL"); } catch {}
-      resolve({ passed: false, output: "test timeout (120s)" });
-    }, 120_000);
-    p.on("close", (code) => {
-      clearTimeout(timer);
-      resolve({ passed: code === 0, output: output.slice(-500) });
-    });
-    p.on("error", (e) => {
-      clearTimeout(timer);
-      resolve({ passed: false, output: e.message });
-    });
-  });
-}
-
-// ═══════════════════════════════════════════════════════════════
-// Evaluator — 별도 Claude 세션으로 완료 여부 독립 판정
-// ═══════════════════════════════════════════════════════════════
-
-interface EvalResult {
-  complete: boolean;
-  reason: string;
-  remainingWork?: string;
-}
-
-async function runEvaluator(taskId: string, item: TaskItem, testResult: string): Promise<EvalResult> {
-  if (getSkipEvaluator()) return { complete: true, reason: "evaluator skipped" };
-
-  const context = readContext(taskId);
-  const recentLog = readProgressLines(taskId).slice(-10).join("\n");
-
-  const prompt = `당신은 작업 완료 여부를 판정하는 독립 평가자입니다. 이전 작업 에이전트와 별도의 세션입니다.
-
-## 원본 작업
-${item.description}
-
-## 현재 진행 요약
-${context || "(아직 없음)"}
-
-## 최근 로그 (마지막 10줄)
-${recentLog}
-
-## 빌드/테스트 결과
-${testResult}
-
-위 정보를 바탕으로, 이 작업이 **완전히 완료**되었는지 평가하세요.
-- 코드 수정이 있었고 테스트가 통과했으면 높은 확률로 완료
-- 로그에 에러, 미구현, TODO가 남아있으면 미완료
-- 빌드 실패면 무조건 미완료
-
-JSON만 응답 (다른 텍스트 없이):
-{"complete": true, "reason": "판정 이유"}
-또는
-{"complete": false, "reason": "미완료 이유", "remainingWork": "남은 작업"}`;
-
-  try {
-    const raw = await askClaudeLight(prompt, getEvaluatorTimeout());
-    const match = raw.match(/\{[\s\S]*\}/);
-    if (match) return JSON.parse(match[0]) as EvalResult;
-    return { complete: false, reason: "JSON parse failed", remainingWork: raw.slice(0, 200) };
-  } catch (e: any) {
-    appendProgress(taskId, `EVALUATOR ERROR: ${e.message}`);
-    return { complete: false, reason: `evaluator error: ${e.message}` };
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════
 // Context Compression — Anchored Iterative (Factory 방식)
 // ═══════════════════════════════════════════════════════════════
 
@@ -377,13 +250,18 @@ export async function runRalphLoop(
           await compressContext(taskId, prd);
         }
 
-        // 4. Test Ratchet
-        const testResult = await runTestRatchet(prd.repo);
-        const testSummary = `${testResult.passed ? "PASS" : "FAIL"}: ${testResult.output.slice(0, 200)}`;
+        // 4. Test Ratchet — tasks/{taskId}/tests.json 동결 명령 사용
+        const testResult = await runRatchet(taskDir(taskId), prd.repo);
+        const testSummary = `${testResult.passed ? "PASS" : "FAIL"}: ${testResult.output.slice(0, 400)}`;
         appendProgress(taskId, `TEST RATCHET: ${testSummary}`);
 
-        // 5. Evaluator (별도 세션)
-        const evalResult = await runEvaluator(taskId, item, testSummary);
+        // 5. Evaluator (별도 세션, default Haiku 4.5)
+        const evalResult = await runEvaluator({
+          taskDescription: item.description,
+          contextSummary: readContext(taskId),
+          recentLogTail: readProgressLines(taskId).slice(-10).join("\n"),
+          testResult: testSummary,
+        });
         appendProgress(taskId, `EVALUATOR: complete=${evalResult.complete}, reason=${evalResult.reason}`);
 
         if (evalResult.complete && testResult.passed) {
