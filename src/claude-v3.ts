@@ -27,6 +27,7 @@ import { APPROVAL_SYSTEM_PROMPT } from "./approval";
 import { loadSystemPrompt } from "./lemonclaw";
 import { makeLoopDetectorHook, clearLoopHistory } from "./hooks/loop-detector";
 import { dangerousCmdHook } from "./hooks/dangerous-cmd";
+import { incr, addCostUsd } from "./metrics";
 
 // ═══════════════════════════════════════════════════════════════
 // Configuration
@@ -517,6 +518,7 @@ async function runWithSDKInner(
           console.error(`[V3] Result error: ${resultMsg.subtype}`);
           // max_turns 초과는 사용자에게 명확한 사유 통지
           if (resultMsg.subtype === "error_max_turns") {
+            incr("engine.max_turns_hit");
             const tail = fullText ? fullText + "\n\n" : "";
             fullText = `${tail}⚠️ maxTurns(${CLAUDE_MAX_TURNS}) 초과로 중단됨. 작업을 더 작은 단위로 나누어 재요청하세요.`;
           }
@@ -575,6 +577,7 @@ async function runWithSDKInner(
   const inRate = isOpus ? 15 : 3;
   const outRate = isOpus ? 75 : 15;
   const estimatedCost = (resultUsage.inputTokens * inRate + resultUsage.outputTokens * outRate + resultUsage.cacheRead * 1.5) / 1_000_000;
+  addCostUsd(estimatedCost);
   console.log(
     `[V3] chat=${chatId} turns=${turnNumber} in=${resultUsage.inputTokens} out=${resultUsage.outputTokens}` +
     ` cache_read=${resultUsage.cacheRead} cost=$${estimatedCost.toFixed(4)} duration=${Math.round(durationMs / 1000)}s`

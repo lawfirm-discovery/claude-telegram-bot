@@ -15,6 +15,7 @@ import type {
   PreToolUseHookInput,
   HookJSONOutput,
 } from "@anthropic-ai/claude-agent-sdk";
+import { incr } from "../metrics";
 
 const HISTORY = new Map<string, { tool: string; sig: string; ts: number }[]>();
 const MAX_HISTORY = 6;
@@ -61,6 +62,7 @@ export function makeLoopDetectorHook(chatId: string): HookCallback {
           `[loop-detector] ${pre.tool_name}이(가) 동일 인자로 ${REPEAT_THRESHOLD}회 연속 호출됨. ` +
           `다른 접근을 시도하거나 작업을 중단하세요. sig=${first.sig.slice(0, 120)}`;
         console.warn(`[loop-detector] BLOCK chat=${chatId} ${reason}`);
+        incr("hook.loop_detector.deny");
         // 히스토리 리셋 (한 번 차단 후 같은 차단을 즉시 또 발동시키지 않기 위해)
         HISTORY.set(key, []);
         const out: HookJSONOutput = {

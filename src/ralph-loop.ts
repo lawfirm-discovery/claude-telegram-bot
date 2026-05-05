@@ -15,6 +15,8 @@ import { join } from "path";
 import { clearSession } from "./claude-engine";
 import { askClaudeLight, runEvaluator } from "./evaluator";
 import { runRatchet } from "./test-ratchet";
+import { incr, formatOneLineSummary } from "./metrics";
+import { appendMemoryLog } from "./lemonclaw";
 
 // ═══════════════════════════════════════════════════════════════
 // Types
@@ -227,6 +229,7 @@ export async function runRalphLoop(
       const iterStart = Date.now();
 
       appendProgress(taskId, `ITERATION ${item.iteration}/${item.maxIterations} START: ${item.id}`);
+      incr("ralph.iteration.start");
 
       // 매 반복마다 세션 초기화 → 깨끗한 컨텍스트
       clearSession(syntheticChatId);
@@ -254,6 +257,7 @@ export async function runRalphLoop(
         const testResult = await runRatchet(taskDir(taskId), prd.repo);
         const testSummary = `${testResult.passed ? "PASS" : "FAIL"}: ${testResult.output.slice(0, 400)}`;
         appendProgress(taskId, `TEST RATCHET: ${testSummary}`);
+        incr(testResult.passed ? "ratchet.pass" : "ratchet.fail");
 
         // 5. Evaluator (별도 세션, default Haiku 4.5)
         const evalResult = await runEvaluator({
@@ -263,11 +267,18 @@ export async function runRalphLoop(
           testResult: testSummary,
         });
         appendProgress(taskId, `EVALUATOR: complete=${evalResult.complete}, reason=${evalResult.reason}`);
+        if (evalResult.reason.startsWith("evaluator: JSON parse failed")) {
+          incr("evaluator.parse_failed");
+        } else {
+          incr(evalResult.complete ? "evaluator.complete" : "evaluator.incomplete");
+        }
+        incr("ralph.iteration.end");
 
         if (evalResult.complete && testResult.passed) {
           item.passes = true;
           item.completedAt = Date.now();
           appendProgress(taskId, `ITEM DONE: ${item.id}`);
+          incr("ralph.item.passed");
           await sendTg(prd.requestedBy,
             `✅ Ralph #${taskId} — ${item.id} 완료 (iter ${item.iteration}): ${item.description.slice(0, 80)}`
           );
@@ -296,6 +307,7 @@ export async function runRalphLoop(
     if (!item.passes) {
       appendProgress(taskId, `ITEM FAILED: ${item.id} — max iterations exceeded`);
       item.error = item.error || `max iterations (${item.maxIterations}) exceeded`;
+      incr("ralph.item.failed");
       savePRD(prd);
     }
   }
@@ -307,6 +319,18 @@ export async function runRalphLoop(
 
   const elapsed = Math.round((prd.completedAt - prd.createdAt) / 1000);
   appendProgress(taskId, `RALPH LOOP END: ${prd.status} (${elapsed}s, ${totalIterations} iterations)`);
+
+  // LemonClaw 공유 메모리에 한 줄 요약 append → 다음 ralph가 system prompt로 자기 패턴 인지
+  try {
+    const verdict = allDone ? "✅" : "❌";
+    appendMemoryLog(
+      `RALPH #${taskId} ${verdict} ${prd.repo} "${prd.originalPrompt.slice(0, 80)}" ` +
+      `iter=${totalIterations} ${elapsed}s items=${prd.items.length} ` +
+      `passed=${prd.items.filter(i => i.passes).length} ${formatOneLineSummary()}`
+    );
+  } catch (e: any) {
+    console.error(`[ralph-loop] memory append failed: ${e.message}`);
+  }
 
   return { taskId, completed: allDone, totalIterations };
 }

@@ -20,6 +20,7 @@ import type {
   PreToolUseHookInput,
   HookJSONOutput,
 } from "@anthropic-ai/claude-agent-sdk";
+import { incr } from "../metrics";
 
 const DISABLED = process.env.DISABLE_DANGEROUS_CMD_HOOK === "true";
 
@@ -101,6 +102,7 @@ export const dangerousCmdHook: HookCallback = async (input, _toolUseID, _opts) =
       console.warn(
         `[dangerous-cmd] BLOCK pattern=${pat.name} cmd=${cmd.slice(0, 200)}`
       );
+      incr("hook.dangerous_cmd.deny");
       const out: HookJSONOutput = {
         continue: true,
         decision: "block",
