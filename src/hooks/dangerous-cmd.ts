@@ -38,7 +38,7 @@ const PATTERNS: Pattern[] = [
   },
   {
     name: "rm-rf-home",
-    re: /\brm\s+-[rRfF]+\s+(~|\$HOME|\/home\/[^\s]+)(\s|$)/,
+    re: /\brm\s+-[rRfF]+\s+(~|\$HOME|\/home\/[^\s]+)(\/[^\s]*)?(\s|$)/,
     reason: "rm -rf ~ : 홈 디렉토리 전체 삭제 시도. 차단됨.",
   },
   {
