@@ -45,11 +45,12 @@ export function askClaudeLight(
   const effort = opts.effort || "low";
 
   return new Promise((resolve, reject) => {
+    // CLI 2.1.x: --no-tool-use → --tools "" (모든 tool 비활성)
     const args = [
       "-p",
       "--model", model,
       ...(CLI_SUPPORTS_EFFORT ? ["--effort", effort] : []),
-      "--no-tool-use",
+      "--tools", "",
       "--output-format", "text",
       "--permission-mode", "bypassPermissions",
     ];

@@ -184,7 +184,8 @@ type SendTelegramFn = (chatId: string, message: string) => Promise<void>;
 
 async function askClaudeLight(prompt: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    const args = ["-p", "--model", "claude-sonnet-4-6", ...(CLI_SUPPORTS_EFFORT ? ["--effort", "low"] : []), "--no-tool-use", "--output-format", "text", "--permission-mode", "bypassPermissions"];
+    // CLI 2.1.x: --no-tool-use → --tools "" (모든 tool 비활성)
+    const args = ["-p", "--model", "claude-sonnet-4-6", ...(CLI_SUPPORTS_EFFORT ? ["--effort", "low"] : []), "--tools", "", "--output-format", "text", "--permission-mode", "bypassPermissions"];
     const proc = spawn(process.env.CLAUDE_PATH || "claude", args, { env: { ...process.env, NO_COLOR: "1", TELEGRAM_BOT_TOKEN: "" }, stdio: ["pipe", "pipe", "pipe"] });
     proc.stdin?.write(prompt);
     proc.stdin?.end();
