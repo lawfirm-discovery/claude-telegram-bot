@@ -1,9 +1,10 @@
 /**
- * Claude Engine Router — v1/v2 전환
+ * Claude Engine Router — v1/v2/v3 전환
  *
  * ENGINE_VERSION 환경변수로 엔진 선택:
- *   v1 (default) = spawn + stream-json (기존)
- *   v2           = @anthropic-ai/claude-agent-sdk
+ *   v1           = spawn + stream-json (legacy)
+ *   v2 (default) = @anthropic-ai/claude-agent-sdk
+ *   v3           = v2 + PreToolUse hooks (loop-detector, dangerous-cmd) + maxTurns
  *
  * 모든 외부 모듈(bot.ts, worker-api.ts, orchestrator.ts)은
  * 이 파일에서 import하여 엔진에 무관하게 동작.
@@ -21,7 +22,9 @@ export type { Session, HudInfo, ProgressInfo, OnProgress } from "./claude";
 
 let engine: typeof import("./claude");
 
-if (ENGINE_VERSION === "v2") {
+if (ENGINE_VERSION === "v3") {
+  engine = await import("./claude-v3");
+} else if (ENGINE_VERSION === "v2") {
   engine = await import("./claude-v2");
 } else {
   engine = await import("./claude");
