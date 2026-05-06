@@ -42,3 +42,9 @@ export const killActiveProcesses = engine.killActiveProcesses;
 export const saveInterruptedContext = engine.saveInterruptedContext;
 export const loadInterruptedContext = engine.loadInterruptedContext;
 export const hasInterruptedContext = engine.hasInterruptedContext;
+
+// v3-only: /plan, /checkpoint slash 명령용. v1/v2에선 비활성 stub.
+export const getCurrentPlan: (chatId: string) => Promise<string> =
+  (engine as any).getCurrentPlan ?? (async () => "이 봇은 v3 엔진에서만 /plan을 지원합니다.");
+export const saveCheckpoint: (chatId: string) => Promise<string> =
+  (engine as any).saveCheckpoint ?? (async () => "");

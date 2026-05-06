@@ -30,6 +30,8 @@ const HOOKS_PATH = join(LEMONCLAW_DIR, "HOOKS.md");
 const MEMORY_PATH = join(LEMONCLAW_DIR, "MEMORY.md");
 const SHARED_MEMORY_PATH = join(LEMONCLAW_DIR, "SHARED_MEMORY.md");
 const MEMORY_DIR = join(LEMONCLAW_DIR, "memory");
+// 채팅별 사용자 명시 메모 (/note, /checkpoint) — 매 턴 system prompt에 주입
+const NOTES_DIR = join(LEMONCLAW_DIR, "notes");
 
 // ═══════════════════════════════════════════════════════════════
 // Config
@@ -187,6 +189,48 @@ export function appendMemoryLog(entry: string): void {
     }
   } catch (e: any) {
     console.error(`[LemonClaw] Memory log failed: ${e.message}`);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Chat-scoped notes (/note, /checkpoint) — 매 턴 system prompt에 주입
+// 컨텍스트 손실에도 살아남는 사용자 명시 영구 메모.
+// ═══════════════════════════════════════════════════════════════
+
+function chatNotePath(chatId: string): string {
+  return join(NOTES_DIR, `${chatId}.md`);
+}
+
+export function loadChatNotes(chatId: string): string {
+  try {
+    const p = chatNotePath(chatId);
+    if (!existsSync(p)) return "";
+    return readFileSync(p, "utf-8").trim();
+  } catch { return ""; }
+}
+
+export function appendChatNote(chatId: string, text: string): void {
+  try {
+    if (!existsSync(NOTES_DIR)) mkdirSync(NOTES_DIR, { recursive: true });
+    const p = chatNotePath(chatId);
+    const time = new Date().toLocaleString("ko-KR", { timeZone: "Asia/Seoul" });
+    const line = `- [${time}] ${text.trim()}\n`;
+    if (!existsSync(p)) {
+      writeFileSync(p, `# Chat Notes — chat=${chatId}\n\n${line}`);
+    } else {
+      appendFileSync(p, line);
+    }
+  } catch (e: any) {
+    console.error(`[LemonClaw] Chat note write failed: ${e.message}`);
+  }
+}
+
+export function clearChatNotes(chatId: string): void {
+  try {
+    const p = chatNotePath(chatId);
+    if (existsSync(p)) writeFileSync(p, `# Chat Notes — chat=${chatId}\n\n`);
+  } catch (e: any) {
+    console.error(`[LemonClaw] Chat note clear failed: ${e.message}`);
   }
 }
 

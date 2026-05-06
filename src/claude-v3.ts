@@ -24,7 +24,7 @@ import { join, dirname } from "path";
 import { readFileSync, writeFileSync, renameSync, existsSync, unlinkSync, readdirSync, statSync } from "fs";
 
 import { APPROVAL_SYSTEM_PROMPT } from "./approval";
-import { loadSystemPrompt } from "./lemonclaw";
+import { loadSystemPrompt, loadChatNotes, appendChatNote } from "./lemonclaw";
 import { makeLoopDetectorHook, clearLoopHistory } from "./hooks/loop-detector";
 import { dangerousCmdHook } from "./hooks/dangerous-cmd";
 import { incr, addCostUsd } from "./metrics";
@@ -45,6 +45,9 @@ const INACTIVITY_TIMEOUT_MS = parseInt(process.env.INACTIVITY_TIMEOUT_MS || "600
 const DEBOUNCE_MS = parseInt(process.env.DEBOUNCE_MS || "1500");
 const CLAUDE_MAX_TURNS = parseInt(process.env.CLAUDE_MAX_TURNS || process.env.MAX_TURNS || "500");
 const DISABLE_HOOKS = process.env.DISABLE_V3_HOOKS === "true";
+// Auto-compact: contextPercent가 이 임계 이상이면 매 턴 끝에 자동으로 transcript 요약 → 새 세션 시드.
+// 0이면 비활성. 기본 70%.
+const AUTO_COMPACT_THRESHOLD = parseInt(process.env.AUTO_COMPACT_THRESHOLD || "70");
 
 console.log(
   `[Claude V3] Agent SDK engine loaded ` +
@@ -82,6 +85,9 @@ export interface Session {
   sessionId: string;
   isFirstTurn: boolean;
   lastActive: number;
+  // 이전 세션이 폐기된 경우(conflict 등), 옛 transcript의 자동 요약을 새 세션 첫 턴에 주입한다.
+  // 첫 턴 후 제거되어 system prompt를 부풀리지 않는다. ("Claude Code parity" 메모리)
+  previousSummary?: string;
 }
 
 const SESSION_FILE = join(dirname(import.meta.dir), "sessions-v3.json");
@@ -330,6 +336,161 @@ function buildHooks(chatId: string): NonNullable<Parameters<typeof query>[0]["op
 }
 
 // ═══════════════════════════════════════════════════════════════
+// Previous-session summary (Claude Code parity memory)
+//
+// sessionId가 폐기되면 Claude Code SDK의 transcript jsonl 연결이 끊겨 봇이
+// "이전 대화"를 통째 잊는다. 이를 막기 위해, 폐기 직전 옛 jsonl의 마지막
+// 메시지들을 Haiku로 요약해 새 세션 첫 턴 system prompt에 주입한다.
+// ═══════════════════════════════════════════════════════════════
+
+function jsonlPathFor(sessionId: string): string {
+  const cwdEncoded = process.cwd().replace(/\//g, "-");
+  const home = process.env.HOME || "";
+  return join(home, ".claude", "projects", cwdEncoded, `${sessionId}.jsonl`);
+}
+
+function extractRecentTranscript(sessionId: string, maxItems = 30): string {
+  try {
+    const path = jsonlPathFor(sessionId);
+    if (!existsSync(path)) return "";
+    const lines = readFileSync(path, "utf-8").split("\n").filter(Boolean);
+    const out: string[] = [];
+    for (const line of lines.slice(-maxItems * 2)) {
+      try {
+        const obj = JSON.parse(line);
+        if (obj.type === "user" && obj.message?.content) {
+          const c = typeof obj.message.content === "string"
+            ? obj.message.content
+            : JSON.stringify(obj.message.content);
+          out.push(`USER: ${c.slice(0, 800)}`);
+        } else if (obj.type === "assistant" && Array.isArray(obj.message?.content)) {
+          const text = obj.message.content
+            .filter((b: any) => b.type === "text")
+            .map((b: any) => b.text)
+            .join("\n");
+          if (text) out.push(`ASSISTANT: ${text.slice(0, 1500)}`);
+        }
+      } catch {}
+    }
+    return out.slice(-maxItems).join("\n\n");
+  } catch {
+    return "";
+  }
+}
+
+async function summarizeTranscriptWithHaiku(transcript: string): Promise<string> {
+  if (!transcript) return "";
+  try {
+    // @ts-ignore — transitive dep, ESM dynamic import for resilience
+    const { default: Anthropic } = await import("@anthropic-ai/sdk");
+    const client = new Anthropic();
+    const msg = await client.messages.create({
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 1024,
+      messages: [{
+        role: "user",
+        content:
+          `다음은 Claude Code 봇과 사용자의 직전 대화입니다. 이 대화의 핵심을 한국어로 간결하게 요약해주세요.\n\n` +
+          `## 요약 형식 (이대로 따라주세요)\n` +
+          `1. 사용자 요청 / 목표\n` +
+          `2. 완료된 작업\n` +
+          `3. 진행 중인 분석/계획 (특히 중요 — 후보 옵션·다음 단계 포함)\n` +
+          `4. 미해결 항목\n` +
+          `5. 사용자가 동의한 결정 사항\n\n` +
+          `## 대화 transcript\n${transcript.slice(0, 80000)}\n\n` +
+          `요약 (위 5개 섹션 형식, 각 섹션은 짧게):`
+      }],
+    });
+    const text = (msg.content as any[])
+      .filter((b: any) => b.type === "text")
+      .map((b: any) => b.text)
+      .join("\n")
+      .trim();
+    return text;
+  } catch (e: any) {
+    console.error(`[V3] Haiku summarize failed: ${e?.message}`);
+    return "";
+  }
+}
+
+async function buildPreviousSummaryForChat(chatId: string): Promise<string> {
+  const old = sessions.get(chatId);
+  if (!old) return "";
+  const transcript = extractRecentTranscript(old.sessionId);
+  if (!transcript) return "";
+  return await summarizeTranscriptWithHaiku(transcript);
+}
+
+// /plan — 현재 세션 transcript에서 "진행 중인 계획"만 추출 (read-only)
+export async function getCurrentPlan(chatId: string): Promise<string> {
+  const s = sessions.get(chatId);
+  if (!s) return "현재 활성 세션이 없습니다. 메시지를 한 번 보내고 다시 시도하세요.";
+  const transcript = extractRecentTranscript(s.sessionId, 30);
+  if (!transcript) return "이 세션엔 아직 추출할 대화 transcript가 없습니다.";
+  try {
+    // @ts-ignore — transitive dep
+    const { default: Anthropic } = await import("@anthropic-ai/sdk");
+    const client = new Anthropic();
+    const msg = await client.messages.create({
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 768,
+      messages: [{
+        role: "user",
+        content:
+          `다음 Claude Code 봇 대화에서 "현재 진행 중인 계획"만 한국어로 정리하세요. ` +
+          `후보 옵션, 다음 단계, 미해결 항목, 사용자가 동의한 결정 사항 위주로. 짧고 명확하게.\n\n` +
+          `## 대화 transcript\n${transcript.slice(0, 60000)}\n\n진행 계획:`
+      }],
+    });
+    const text = (msg.content as any[])
+      .filter((b: any) => b.type === "text")
+      .map((b: any) => b.text)
+      .join("\n")
+      .trim();
+    return text || "(추출 결과 없음)";
+  } catch (e: any) {
+    return `⚠️ 요약 실패: ${e?.message}`;
+  }
+}
+
+// /checkpoint — 현재 핵심을 요약해 chat note(영구)에 저장
+export async function saveCheckpoint(chatId: string): Promise<string> {
+  const s = sessions.get(chatId);
+  if (!s) return "";
+  const transcript = extractRecentTranscript(s.sessionId, 50);
+  if (!transcript) return "";
+  const summary = await summarizeTranscriptWithHaiku(transcript);
+  if (summary) {
+    appendChatNote(chatId, `[checkpoint @ ${new Date().toLocaleTimeString("ko-KR", { timeZone: "Asia/Seoul", hour12: false })}]\n${summary}`);
+  }
+  return summary;
+}
+
+// 새 세션을 시작하면서 옛 transcript 요약을 previousSummary로 시드한다.
+// onProgress가 있으면 사용자에게 한 줄 안내한다.
+async function reseedSessionWithSummary(
+  chatId: string,
+  reason: string,
+  onProgress?: OnProgress,
+): Promise<void> {
+  console.log(`[V3] Reseeding session — chat=${chatId} reason=${reason}`);
+  const summary = await buildPreviousSummaryForChat(chatId).catch(() => "");
+  sessions.set(chatId, {
+    sessionId: randomUUID(),
+    isFirstTurn: true,
+    lastActive: Date.now(),
+    previousSummary: summary || undefined,
+  });
+  saveSessions();
+  if (onProgress) {
+    const note = summary
+      ? "🔄 이전 대화 컨텍스트가 만료되어 핵심을 자동 요약해 이어갑니다..."
+      : "🔄 이전 대화 컨텍스트가 만료되어 새 세션으로 시작합니다 (요약 실패).";
+    try { await onProgress(note); } catch {}
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
 // Core: SDK query execution with hooks + maxTurns
 // ═══════════════════════════════════════════════════════════════
 
@@ -345,11 +506,9 @@ async function runWithSDK(
     } catch (err: any) {
       const isConflict = /already in use/i.test(err.message || "");
       if (isConflict && attempt === 0) {
-        console.log(`[V3] Session conflict — resetting session and retrying (chat=${chatId})`);
-        sessions.delete(chatId);
-        saveSessions();
         const active = activeQueries.get(chatId);
         if (active) { try { await active.interrupt(); } catch {} activeQueries.delete(chatId); }
+        await reseedSessionWithSummary(chatId, "session_conflict", onProgress);
         await new Promise(r => setTimeout(r, 2000));
         continue;
       }
@@ -374,7 +533,16 @@ async function runWithSDKInner(
   }
 
   const freshPrompt = loadSystemPrompt();
-  const systemPrompt = [freshPrompt, APPROVAL_SYSTEM_PROMPT, USER_SYSTEM_PROMPT]
+  // 이전 세션 요약은 새 세션 첫 턴에만 주입 (한 번 받으면 transcript에 누적되어 이후 턴은 자연스럽게 이어감).
+  const previousSummaryBlock = session.isFirstTurn && session.previousSummary
+    ? `# 🔄 이전 세션 핵심 (자동 요약)\n${session.previousSummary}\n\n위 요약을 바탕으로 사용자와의 대화를 끊김 없이 이어가세요.`
+    : "";
+  // 채팅별 사용자 명시 메모 — 매 턴 주입. 컨텍스트 손실/세션 폐기에도 살아남는 영구 메모.
+  const chatNotes = loadChatNotes(chatId);
+  const chatNotesBlock = chatNotes
+    ? `# 📌 사용자 메모 (Chat Notes — 사용자가 /note 또는 /checkpoint로 영구 저장한 내용)\n${chatNotes}\n\n위 메모는 사용자가 명시적으로 기억해달라고 한 사항이므로 항상 우선시하세요.`
+    : "";
+  const systemPrompt = [freshPrompt, APPROVAL_SYSTEM_PROMPT, USER_SYSTEM_PROMPT, previousSummaryBlock, chatNotesBlock]
     .filter(Boolean)
     .join("\n\n");
 
@@ -523,14 +691,14 @@ async function runWithSDKInner(
           }
         } else {
           console.error(`[V3] Result error: ${resultMsg.subtype}`);
-          // max_turns 초과는 사용자에게 명확한 사유 통지
           if (resultMsg.subtype === "error_max_turns") {
             incr("engine.max_turns_hit");
             const tail = fullText ? fullText + "\n\n" : "";
             fullText = `${tail}⚠️ maxTurns(${CLAUDE_MAX_TURNS}) 초과로 중단됨. 작업을 더 작은 단위로 나누어 재요청하세요.`;
           }
-          sessions.delete(chatId);
-          saveSessions();
+          // 일시적 result error(max_turns, during_execution 등)는 세션을 유지한다.
+          // 사용자가 다음 메시지로 이어갈 수 있고, 진짜 영구 에러는 다음 턴에서 conflict
+          // 감지로 reseed 흐름이 처리한다. (Phase 1: 세션 폐기 빈도 축소)
           if (!fullText) {
             fullText = `⚠️ 오류 발생: ${resultMsg.subtype}`;
           }
@@ -551,9 +719,18 @@ async function runWithSDKInner(
       if (conflictDetected) {
         throw new Error(`Session ID already in use: ${error.message}`);
       }
-      if (error.message?.includes("session")) {
-        sessions.delete(chatId);
-        saveSessions();
+      // "session" 부분 매칭은 너무 광범위했음("session timeout", "user session" 등 일시 에러도 잡힘).
+      // 명백한 영구 세션 에러만 폐기 후 reseed로 핵심 컨텍스트 보존.
+      const permanentSessionError =
+        /session\s*(not found|invalid|expired|id\s+(not found|does not exist))|invalid\s+session/i
+          .test(error.message || "");
+      if (permanentSessionError) {
+        console.log(`[V3] Permanent session error — reseeding (chat=${chatId}): ${error.message}`);
+        const active = activeQueries.get(chatId);
+        if (active) { try { await active.interrupt(); } catch {} activeQueries.delete(chatId); }
+        await reseedSessionWithSummary(chatId, "permanent_session_error", onProgress).catch(() => {
+          sessions.delete(chatId); saveSessions();
+        });
       }
       if (!fullText) {
         fullText = `⚠️ 오류: ${error.message?.slice(0, 200)}`;
@@ -569,20 +746,33 @@ async function runWithSDKInner(
   }
   session.isFirstTurn = false;
   session.lastActive = Date.now();
+  // previousSummary는 첫 턴 system prompt에 한 번만 주입되고 transcript에 누적되므로 폐기.
+  if (session.previousSummary) delete session.previousSummary;
   saveSessions();
 
   const durationMs = Date.now() - startTime;
   const maxCtx = 200_000;
   const totalTokens = resultUsage.inputTokens + resultUsage.outputTokens;
+  const contextPercent = Math.min(100, Math.round((resultUsage.inputTokens / maxCtx) * 100));
   lastHud.set(chatId, {
     inputTokens: resultUsage.inputTokens,
     outputTokens: resultUsage.outputTokens,
     cacheRead: resultUsage.cacheRead,
     totalTokens,
-    contextPercent: Math.min(100, Math.round((resultUsage.inputTokens / maxCtx) * 100)),
+    contextPercent,
     turnNumber,
     durationSec: Math.round(durationMs / 1000),
   });
+
+  // Phase 4: Auto-compact — 컨텍스트 임계 도달 시 백그라운드에서 transcript 자동 요약 → 새 세션 시드.
+  // 다음 턴이 깨끗한 컨텍스트로 시작하지만 이전 핵심은 previousSummary로 보존.
+  if (AUTO_COMPACT_THRESHOLD > 0 && contextPercent >= AUTO_COMPACT_THRESHOLD && !session.isFirstTurn) {
+    setImmediate(() => {
+      reseedSessionWithSummary(chatId, `auto_compact (${contextPercent}%)`, onProgress).catch((e) => {
+        console.error(`[V3] Auto-compact failed (chat=${chatId}): ${e?.message}`);
+      });
+    });
+  }
 
   const isOpus = routing.model.includes("opus");
   const inRate = isOpus ? 15 : 3;

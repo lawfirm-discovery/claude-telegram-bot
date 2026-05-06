@@ -1,6 +1,6 @@
 import { Bot, InlineKeyboard } from "grammy";
-import { askClaude, askClaudeWithProgress, clearSession, getSessionStats, getHudInfo, killActiveProcesses, loadInterruptedContext, hasInterruptedContext, type ProgressInfo } from "./claude-engine";
-import { appendMemoryLog, appendSharedMemory } from "./lemonclaw";
+import { askClaude, askClaudeWithProgress, clearSession, getSessionStats, getHudInfo, killActiveProcesses, loadInterruptedContext, hasInterruptedContext, getCurrentPlan, saveCheckpoint, type ProgressInfo } from "./claude-engine";
+import { appendMemoryLog, appendSharedMemory, appendChatNote, clearChatNotes, loadChatNotes } from "./lemonclaw";
 import {
   BOT_ROLE, planTask, dispatchTask, handleWorkerReport,
   mergeCompletedTask, formatTaskStatus, detectTaskMessage,
@@ -95,6 +95,10 @@ bot.command("start", async (ctx) => {
       `Model: ${process.env.CLAUDE_MODEL || "claude-opus-4-6"}\n` +
       `Your ID: ${ctx.from?.id}\n\n` +
       `/new — New conversation\n` +
+      `/clear — 세션 + 메모 모두 초기화\n` +
+      `/note <텍스트> — 영구 메모 저장 (매 턴 자동 주입)\n` +
+      `/plan — 진행 중인 계획 추출 표시\n` +
+      `/checkpoint — 현재 대화 핵심을 영구 저장\n` +
       `/model — Current model\n` +
       `/stats — Session stats\n` +
       `/pair <code> — Approve user`
@@ -104,6 +108,62 @@ bot.command("start", async (ctx) => {
 bot.command("new", async (ctx) => {
   clearSession(ctx.chat.id.toString());
   await ctx.reply("🔄 New conversation started.");
+});
+
+// /clear — /new alias + chat notes도 함께 삭제
+bot.command("clear", async (ctx) => {
+  const chatId = ctx.chat.id.toString();
+  clearSession(chatId);
+  clearChatNotes(chatId);
+  await ctx.reply("🧹 대화 초기화: 세션 + 사용자 메모 모두 삭제됨.");
+});
+
+// /note <text> — 사용자 명시 메모 영구 저장 (매 턴 system prompt에 주입됨)
+bot.command("note", async (ctx) => {
+  const text = ctx.match?.trim();
+  if (!text) {
+    const existing = loadChatNotes(ctx.chat.id.toString());
+    const preview = existing
+      ? `현재 메모:\n\n${existing.slice(-1500)}`
+      : "(저장된 메모 없음)";
+    await ctx.reply(
+      `사용법: /note <기억할 내용>\n예: /note Phase 3+4 다음 작업으로 진행 합의됨\n\n${preview}`
+    );
+    return;
+  }
+  const chatId = ctx.chat.id.toString();
+  appendChatNote(chatId, text);
+  const shown = text.length > 80 ? text.slice(0, 80) + "..." : text;
+  await ctx.reply(`📌 메모 저장됨: ${shown}\n\n(매 턴 시스템 프롬프트에 자동 주입됩니다.)`);
+});
+
+// /plan — 현재 대화의 진행 중인 계획만 추출해 표시 (read-only)
+bot.command("plan", async (ctx) => {
+  const chatId = ctx.chat.id.toString();
+  await ctx.reply("📋 현재 대화의 진행 계획 추출 중...");
+  try {
+    const summary = await getCurrentPlan(chatId);
+    await ctx.reply(summary || "진행 중인 계획을 찾지 못했습니다. /note로 직접 저장하세요.");
+  } catch (e: any) {
+    await ctx.reply(`⚠️ 추출 실패: ${e.message}`);
+  }
+});
+
+// /checkpoint — 현재 대화 핵심을 자동 요약해 영구 메모(/note 슬롯)에 저장
+bot.command("checkpoint", async (ctx) => {
+  const chatId = ctx.chat.id.toString();
+  await ctx.reply("💾 현재 대화 핵심을 요약해 영구 저장 중...");
+  try {
+    const summary = await saveCheckpoint(chatId);
+    if (summary) {
+      const preview = summary.length > 800 ? summary.slice(0, 800) + "..." : summary;
+      await ctx.reply(`✅ 저장됨 (chat-notes에 영구 보존, 매 턴 자동 주입):\n\n${preview}`);
+    } else {
+      await ctx.reply("⚠️ 저장할 내용이 없거나 요약에 실패했습니다 (transcript가 비어있을 수 있음).");
+    }
+  } catch (e: any) {
+    await ctx.reply(`⚠️ 체크포인트 실패: ${e.message}`);
+  }
 });
 
 bot.command("model", async (ctx) => {
