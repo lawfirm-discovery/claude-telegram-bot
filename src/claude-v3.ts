@@ -43,7 +43,7 @@ const USER_SYSTEM_PROMPT = process.env.SYSTEM_PROMPT || "";
 const TIMEOUT_MS = parseInt(process.env.TIMEOUT_MS || "2700000");
 const INACTIVITY_TIMEOUT_MS = parseInt(process.env.INACTIVITY_TIMEOUT_MS || "600000");
 const DEBOUNCE_MS = parseInt(process.env.DEBOUNCE_MS || "1500");
-const CLAUDE_MAX_TURNS = parseInt(process.env.CLAUDE_MAX_TURNS || "60");
+const CLAUDE_MAX_TURNS = parseInt(process.env.CLAUDE_MAX_TURNS || process.env.MAX_TURNS || "500");
 const DISABLE_HOOKS = process.env.DISABLE_V3_HOOKS === "true";
 
 console.log(
