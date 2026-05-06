@@ -23,8 +23,26 @@
 - **기존 패턴 따르기**: 새 추상화/의존성 도입 전 프로젝트 컨벤션 우선
 - **검증 필수**: "될 것 같다"는 안 됨. 테스트/빌드/린트로 증명
 - **불확실하면 명시**: 검증 못 한 부분은 솔직히 말하고 안전한 다음 단계 제안
+- **선택지 제시**: 요청에 여러 해석이 가능하면 선택하지 말고 옵션과 트레이드오프를 먼저 제시
 - **수정 전 반드시 읽기**: 코드를 읽지 않고 수정 제안 금지. 기존 코드를 먼저 이해할 것
 - **야심찬 작업 허용**: 사용자가 요청한 큰 작업을 거부하지 말 것. 범위 판단은 사용자에게 위임
+
+---
+
+## YouTube 라이브 자동 녹화
+
+메시지에 `youtube.com/live/` 또는 `youtu.be/` 링크가 포함되어 있으면 묻지 않고 즉시 자동 녹화 시작:
+
+```bash
+cd "/Volumes/pylon_crucial p3 plus 2tb/live recording" && \
+yt-dlp --cookies-from-browser chrome --no-part \
+  -o "%(title)s_%(id)s.%(ext)s" "<URL>" > /tmp/yt-dlp-live.log 2>&1 &
+```
+
+- 저장 위치: `/Volumes/pylon_crucial p3 plus 2tb/live recording/`
+- 쿠키: Chrome 쿠키 자동 사용 (`--cookies-from-browser chrome`)
+- 백그라운드 실행, PID와 파일명 바로 보고
+- 승인 요청 없이 바로 실행
 
 ---
 
@@ -50,22 +68,40 @@
 - 3단계 이상, 멀티파일, 아키텍처 결정 작업은 반드시 Plan Mode 사용
 - 새 정보가 계획을 무효화하면 → 중단, 계획 업데이트 후 재개
 
-### 멀티서버 작업 규칙
-- **rtx6000 = 중앙 개발 서버**: 개발 서비스(Frontend, Spring, FastAPI)를 실행하는 유일한 서버
-- **다른 서버(A4500, 3060 등)**: 코드 수정 & 푸시만 담당, 서비스 실행 및 빌드 금지
-- **다른 서버 작업 절차**:
-  1. `git pull origin dev-hs-rtx6000-new` — 최신 코드 가져오기
-  2. 코드 수정 (타입체크/린트 수준만 확인, 빌드 실행 금지)
-  3. `git push origin dev-hs-rtx6000-new` — rtx6000에 변경 전달
-  4. rtx6000이 1분마다 자동 pull → 빌드·서비스 자동 반영
-- **서비스 재시작 필요 시**: rtx6000 봇(@rtx6000_claude_style_bot)에게 요청
-- **다른 서버에서 절대 금지**:
-  - 서비스 실행: `pm2 start`, `systemctl start`, `bootRun`
-  - Frontend 빌드: `npm run build`, `npx craco build`, `npx vite build`
-  - Spring 빌드: `./gradlew build`, `./gradlew bootRun`, `./gradlew compileJava`
-  - Flutter 빌드: `flutter build web`
-  - 빌드는 rtx6000의 auto-pull이 자동 검증함. 에러 시 텔레그램 알림 발송
-- **rtx6000 로컬 작업 시 반드시 push**: rtx6000에서 직접 코드를 수정·커밋한 경우 **즉시 push**할 것. auto-pull이 `--ff-only`로 동작하므로, unpushed 로컬 커밋이 남아있으면 다른 서버의 push를 pull할 수 없어 동기화가 멈춤
+### 인프라 구조
+
+#### 맥미니 (중앙 개발 서버 — 현재 서버)
+- Tailscale IP: `100.88.75.47` / 사용자: pylon
+- 프로젝트: `/Users/pylon/my_project_v3/`
+  - 프론트엔드: `frontend/` (React + Vite + TypeScript)
+  - 백엔드: `backend/` (FastAPI + Python 3.14)
+- 백엔드 실행: `uvicorn app.main:app --host 0.0.0.0 --port 8888`
+  - 백엔드 API + `frontend/dist/` 정적파일 동시 서빙
+- **배포**: `cd /Users/pylon/my_project_v3/frontend && npm run build` → 재시작 불필요
+
+#### n100 (DB 서버 + 크롤러 서버)
+- Tailscale IP: `100.65.20.81`
+- SSH: `ssh -o StrictHostKeyChecking=no pylon@100.65.20.81`
+- **PostgreSQL**: 포트 5432 / DB: pylon / user: pylon / PW: 415416
+- **크롤러 경로**: `/home/pylon/Crawlers/`
+- 매일 04:00 crontab으로 DB 메모 백업 (`backup_memos.sh`)
+
+#### a4500 (GPU 서버 — 강의 STT 워커)
+- SSH: `ssh -p 2223 angrylawyer@182.227.106.243` / PW: `vhtpdlehs2024!!`
+- Tailscale IP: `100.117.168.53` (angrylawbot@ 네트워크 — 우리 네트워크와 별개)
+- **GPU**: NVIDIA RTX A4500 20GB / CUDA 12.8 (`/usr/local/cuda-12.8`)
+- **Python**: 3.12.3 / faster-whisper 1.2.1 설치됨
+- **프로젝트**: `/home/angrylawyer/lemon-ai-server-FastAPI/`
+- **강의 텍스트 변환 파이프라인**:
+  - 작업 큐: RabbitMQ `172.31.44.80:5672` (vhost: lemon) — AWS 내부 IP, a4500에서 **직접 접근 불가**
+  - 워커: Spring `GpuJobConsumer.java` (`gpu.jobs.worker-mode=true` 환경변수로 활성화)
+  - STT: FastAPI `stt_service.py` (Faster-Whisper)
+  - 큐 이름: `lemon.gpu.248.jobs.queue`
+- **로컬 RabbitMQ**: 설치돼 있으나 inactive (`systemctl start rabbitmq-server`로 활성화 가능)
+- **병렬 워커 미결 과제**: AWS RabbitMQ 외부 개방 vs a4500 로컬 RabbitMQ 활성화 방향 미결정
+
+#### 데이터 흐름
+크롤러(n100) → n100 PostgreSQL → 맥미니 uvicorn 백엔드 조회 → 프론트엔드 표시
 
 ### 점진적 작업 (리스크 최소화)
 - 얇은 수직 슬라이스 선호
@@ -76,6 +112,7 @@
 - 증거 없이 완료 선언 금지
 - 테스트, 린트, 타입체크, 빌드, 로그 또는 수동 재현
 - 기준: "시니어 엔지니어가 이 diff와 검증을 승인할까?"
+- **검증 가능한 목표로 표현**: "버그 수정해" 대신 "재현 테스트 작성 → 통과시켜라". 각 단계마다 검증 포함
 
 ---
 
@@ -105,6 +142,7 @@
 - **불필요한 에러 핸들링 금지**: 일어날 수 없는 시나리오에 에러 처리 넣지 말 것
 - **호환성 핵 금지**: 안 쓰는 코드는 그냥 삭제
 - **파일 생성 최소화**: 새 파일 만들기보다 기존 파일 편집 선호
+- **수술적 자기검증**: 모든 변경 줄이 요청에 직접 연결되는지 확인. 불필요 코드 발견 시 삭제 말고 보고
 
 ### API / 인터페이스
 - 안정적 인터페이스 중심 설계
@@ -136,108 +174,6 @@
 5. 관련 파일만 `git add` → 원자적 커밋 메시지
 6. 에러 없음 → 바로 푸시 / 에러 → 자동 수정 시도 / 수정 불가 → 보고
 7. 푸시 후 변경 요약 보고
-
----
-
-## 리걸몬스터 프로젝트 규칙
-
-### 🚨 절대 규칙 (위반 금지)
-- **`ddl-auto`는 반드시 `validate`** — 절대로 `update`로 변경 금지
-- **포트 3000 사용 금지** — Docker open-webui 점유 중
-- **JAR 빌드(`bootJar`) 금지** — `bootRun` 사용
-- **세 레포 모두 `dev-hs-rtx6000-new` 브랜치** — 다른 브랜치 checkout 금지
-
-### 🚨 응답 필수 포함 (Response Footer) — 예외 없음!
-리걸몬스터 관련 **모든** 응답 끝에 아래 2줄 필수:
-```
----
-🔗 테스트 서버: http://100.108.86.92:3011
-📌 브랜치: `dev-hs-rtx6000-new`
-```
-
-### 서버 & 환경
-| 항목 | 값 |
-|------|-----|
-| 테스트 서버 | http://100.108.86.92:3011 |
-| 기존 테섭 | https://test.legalmonster.co.kr |
-| Flutter 웹 앱 | http://100.108.86.92:8088 |
-| Spring | /home/angrylawyer/lemon-api-server-spring (systemd: lemon-spring-api) |
-| Frontend | /home/angrylawyer/lemon-front (pm2: lemon-front-dev) |
-| FastAPI | /home/angrylawyer/lemon-ai-server-FastAPI (pm2: lemon-fastapi) |
-| Flutter | /home/angrylawyer/lemon_flutter |
-| 작업 브랜치 | `dev-hs-rtx6000-new` (모든 저장소) |
-| Config Vault | http://100.117.168.53:8070 (bot:lemon2024!) |
-
-### 빌드 & 실행
-```bash
-# Spring 실행
-sudo systemctl restart lemon-spring-api
-
-# Frontend (pm2)
-pm2 restart lemon-front-dev
-
-# FastAPI
-pm2 restart lemon-fastapi
-
-# Flutter 웹 빌드 (~100초)
-cd /home/angrylawyer/lemon_flutter && /home/angrylawyer/flutter/bin/flutter build web --release --no-wasm-dry-run
-```
-
-### Gradle 빌드 환경변수
-```bash
-LEMON_FORK_JAVAC=true LEMON_JAVAC_XMX=24g
-```
-
-### nginx 프록시 설정
-| 경로 | 대상 |
-|------|------|
-| :3011 → | localhost:3001 (Frontend) |
-| :3011/api → | localhost:8080 (Spring) |
-| :3011/globallaw-api → | 100.117.168.53:8090 |
-
-### 표준 포트 (변경 금지!)
-| 서비스 | 포트 |
-|--------|------|
-| nginx 외부 | 3011 |
-| Frontend (pm2) | 3001 |
-| Spring | 8080 |
-| FastAPI | 8001 |
-| Docker open-webui | 3000 (사용 금지!) |
-
-### 브랜치 & Pull 소스
-| 저장소 | 작업 브랜치 | pull 소스 |
-|--------|------------|-----------|
-| FastAPI | `dev-hs-rtx6000-new` | `master` |
-| Frontend | `dev-hs-rtx6000-new` | `dev` |
-| Spring | `dev-hs-rtx6000-new` | `dev` |
-
-### Config Vault (API 키 저장소)
-```bash
-# 값 조회
-curl -u "bot:lemon2024!" http://100.117.168.53:8070/api/value/KEY_NAME
-
-# 서버별 환경변수
-curl -u "bot:lemon2024!" http://100.117.168.53:8070/api/env/SERVER_NAME
-```
-
----
-
-## UI/UX 작업 체크리스트
-
-### 모달
-- 데스크탑: backdrop blur (`backdropFilter: 'blur(4px)'`)
-- 모바일: 전체화면 (`fullScreen={isMobile}`)
-- z-index 문제 시: `createPortal` + `zIndex: 1400`
-
-### 반응형
-- 글자: `fontSize: { xs: '0.875rem', md: '1rem' }`
-- 패딩: `p: { xs: 1, sm: 1.5, md: 2 }`
-- 테이블: `whiteSpace: 'nowrap'` + `minWidth`
-
-### 페이지 높이
-- 채팅 레일 높이: 50px (`ERP_BOTTOM_CHAT_RAIL_HEIGHT_PX`)
-- `pb` 중복 적용 금지
-- 방법: `height: calc(100vh - 64px - 50px)` 또는 `flex: 1` + `pb: { xs: 8, md: 2 }`
 
 ---
 
