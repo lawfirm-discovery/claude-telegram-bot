@@ -383,6 +383,11 @@ async function runWithSDKInner(
 
   const cwd = process.cwd();
 
+  // SDK가 child Claude Code process를 spawn하므로, child의 stderr 메시지(예: "Session ID ... already in use")는
+  // 외부 SDK Error 객체의 message에 보존되지 않고 "Claude Code process exited with code 1"로 wrap된다.
+  // catch 블록에서 conflict 감지를 위해 stderr를 별도 버퍼링한다.
+  let stderrBuffer = "";
+
   const queryOptions: Parameters<typeof query>[0]["options"] = {
     cwd,
     permissionMode,
@@ -400,6 +405,8 @@ async function runWithSDKInner(
     maxTurns: CLAUDE_MAX_TURNS,
     hooks: buildHooks(chatId),
     stderr: (data: string) => {
+      stderrBuffer += data;
+      if (stderrBuffer.length > 8000) stderrBuffer = stderrBuffer.slice(-4000);
       if (data.includes("error") || data.includes("Error")) {
         console.error("[V3 stderr]:", data.slice(0, 200));
       }
@@ -537,8 +544,12 @@ async function runWithSDKInner(
       console.log("[V3] Ignoring exit error after result");
     } else {
       console.error(`[V3] Query error: ${error.message}`);
-      if (error.message?.includes("already in use")) {
-        throw error;
+      // SDK는 child의 "already in use" stderr를 "Claude Code process exited with code 1"로 wrap한다.
+      // 외부 runWithSDK의 retry가 인식하도록 stderr 버퍼도 검사하고 메시지에 명시해서 throw.
+      const conflictDetected = /already in use/i.test(error.message || "")
+                            || /already in use/i.test(stderrBuffer);
+      if (conflictDetected) {
+        throw new Error(`Session ID already in use: ${error.message}`);
       }
       if (error.message?.includes("session")) {
         sessions.delete(chatId);
