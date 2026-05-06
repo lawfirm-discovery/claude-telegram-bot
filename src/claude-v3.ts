@@ -24,7 +24,11 @@ import { join, dirname } from "path";
 import { readFileSync, writeFileSync, renameSync, existsSync, unlinkSync, readdirSync, statSync } from "fs";
 
 import { APPROVAL_SYSTEM_PROMPT } from "./approval";
-import { loadSystemPrompt, loadChatNotes, appendChatNote } from "./lemonclaw";
+import {
+  loadSystemPrompt, loadChatNotes, appendChatNote,
+  loadActiveWorking, mergeActiveWorking, appendWorkingHistory,
+  activeWorkingNeedsCompact, setActiveWorking,
+} from "./lemonclaw";
 import { makeLoopDetectorHook, clearLoopHistory } from "./hooks/loop-detector";
 import { dangerousCmdHook } from "./hooks/dangerous-cmd";
 import { incr, addCostUsd } from "./metrics";
@@ -542,7 +546,25 @@ async function runWithSDKInner(
   const chatNotesBlock = chatNotes
     ? `# 📌 사용자 메모 (Chat Notes — 사용자가 /note 또는 /checkpoint로 영구 저장한 내용)\n${chatNotes}\n\n위 메모는 사용자가 명시적으로 기억해달라고 한 사항이므로 항상 우선시하세요.`
     : "";
-  const systemPrompt = [freshPrompt, APPROVAL_SYSTEM_PROMPT, USER_SYSTEM_PROMPT, previousSummaryBlock, chatNotesBlock]
+  // Working Memory (Phase 5) — 봇 자체가 누적해온 작업 컨텍스트. Claude Code의 auto-memory와 동치.
+  const activeWorking = loadActiveWorking(chatId);
+  const workingBlock = activeWorking
+    ? `# 🎯 ACTIVE WORKING MEMORY (당신이 이전 턴에서 직접 기록한 진행 상황 — 항상 참고)\n${activeWorking}`
+    : "";
+  const workingInstructionBlock =
+    `# 🧠 WORKING MEMORY 자율 업데이트 규칙\n` +
+    `중요한 결정·완료·미해결·다음 단계가 새로 생겼다면 응답 끝에 다음 태그로 기록하세요. 태그 본문은 사용자에게 보이지 않고 active.md에 저장되어 다음 턴 system prompt에 자동 주입됩니다.\n\n` +
+    `<working-memory>\n` +
+    `## 결정/완료\n- (이번 턴에 확정한 것)\n\n` +
+    `## 진행 중 / 미해결\n- (계속 추적할 항목)\n\n` +
+    `## 다음 단계\n- (다음 턴에서 할 일)\n` +
+    `</working-memory>\n\n` +
+    `규칙:\n` +
+    `- 매 턴 무조건 작성하지 말고 변화가 있을 때만. 단순 답변·인사·질문 응답엔 생략.\n` +
+    `- 본문에 \`<!-- replace -->\` 마커를 포함하면 active.md를 통째로 교체. 미포함 시 누적 추가.\n` +
+    `- 기존 active.md에 같은 항목이 있으면 중복 작성 금지 (replace 모드로 갱신).\n` +
+    `- 사용자가 /working clear, /archive를 호출하기 전까지 누적되므로 의미 있는 변화만.`;
+  const systemPrompt = [freshPrompt, APPROVAL_SYSTEM_PROMPT, USER_SYSTEM_PROMPT, previousSummaryBlock, chatNotesBlock, workingBlock, workingInstructionBlock]
     .filter(Boolean)
     .join("\n\n");
 
@@ -788,7 +810,80 @@ async function runWithSDKInner(
     fullText = "(빈 응답)";
   }
 
+  // ─── Phase 5: Working Memory 후처리 ───────────────────────────
+  // 1) <working-memory> 태그 추출 → active.md merge, 응답에서 태그 제거
+  try {
+    const wmRe = /<working-memory>([\s\S]*?)<\/working-memory>/gi;
+    const blocks: string[] = [];
+    let m: RegExpExecArray | null;
+    while ((m = wmRe.exec(fullText)) !== null) {
+      const body = m[1]?.trim();
+      if (body) blocks.push(body);
+    }
+    if (blocks.length > 0) {
+      mergeActiveWorking(chatId, blocks.join("\n\n"));
+      fullText = fullText.replace(wmRe, "").trim();
+      if (!fullText) fullText = "✅ (작업 메모리 갱신 완료)";
+    }
+  } catch (e: any) {
+    console.error(`[V3] Working memory tag handling failed: ${e?.message}`);
+  }
+
+  // 2) history.log에 user/assistant 짧은 한 줄 append
+  try {
+    const userSummary = (message || "").replace(/\n+/g, " ").slice(0, 200);
+    const assistantSummary = fullText.replace(/\n+/g, " ").slice(0, 400);
+    appendWorkingHistory(chatId, `user: ${userSummary} | assistant: ${assistantSummary}`);
+  } catch {}
+
+  // 3) active.md 임계 초과 시 백그라운드에서 Haiku 압축
+  if (activeWorkingNeedsCompact(chatId)) {
+    setImmediate(async () => {
+      try {
+        const current = loadActiveWorking(chatId);
+        if (!current) return;
+        const compacted = await compactActiveWorkingWithHaiku(current);
+        if (compacted) setActiveWorking(chatId, compacted);
+      } catch (e: any) {
+        console.error(`[V3] Active working compact failed: ${e?.message}`);
+      }
+    });
+  }
+
   return fullText;
+}
+
+async function compactActiveWorkingWithHaiku(content: string): Promise<string> {
+  try {
+    // @ts-ignore — transitive dep
+    const { default: Anthropic } = await import("@anthropic-ai/sdk");
+    const client = new Anthropic();
+    const msg = await client.messages.create({
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 1500,
+      messages: [{
+        role: "user",
+        content:
+          `다음은 Claude Code 봇이 누적해온 작업 메모리(active.md)입니다. 너무 길어져서 압축이 필요합니다.\n\n` +
+          `## 압축 규칙\n` +
+          `- 가장 최근 결정/진행/미해결/다음 단계를 우선 보존.\n` +
+          `- 오래된 항목 중 이미 완료되어 후속 영향 없는 건 제거.\n` +
+          `- 핵심 결정 사항은 완료/취소 여부와 관계없이 한 줄로 요약 유지.\n` +
+          `- 형식: ## 헤더 + 짧은 글머리표 (마크다운).\n` +
+          `- 출력은 압축된 본문만 (다른 설명 금지).\n\n` +
+          `## 현재 active.md\n${content.slice(0, 60000)}\n\n압축본:`
+      }],
+    });
+    const text = (msg.content as any[])
+      .filter((b: any) => b.type === "text")
+      .map((b: any) => b.text)
+      .join("\n")
+      .trim();
+    return text;
+  } catch (e: any) {
+    console.error(`[V3] Haiku working compact failed: ${e?.message}`);
+    return "";
+  }
 }
 
 // Cleanup stale context files on startup (shared with v2)

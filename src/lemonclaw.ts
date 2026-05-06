@@ -9,7 +9,7 @@
  * - MEMORY.md + memory/ → 장기 기억 & 일일 로그
  */
 
-import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync, statSync, unlinkSync, renameSync } from "fs";
 import { join } from "path";
 import { spawn } from "child_process";
 
@@ -32,6 +32,9 @@ const SHARED_MEMORY_PATH = join(LEMONCLAW_DIR, "SHARED_MEMORY.md");
 const MEMORY_DIR = join(LEMONCLAW_DIR, "memory");
 // 채팅별 사용자 명시 메모 (/note, /checkpoint) — 매 턴 system prompt에 주입
 const NOTES_DIR = join(LEMONCLAW_DIR, "notes");
+// 채팅별 Working Memory — 봇이 자기 작업을 매 턴 자동 기록(history.log) +
+// 자율 태그(<working-memory>)로 active.md를 self-update. 매 턴 system prompt에 주입.
+const WORKING_DIR = join(LEMONCLAW_DIR, "working");
 
 // ═══════════════════════════════════════════════════════════════
 // Config
@@ -231,6 +234,132 @@ export function clearChatNotes(chatId: string): void {
     if (existsSync(p)) writeFileSync(p, `# Chat Notes — chat=${chatId}\n\n`);
   } catch (e: any) {
     console.error(`[LemonClaw] Chat note clear failed: ${e.message}`);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Working Memory (Phase 5) — Claude Code parity 자율 메모리
+// active.md  : 봇이 <working-memory> 태그로 self-update + 매 턴 system prompt에 주입
+// history.log: 매 턴 user/assistant 짧은 요약 1줄씩 (디버깅·검색용)
+// archive/   : 완료된 작업 영구 보관 (active.md → 이름 지정 후 이동)
+// ═══════════════════════════════════════════════════════════════
+
+const WORKING_ACTIVE_MAX_BYTES = parseInt(process.env.WORKING_ACTIVE_MAX_BYTES || "8192");
+
+function chatWorkingDir(chatId: string): string {
+  return join(WORKING_DIR, chatId);
+}
+function chatActivePath(chatId: string): string {
+  return join(chatWorkingDir(chatId), "active.md");
+}
+function chatHistoryPath(chatId: string): string {
+  return join(chatWorkingDir(chatId), "history.log");
+}
+function chatArchiveDir(chatId: string): string {
+  return join(chatWorkingDir(chatId), "archive");
+}
+
+function ensureWorkingDirs(chatId: string): void {
+  try {
+    if (!existsSync(WORKING_DIR)) mkdirSync(WORKING_DIR, { recursive: true });
+    const d = chatWorkingDir(chatId);
+    if (!existsSync(d)) mkdirSync(d, { recursive: true });
+    const ad = chatArchiveDir(chatId);
+    if (!existsSync(ad)) mkdirSync(ad, { recursive: true });
+  } catch (e: any) {
+    console.error(`[LemonClaw] Working dir create failed: ${e.message}`);
+  }
+}
+
+export function loadActiveWorking(chatId: string): string {
+  try {
+    const p = chatActivePath(chatId);
+    if (!existsSync(p)) return "";
+    return readFileSync(p, "utf-8").trim();
+  } catch { return ""; }
+}
+
+export function setActiveWorking(chatId: string, content: string): void {
+  try {
+    ensureWorkingDirs(chatId);
+    writeFileSync(chatActivePath(chatId), content.trim() + "\n");
+  } catch (e: any) {
+    console.error(`[LemonClaw] Active working write failed: ${e.message}`);
+  }
+}
+
+// 태그 머지 — 봇이 응답한 <working-memory> 본문을 기존 active.md 위에 자연스럽게 병합.
+// 모드: append(기존 + 신규), replace(완전 교체).
+// 디폴트는 append. 신규 본문에 "<!-- replace -->" 마커 포함 시 replace.
+export function mergeActiveWorking(chatId: string, newBlock: string): void {
+  if (!newBlock || !newBlock.trim()) return;
+  try {
+    ensureWorkingDirs(chatId);
+    const p = chatActivePath(chatId);
+    const existing = existsSync(p) ? readFileSync(p, "utf-8") : "";
+    const ts = new Date().toLocaleString("ko-KR", { timeZone: "Asia/Seoul" });
+
+    if (/<!--\s*replace\s*-->/i.test(newBlock)) {
+      const cleaned = newBlock.replace(/<!--\s*replace\s*-->/gi, "").trim();
+      writeFileSync(p, `# Active Working Memory — chat=${chatId}\n_업데이트: ${ts}_\n\n${cleaned}\n`);
+      return;
+    }
+
+    if (!existing) {
+      writeFileSync(p, `# Active Working Memory — chat=${chatId}\n_업데이트: ${ts}_\n\n${newBlock.trim()}\n`);
+      return;
+    }
+    // append: 시간 stamp 구분선 추가
+    writeFileSync(p, `${existing.trimEnd()}\n\n---\n_업데이트: ${ts}_\n\n${newBlock.trim()}\n`);
+  } catch (e: any) {
+    console.error(`[LemonClaw] Active working merge failed: ${e.message}`);
+  }
+}
+
+export function appendWorkingHistory(chatId: string, line: string): void {
+  try {
+    ensureWorkingDirs(chatId);
+    const time = new Date().toLocaleString("ko-KR", { timeZone: "Asia/Seoul", hour12: false });
+    const safe = line.replace(/\n/g, " ").slice(0, 800);
+    appendFileSync(chatHistoryPath(chatId), `[${time}] ${safe}\n`);
+  } catch (e: any) {
+    console.error(`[LemonClaw] Working history append failed: ${e.message}`);
+  }
+}
+
+// active.md 가 임계 초과 시 호출자가 외부 LLM으로 압축한 결과를 setActiveWorking으로 저장.
+// 여기는 임계 초과 여부만 알려준다.
+export function activeWorkingNeedsCompact(chatId: string): boolean {
+  try {
+    const p = chatActivePath(chatId);
+    if (!existsSync(p)) return false;
+    return statSync(p).size > WORKING_ACTIVE_MAX_BYTES;
+  } catch { return false; }
+}
+
+// 현재 active.md 를 archive로 이동 후 active.md 비움.
+export function archiveActiveWorking(chatId: string, name?: string): string {
+  try {
+    const p = chatActivePath(chatId);
+    if (!existsSync(p)) return "";
+    ensureWorkingDirs(chatId);
+    const date = new Date().toISOString().slice(0, 10);
+    const safeName = (name || "session").replace(/[^\w가-힣\-_]+/g, "_").slice(0, 40);
+    const target = join(chatArchiveDir(chatId), `${date}_${safeName}.md`);
+    renameSync(p, target);
+    return target;
+  } catch (e: any) {
+    console.error(`[LemonClaw] Archive failed: ${e.message}`);
+    return "";
+  }
+}
+
+export function clearActiveWorking(chatId: string): void {
+  try {
+    const p = chatActivePath(chatId);
+    if (existsSync(p)) unlinkSync(p);
+  } catch (e: any) {
+    console.error(`[LemonClaw] Clear active working failed: ${e.message}`);
   }
 }
 

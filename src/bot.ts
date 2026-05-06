@@ -1,6 +1,6 @@
 import { Bot, InlineKeyboard } from "grammy";
 import { askClaude, askClaudeWithProgress, clearSession, getSessionStats, getHudInfo, killActiveProcesses, loadInterruptedContext, hasInterruptedContext, getCurrentPlan, saveCheckpoint, type ProgressInfo } from "./claude-engine";
-import { appendMemoryLog, appendSharedMemory, appendChatNote, clearChatNotes, loadChatNotes } from "./lemonclaw";
+import { appendMemoryLog, appendSharedMemory, appendChatNote, clearChatNotes, loadChatNotes, loadActiveWorking, archiveActiveWorking, clearActiveWorking } from "./lemonclaw";
 import {
   BOT_ROLE, planTask, dispatchTask, handleWorkerReport,
   mergeCompletedTask, formatTaskStatus, detectTaskMessage,
@@ -96,9 +96,11 @@ bot.command("start", async (ctx) => {
       `Your ID: ${ctx.from?.id}\n\n` +
       `/new — New conversation\n` +
       `/clear — 세션 + 메모 모두 초기화\n` +
-      `/note <텍스트> — 영구 메모 저장 (매 턴 자동 주입)\n` +
+      `/note <텍스트> — 사용자 영구 메모 (매 턴 자동 주입)\n` +
       `/plan — 진행 중인 계획 추출 표시\n` +
       `/checkpoint — 현재 대화 핵심을 영구 저장\n` +
+      `/working [clear] — 봇 자체 작업 메모리(active.md) 표시/비우기\n` +
+      `/archive <이름> — 현재 작업을 명시적 archive로 이동\n` +
       `/model — Current model\n` +
       `/stats — Session stats\n` +
       `/pair <code> — Approve user`
@@ -146,6 +148,50 @@ bot.command("plan", async (ctx) => {
     await ctx.reply(summary || "진행 중인 계획을 찾지 못했습니다. /note로 직접 저장하세요.");
   } catch (e: any) {
     await ctx.reply(`⚠️ 추출 실패: ${e.message}`);
+  }
+});
+
+// /working — 현재 Working Memory(active.md) 표시 + sub-action(clear)
+bot.command("working", async (ctx) => {
+  const chatId = ctx.chat.id.toString();
+  const arg = ctx.match?.trim() || "";
+  if (arg === "clear" || arg.startsWith("clear ")) {
+    const name = arg.replace(/^clear\s*/, "").trim() || undefined;
+    const archived = archiveActiveWorking(chatId, name);
+    if (archived) {
+      await ctx.reply(`🗂 Active Working Memory 아카이브 후 비움:\n${archived}`);
+    } else {
+      clearActiveWorking(chatId);
+      await ctx.reply("🧹 Active Working Memory 비움 (아카이브 대상 없음).");
+    }
+    return;
+  }
+  const active = loadActiveWorking(chatId);
+  if (!active) {
+    await ctx.reply(
+      "📂 Active Working Memory 비어있음.\n\n" +
+      "봇이 작업하면서 자동으로 채워집니다 (LLM이 <working-memory> 태그로 self-update).\n" +
+      "사용자 명시 메모는 /note 사용."
+    );
+    return;
+  }
+  const preview = active.length > 3500 ? active.slice(0, 3500) + "\n\n... (총 " + active.length + "자, /working clear로 비우기)" : active;
+  await ctx.reply(`🎯 ACTIVE WORKING MEMORY\n\n${preview}`);
+});
+
+// /archive <name> — 명시적으로 active.md를 archive로 이동(비움)
+bot.command("archive", async (ctx) => {
+  const chatId = ctx.chat.id.toString();
+  const name = ctx.match?.trim() || "";
+  if (!name) {
+    await ctx.reply("사용법: /archive <이름>\n예: /archive 노무사_라벨링\n\n현재 active.md를 archive/<날짜>_<이름>.md로 이동 후 active를 비웁니다.");
+    return;
+  }
+  const archived = archiveActiveWorking(chatId, name);
+  if (archived) {
+    await ctx.reply(`📦 아카이브 완료: ${archived}\n\n새 작업을 시작하세요. (이전 작업은 .lemonclaw/working/${chatId}/archive/에 영구 보관)`);
+  } else {
+    await ctx.reply("⚠️ active.md가 비어있어 아카이브할 내용이 없습니다.");
   }
 });
 
