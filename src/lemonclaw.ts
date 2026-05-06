@@ -493,6 +493,11 @@ export function startHeartbeat(askClaude: ClaudeFn, sendTelegram: SendFn): void 
     return;
   }
 
+  if (heartbeatTimer !== null) {
+    console.log("[LemonClaw] Heartbeat already running, skipping duplicate start");
+    return;
+  }
+
   console.log(`[LemonClaw] Heartbeat started: every ${HEARTBEAT_INTERVAL_MS / 1000}s, chat=${HEARTBEAT_CHAT_ID}`);
 
   const runHeartbeat = async () => {
@@ -534,6 +539,11 @@ export function startHeartbeat(askClaude: ClaudeFn, sendTelegram: SendFn): void 
 export function startCron(askClaude: ClaudeFn, sendTelegram: SendFn): void {
   if (!HEARTBEAT_CHAT_ID) {
     console.log("[LemonClaw] No HEARTBEAT_CHAT_ID, cron disabled");
+    return;
+  }
+
+  if (cronTimer !== null) {
+    console.log("[LemonClaw] Cron already running, skipping duplicate start");
     return;
   }
 
