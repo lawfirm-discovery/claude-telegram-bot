@@ -307,3 +307,47 @@
 **브라우저 검증:** 이 봇 환경(A4500)은 브라우저 접근 불가. 코드 레벨 검증(grep, AST 분석, 패턴 매칭)으로 대체. 실제 시각적 UI 검증은 rtx6000 브라우저(https://100.108.86.92:3011)에서 수행 필요.
 
 **최종 완성도: 95%** — 프로덕션 수준. 잔여 2건은 백엔드 의존으로 프론트엔드 scope 밖.
+
+---
+
+## Iteration 6 (2026-05-08) — 커밋 증거 확인 + 서버 검증
+
+### 1. 커밋 증거 확인
+
+| 항목 | 결과 |
+|------|------|
+| Iteration 5 커밋 | `b039599` — `[a4500] docs: 속기사 메뉴 UI/UX 검증 Iteration 5 — 회귀 테스트 + 최종 확인 완료` |
+| diff stat | `docs/erp-stenographer-ui-validation.md \| 32 insertions(+)` |
+| lemon-front 최신 커밋 | `2ff81907b` — `[a4500] fix: 속기사 메뉴 UI/UX Iteration 3 — STT 실패 알림, 파일 크기 경고, 탭 카운트 통일` |
+
+### 2. 코드 수정사항 회귀 확인 (grep 기반)
+
+- [x] **Dashboard 모바일 +N**: `isMobile ? 2 : 3` — DashboardPage.tsx:140,149,151 ✅
+- [x] **WorkListPage Alert onClose**: `onClose={() => setError(null)}` — WorkListPage.tsx:398 ✅
+- [x] **TranscriptStudio catch 타입**: `catch (e: unknown)` — TranscriptStudio.tsx:244 ✅
+- [x] **JobCreateDialog fullScreen**: `fullScreen={isMobile}` — JobCreateDialog.tsx:139 ✅
+- [x] **JobDetailDialog fullScreen**: `fullScreen={isMobile}` — JobDetailDialog.tsx:537 ✅
+- [x] **모든 Alert에 onClose**: 6개 파일 전부 `onClose` 핸들러 존재 ✅
+
+### 3. 테스트 서버 검증 (curl 기반)
+
+| 검증 항목 | 결과 |
+|-----------|------|
+| `https://100.108.86.92:3011` 응답 | 200 OK, HTML 정상 반환 |
+| `/erp/court-reporter` 라우트 | 200 OK, SPA HTML 정상 반환 |
+| `/erp/court-reporter/dashboard` 라우트 | 200 OK, SPA HTML 정상 반환 |
+| JS 번들 (`/assets/index-BolvrIOI.js`) | 200 OK, 2.16MB 정상 |
+| CourtReporterMenuItems.tsx lazy import | 5개 페이지 모두 `lazyWithRetry` 정상 |
+
+### 4. 브라우저 시각 검증 제약 사항
+
+이 봇 환경(A4500)에서는 WebFetch가 self-signed certificate로 인해 렌더링된 SPA 콘텐츠를 가져올 수 없음. 검증은 다음으로 대체:
+- **curl 기반**: HTTP 상태코드 200, HTML/JS 번들 정상 확인
+- **grep 기반**: 15개 파일 전체 수정사항 유지 확인
+- **git 기반**: 커밋 해시, diff stat 확인
+
+실제 렌더링 시각 검증(스크린샷)은 rtx6000 데스크탑 브라우저에서 수행 필요.
+
+### 최종 결론
+
+**Iteration 1~5의 모든 수정사항이 코드에 유지되고, 테스트 서버가 정상 응답하며, 검증 문서가 커밋되어 있음을 확인 완료.** 최종 완성도 95%.
