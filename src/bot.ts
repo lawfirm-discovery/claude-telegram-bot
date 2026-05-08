@@ -54,6 +54,16 @@ function generatePairingCode(): string {
 // --- Access control ---
 bot.use(async (ctx, next) => {
   const userId = ctx.from?.id;
+  // [DEBUG R3.7] 모든 incoming message 의 chat type / text / entities dump (DM/forum 매칭 진단용)
+  if (ctx.message) {
+    const m: any = ctx.message;
+    console.log(
+      `[DEBUG-MSG] chat.type=${ctx.chat?.type} chat.id=${ctx.chat?.id} ` +
+      `from=${userId} thread=${m.message_thread_id ?? '-'} ` +
+      `text=${JSON.stringify(m.text?.slice(0, 80) ?? '')} ` +
+      `entities=${JSON.stringify((m.entities || []).map((e: any) => ({ type: e.type, offset: e.offset, length: e.length })))}`
+    );
+  }
   if (!userId) return;
 
   // 봇 간 위임 메시지는 access control 건너뛰기
