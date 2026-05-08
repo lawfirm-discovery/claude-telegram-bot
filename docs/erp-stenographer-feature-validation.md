@@ -1,7 +1,7 @@
 # 속기사(Court Reporter) ERP 핵심 기능 검증
 
-> 최종 업데이트: 2026-05-08 (Iteration 3 — 전체 엔드포인트 라이브 테스트 완료)
-> 검증 방법: 코드 레벨 정적분석 + Spring API 라이브 테스트 (16개 엔드포인트 전수 검증)
+> 최종 업데이트: 2026-05-08 (Iteration 4 — 전체 17개 엔드포인트 라이브 테스트 + 응답 본문 수집 완료)
+> 검증 방법: 코드 레벨 정적분석 + Spring API 라이브 테스트 (17개 엔드포인트 전수 검증)
 
 ---
 
@@ -11,31 +11,46 @@
 |------|------|
 | 프론트엔드 서버 | https://100.108.86.92:3011 — **200 OK** |
 | Spring API | https://100.108.86.92:3011/api — **200 OK** |
-| 인증 보호 | 15개 엔드포인트 401 반환 확인 |
+| 인증 보호 | 16개 엔드포인트 401 반환 확인 (응답: `{"error":true,"message":"인증이 필요합니다"}`) |
 | 공개 추적 API | 인증 없이 접근 가능, 404 + 정확한 에러 메시지 |
 | 프론트엔드 라우트 | 5개 모두 200 OK (dashboard/work/schedule/fee/tracking) |
-| 테스트 일시 | 2026-05-08T11:07 KST |
+| 테스트 일시 | 2026-05-08T11:10 KST (Iteration 4) |
 
-### 라이브 테스트 결과 (전체 16개 엔드포인트)
+### 라이브 테스트 결과 (전체 17개 엔드포인트)
 
-| 엔드포인트 | 메서드 | 인증없이 | 예상 | 실제 |
-|-----------|--------|---------|------|------|
-| `/api/court-reporter/jobs` | GET | 401 | 401 | **PASS** |
-| `/api/court-reporter/jobs` | POST | 401 | 401 | **PASS** |
-| `/api/court-reporter/jobs/stats` | GET | 401 | 401 | **PASS** |
-| `/api/court-reporter/jobs/1` | GET | 401 | 401 | **PASS** |
-| `/api/court-reporter/jobs/1` | DELETE | 401 | 401 | **PASS** |
-| `/api/court-reporter/jobs/1/info` | PATCH | 401 | 401 | **PASS** |
-| `/api/court-reporter/jobs/1/status` | PATCH | 401 | 401 | **PASS** |
-| `/api/court-reporter/jobs/1/memo` | PATCH | 401 | 401 | **PASS** |
-| `/api/court-reporter/jobs/1/fee` | PATCH | 401 | 401 | **PASS** |
-| `/api/court-reporter/jobs/1/files` | POST | 401 | 401 | **PASS** |
-| `/api/court-reporter/jobs/1/final-files` | POST | 401 | 401 | **PASS** |
-| `/api/court-reporter/jobs/1/contract` | GET | 401 | 401 | **PASS** |
-| `/api/court-reporter/jobs/files/1/stt/trigger` | POST | 401 | 401 | **PASS** |
-| `/api/court-reporter/jobs/files/1/stt` | PATCH | 401 | 401 | **PASS** |
-| `/api/court-reporter/jobs/transcripts/1` | PATCH | 401 | 401 | **PASS** |
-| `/api/court-reporter/jobs/public/tracking/ABC123DEF456` | GET | 404 | 404 | **PASS** |
+| # | 엔드포인트 | 메서드 | 인증없이 | 예상 | 실제 | 비고 |
+|---|-----------|--------|---------|------|------|------|
+| 1 | `/api/court-reporter/jobs` | GET | 401 | 401 | **PASS** | 목록 조회 |
+| 2 | `/api/court-reporter/jobs` | POST | 401 | 401 | **PASS** | 작업 생성 |
+| 3 | `/api/court-reporter/jobs/stats` | GET | 401 | 401 | **PASS** | 통계 |
+| 4 | `/api/court-reporter/jobs/1` | GET | 401 | 401 | **PASS** | 상세 조회 |
+| 5 | `/api/court-reporter/jobs/1` | DELETE | 401 | 401 | **PASS** | 삭제 |
+| 6 | `/api/court-reporter/jobs/1/info` | PATCH | 401 | 401 | **PASS** | 정보 수정 |
+| 7 | `/api/court-reporter/jobs/1/status` | PATCH | 401 | 401 | **PASS** | 상태 변경 |
+| 8 | `/api/court-reporter/jobs/1/memo` | PATCH | 401 | 401 | **PASS** | 메모 수정 |
+| 9 | `/api/court-reporter/jobs/1/fee` | PATCH | 401 | 401 | **PASS** | 수수료 수정 |
+| 10 | `/api/court-reporter/jobs/1/files` | POST | 401 | 401 | **PASS** | 파일 등록 |
+| 11 | `/api/court-reporter/files/1/stt/trigger` | POST | 401 | 401 | **PASS** | STT 트리거 |
+| 12 | `/api/court-reporter/files/1/stt` | PATCH | 401 | 401 | **PASS** | STT 상태 갱신 |
+| 13 | `/api/court-reporter/transcripts/1` | PATCH | 401 | 401 | **PASS** | 속기록 수정 |
+| 14 | `/api/court-reporter/jobs/1/final-files` | POST | 401 | 401 | **PASS** | 최종파일 등록 |
+| 15 | `/api/court-reporter/jobs/1/final-files/1/send` | POST | 401 | 401 | **PASS** | 최종파일 발송 |
+| 16 | `/api/court-reporter/jobs/1/contract` | GET | 401 | 401 | **PASS** | 계약 연결 |
+| 17 | `/api/court-reporter/jobs/public/tracking/NONEXISTENT` | GET | 404 | 404 | **PASS** | 공개 추적 |
+
+### 응답 본문 샘플
+
+**인증 보호 엔드포인트 (16개 공통):**
+```json
+{"error":true,"message":"인증이 필요합니다"}
+```
+
+**공개 추적 API (존재하지 않는 코드):**
+```json
+{"path":"/api/court-reporter/jobs/public/tracking/NONEXISTENT","error":"Not Found","message":"존재하지 않는 추적코드입니다.","timestamp":"2026-05-08T11:10:31.677222538","status":404}
+```
+
+**공개 추적 API (빈 코드):** HTTP 404 (라우트 미매칭, 빈 본문)
 
 ---
 
@@ -43,20 +58,23 @@
 
 | 기능 | 프론트엔드 | 백엔드 | API 라이브 | 판정 |
 |------|-----------|--------|-----------|------|
-| 작업 생성 (CREATE) | CourtReporterJobCreateDialog.tsx | Service:174-200 | 인증보호 확인 | **PASS** (이슈 6건) |
-| 작업 조회 (LIST) | CourtReporterWorkListPage.tsx | Controller:44-60 | 인증보호 확인 | **PASS** (이슈 1건) |
+| 작업 생성 (CREATE) | CourtReporterJobCreateDialog.tsx | Service:174-200 | 401 확인 | **PASS** (이슈 6건) |
+| 작업 조회 (LIST) | CourtReporterWorkListPage.tsx | Controller:44-60 | 401 확인 | **PASS** (이슈 1건) |
 | 필터링 (FILTER) | WorkListPage 탭/검색 | Repository nativeQuery | 코드검증 | **PASS** (이슈 1건) |
-| 상태 변경 (UPDATE/status) | JobDetailDialog | Service:213-240 | 코드검증 | **PASS** |
-| 정보 수정 (UPDATE/info) | JobDetailDialog | Service:143-170 | 코드검증 | **PASS** (이슈 1건) |
-| 메모 수정 (UPDATE/memo) | JobDetailDialog | Service:244-252 | 코드검증 | **PASS** |
-| 수수료 수정 (UPDATE/fee) | JobDetailDialog + FeePage | Service:256-280 | 코드검증 | **PASS** (이슈 1건) |
-| 속기록 수정 (UPDATE/transcript) | TranscriptStudio | Service:361-405 | 코드검증 | **PASS** (이슈 1건) |
-| 파일 업로드 | JobDetailDialog | Service:284-309 | 코드검증 | **PASS** |
-| STT 트리거 | JobDetailDialog | Service:541-565 | 코드검증 | **PASS** |
-| 최종파일 등록/발송 | JobDetailDialog | Service:409-480 | 코드검증 | **PASS** |
-| 공개 추적 | TrackingPage | Service:484-500 | **라이브 404 확인** | **PASS** |
-| 작업 삭제 (DELETE) | WorkListPage | Service:526-537 | 인증보호 확인 | **PASS** (이슈 1건) |
-| 통계 조회 | DashboardPage | Service:504-522 | 인증보호 확인 | **PASS** |
+| 상태 변경 (UPDATE/status) | JobDetailDialog | Service:213-240 | 401 확인 | **PASS** |
+| 정보 수정 (UPDATE/info) | JobDetailDialog | Service:143-170 | 401 확인 | **PASS** (이슈 1건) |
+| 메모 수정 (UPDATE/memo) | JobDetailDialog | Service:244-252 | 401 확인 | **PASS** |
+| 수수료 수정 (UPDATE/fee) | JobDetailDialog + FeePage | Service:256-280 | 401 확인 | **PASS** (이슈 1건) |
+| 속기록 수정 (UPDATE/transcript) | TranscriptStudio | Service:361-405 | 401 확인 | **PASS** (이슈 1건) |
+| 파일 업로드 | JobDetailDialog | Service:284-309 | 401 확인 | **PASS** |
+| STT 트리거 | JobDetailDialog | Service:541-565 | 401 확인 | **PASS** |
+| STT 상태 갱신 | (내부 콜백) | Service:313-357 | 401 확인 | **PASS** |
+| 최종파일 등록 | JobDetailDialog | Service:409-426 | 401 확인 | **PASS** |
+| 최종파일 발송 | JobDetailDialog | Service:430-480 | 401 확인 | **PASS** |
+| 공개 추적 | TrackingPage | Service:484-500 | **404 라이브 확인** | **PASS** |
+| 작업 삭제 (DELETE) | WorkListPage | Service:526-537 | 401 확인 | **PASS** (이슈 1건) |
+| 통계 조회 | DashboardPage | Service:504-522 | 401 확인 | **PASS** |
+| 계약 연결 | JobDetailDialog | Controller:272-282 | 401 확인 | **PASS** |
 
 ---
 
@@ -184,7 +202,7 @@ CANCELLED   → {PENDING}
 
 ## 7. 속기록 수정 (UPDATE/transcript)
 
-### API: `PATCH /api/court-reporter/jobs/transcripts/{transcriptId}`
+### API: `PATCH /api/court-reporter/transcripts/{transcriptId}`
 
 **백엔드 (Service:361-405)**
 - isFinal=true인 속기록은 내용 수정 거부 (409 CONFLICT)
@@ -271,6 +289,18 @@ trackingCode, title, eventType, eventDate, location, status, hasFinalFile, updat
 
 ---
 
+## 12. 계약 연결 조회
+
+### API: `GET /api/court-reporter/jobs/{jobId}/contract`
+
+**백엔드 (Controller:272-282)**
+- 작업에 연결된 수임계약 ID 조회
+- 응답: `{"contractId": number|null, "hasContract": boolean}`
+
+**이슈 없음.** 정상 구현.
+
+---
+
 ## 전체 이슈 요약
 
 | 심각도 | 건수 | 이슈 ID |
@@ -306,7 +336,7 @@ trackingCode, title, eventType, eventDate, location, status, hasFinalFile, updat
 **백엔드 (`lemon-api-server-spring/.../courtreporter/`)**
 | 파일 | 용도 |
 |------|------|
-| CourtReporterJobController.java (291줄) | REST 컨트롤러 (16 엔드포인트) |
+| CourtReporterJobController.java (291줄) | REST 컨트롤러 (17 엔드포인트) |
 | CourtReporterJobService.java (641줄) | 비즈니스 로직 + STT 비동기 |
 | CourtReporterJobEntity.java | 작업 엔티티 (erp_court_reporter_jobs) |
 | CourtReporterTranscriptEntity.java | 속기록 엔티티 |
