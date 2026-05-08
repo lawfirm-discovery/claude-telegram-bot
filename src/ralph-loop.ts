@@ -48,6 +48,11 @@ export interface TaskItem {
    * 0 = 한 번도 refinement 안 됨 (가장 흔함), 1 = 이미 한 번 분해됨 (다시 stuck 시 break).
    */
   refinedDepth?: number;
+  /**
+   * Phase R10.5 — stochastic 에러 누적 retry 카운트. 임계 (default 3) 초과 시 deterministic 처리.
+   * 일시적 에러가 영구 장애로 변한 경우 (예: 5xx 가 계속) 무한 backoff retry 차단.
+   */
+  stochasticRetryCount?: number;
 }
 
 export interface TaskPRD {
@@ -93,6 +98,8 @@ const DEFAULT_MAX_WALLCLOCK_SEC = parseInt(process.env.RALPH_MAX_WALLCLOCK_SEC |
 const INVARIANT_STUCK_THRESHOLD = parseInt(process.env.RALPH_INVARIANT_THRESHOLD || "4");
 /** Phase R5.6 — 봇 process RSS 가 이 한도 (MB) 초과 시 사용자 경고. 0 = 비활성. */
 const MEMORY_WARN_RSS_MB = parseInt(process.env.RALPH_MEMORY_WARN_RSS_MB || "2048");
+/** Phase R10.5 — stochastic 에러 max retry. 초과 시 deterministic 으로 escalate. */
+const STOCHASTIC_MAX_RETRY = parseInt(process.env.RALPH_STOCHASTIC_MAX_RETRY || "3");
 /**
  * Phase R9.2 — context window 사용률 (%) 이 임계 넘으면 강제 compact.
  * SDK 의 HudInfo.contextPercent 활용. default 80 = 80% 넘으면 progress.log 압축 강제.
@@ -141,13 +148,53 @@ export function loadPRD(taskId: string): TaskPRD | null {
   } catch { return null; }
 }
 
-function savePRD(prd: TaskPRD): void {
+/**
+ * Phase R10.3 — savePRD 1초 throttle (debounce) + status 변경 시 즉시 flush.
+ *  - 평소 (stuckCount/lastStateHash 등 평이 변경): 1초 debounce → 마지막 상태만 disk write
+ *  - status / passes / completedAt / lock release / final return 등 critical: immediate=true 즉시 flush
+ *  - process exit 시 모든 pending flush (atexit-like)
+ */
+const _saveTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const _savePending = new Map<string, TaskPRD>();
+function _doSavePRD(prd: TaskPRD): void {
   ensureTaskDir(prd.taskId);
   const tmp = join(taskDir(prd.taskId), "prd.json.tmp");
   const target = join(taskDir(prd.taskId), "prd.json");
   writeFileSync(tmp, JSON.stringify(prd, null, 2));
   renameSync(tmp, target);
 }
+function savePRD(prd: TaskPRD, immediate = false): void {
+  const id = prd.taskId;
+  // critical 변경은 throttle 무시하고 즉시
+  const isCritical = immediate || prd.status === "completed" || prd.status === "failed" || prd.status === "stopped";
+  if (isCritical) {
+    const t = _saveTimers.get(id);
+    if (t) { clearTimeout(t); _saveTimers.delete(id); }
+    _savePending.delete(id);
+    _doSavePRD(prd);
+    return;
+  }
+  // debounce 1s
+  _savePending.set(id, prd);
+  const existing = _saveTimers.get(id);
+  if (existing) clearTimeout(existing);
+  _saveTimers.set(id, setTimeout(() => {
+    const pending = _savePending.get(id);
+    _savePending.delete(id);
+    _saveTimers.delete(id);
+    if (pending) _doSavePRD(pending);
+  }, 1000));
+}
+// process exit 시 모든 pending flush
+const _flushAllPending = () => {
+  for (const [id, prd] of _savePending) {
+    try { _doSavePRD(prd); } catch {}
+  }
+  _savePending.clear();
+};
+process.on("beforeExit", _flushAllPending);
+process.on("SIGTERM", _flushAllPending);
+process.on("SIGINT", _flushAllPending);
 
 /**
  * Phase R0.5 — progress 를 두 파일에 기록.
@@ -644,7 +691,7 @@ export function createTask(params: {
     lastCompressLine: 0,
     maxWallclockSec: params.maxWallclockSec ?? DEFAULT_MAX_WALLCLOCK_SEC,
   };
-  savePRD(prd);
+  savePRD(prd, true); // 초기 생성은 즉시 flush — 호출자가 바로 loadPRD 가능하도록
   appendProgress(taskId, `TASK CREATED: ${params.originalPrompt.slice(0, 200)}`);
   if (prd.maxWallclockSec) {
     appendProgress(taskId, `WALLCLOCK LIMIT: ${prd.maxWallclockSec}s (${Math.round(prd.maxWallclockSec / 60)}min)`);
@@ -1051,6 +1098,28 @@ export async function runRalphLoop(
           testResult: testSummary,
         });
         appendProgress(taskId, `EVALUATOR: complete=${evalResult.complete}, reason=${evalResult.reason}${evalResult.nextFocus ? `, nextFocus=${evalResult.nextFocus}` : ""}`);
+
+        // Phase R10.2 — evaluator reason 에 사용량 한도 패턴 있으면 R6.1 같은 즉시 halt 처리.
+        //   main response 는 정상이고 evaluator (askClaudeLight = 별도 spawn) 만 한도 도달하는 드문 케이스.
+        //   light-call 이 spawn 실패 (`light-call exit 1`) 면 stderr 만 보일 수도 — 거기도 검사.
+        const evalUsage = detectUsageLimit(evalResult.reason);
+        if (evalUsage.hit) {
+          incr("ralph.usage_limit_hit");
+          incr("ralph.usage_limit_evaluator");
+          appendProgress(taskId, `EVALUATOR USAGE LIMIT: ${evalUsage.raw?.slice(0, 100)}`);
+          await sendTg(prd.requestedBy,
+            `⛔ Ralph #${taskId} — evaluator 사용량 한도 도달 → 자동 중단\n` +
+            `iter ${item.iteration}, ${elapsed}s\n` +
+            (evalUsage.resetAt ? `Reset: ${evalUsage.resetAt}\n` : "") +
+            `대응: 한도 reset 후 재시도 또는 다른 봇 사용`,
+          );
+          item.error = `evaluator usage limit${evalUsage.resetAt ? ` (resets ${evalUsage.resetAt})` : ""}`;
+          prd.status = "failed";
+          savePRD(prd);
+          releaseTaskLock(taskId);
+          return { taskId, completed: false, totalIterations, error: "evaluator usage limit" };
+        }
+
         if (evalResult.reason.startsWith("evaluator: JSON parse failed")) {
           incr("evaluator.parse_failed");
         } else {
@@ -1214,9 +1283,25 @@ export async function runRalphLoop(
 
         // stochastic 에러 (rate_limit/timeout/5xx) → exponential backoff retry
         if (errClass === "stochastic") {
+          // Phase R10.5 — max retry cap. 초과 시 deterministic 으로 escalate.
+          item.stochasticRetryCount = (item.stochasticRetryCount ?? 0) + 1;
+          if (item.stochasticRetryCount > STOCHASTIC_MAX_RETRY) {
+            incr("ralph.stochastic_exhausted");
+            await sendTg(prd.requestedBy,
+              `⛔ Ralph #${taskId} — stochastic 에러 ${item.stochasticRetryCount}회 누적 → halt\n` +
+              `iter ${item.iteration}: ${e.message?.slice(0, 150)}\n` +
+              `대응: 일시 장애가 영구 장애로 보임. 네트워크/Claude API 상태 확인`,
+            );
+            appendProgress(taskId, `STOCHASTIC EXHAUSTED: ${item.stochasticRetryCount} retry`);
+            item.error = `stochastic exhausted (${item.stochasticRetryCount}× retries): ${e.message}`;
+            prd.status = "failed";
+            savePRD(prd);
+            releaseTaskLock(taskId);
+            return { taskId, completed: false, totalIterations, error: "stochastic exhausted" };
+          }
           const backoffSec = Math.min(15, 1 + (item.iteration ?? 1) * 2);
           incr("ralph.error.stochastic");
-          appendProgress(taskId, `STOCHASTIC ERROR → ${backoffSec}s backoff 후 재시도`);
+          appendProgress(taskId, `STOCHASTIC ERROR (${item.stochasticRetryCount}/${STOCHASTIC_MAX_RETRY}) → ${backoffSec}s backoff 후 재시도`);
           await new Promise((r) => setTimeout(r, backoffSec * 1000));
           // iteration 카운트 증가 안 시킴 (같은 iter 재시도)
           item.iteration--;
@@ -1396,6 +1481,22 @@ ${lastNextFocus || "(없음)"}
       description: String(g.description || "").slice(0, 500),
       maxIterations: Math.min(20, Math.max(3, parseInt(g.maxIterations) || 10)),
     }));
+
+    // Phase R10.1 — refinement 효과 검증. sub-task 가 부모와 의미 거의 동일하면 refinement 의미 없음.
+    //   keyword fingerprint overlap > 70% 면 reject → 사용자에게 escalate (자동 분해 무효).
+    const parentKw = new Set(reasonFingerprint(item.description).split("|").filter(Boolean));
+    if (parentKw.size > 0) {
+      const overlapRatios = subItems.map((sub) => {
+        const subKw = new Set(reasonFingerprint(sub.description).split("|").filter(Boolean));
+        if (subKw.size === 0) return 0;
+        const inter = [...subKw].filter((k) => parentKw.has(k)).length;
+        return inter / subKw.size;
+      });
+      const avgOverlap = overlapRatios.reduce((a, b) => a + b, 0) / overlapRatios.length;
+      if (avgOverlap > 0.7) {
+        return { ok: false }; // 부모와 90%+ 동일 단어 → 의미 없는 분해
+      }
+    }
     return { ok: true, subItems };
   } catch {
     return { ok: false };
@@ -1606,6 +1707,7 @@ export function stopTask(taskId: string): { ok: boolean; message: string } {
   appendProgress(taskId, `STOP REQUESTED BY USER`);
 
   // Phase R5.4 — uncommitted 변경 보존 (git stash)
+  // Phase R10.4 — stash 복원 명령도 함께 안내 (호성님이 즉시 복원 가능)
   let stashMsg = "";
   if (prd.repo && AUTO_GIT_ENABLED) {
     try {
@@ -1614,7 +1716,13 @@ export function stopTask(taskId: string): { ok: boolean; message: string } {
         const stashLabel = `ralph-stop-${taskId}-${new Date().toISOString().slice(0, 16).replace(/[T:]/g, "_")}`;
         const stash = runGitInRepo(prd.repo, ["stash", "push", "-u", "-m", stashLabel]);
         if (stash !== null) {
-          stashMsg = ` (변경사항은 git stash 에 보존: '${stashLabel}')`;
+          const repoPath = REPO_PATHS[prd.repo] || prd.repo;
+          stashMsg =
+            `\n\n📦 변경사항 git stash 에 보존됨:\n` +
+            `  label: ${stashLabel}\n` +
+            `  복원: cd ${repoPath} && git stash list   # stash 확인\n` +
+            `       cd ${repoPath} && git stash pop    # 최근 stash 복원\n` +
+            `  영구 폐기: git stash drop`;
           appendProgress(taskId, `STASH SAVED: ${stashLabel}`);
         }
       }
