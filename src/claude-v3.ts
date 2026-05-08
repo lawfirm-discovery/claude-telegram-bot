@@ -711,6 +711,14 @@ async function runWithSDKInner(
             if (fullText.length > 0) fullText += "\n\n";
             fullText += resultMsg.result;
           }
+          // Phase R1.1 — stop_reason='max_tokens' 면 응답 truncated. Ralph loop 가 즉시 halt 하도록 마커 prepend.
+          //   SDK 가 정상 'success' subtype 으로 결과를 주지만 stop_reason 이 max_tokens 이면 잘림.
+          //   호성님 사고 (보고서 38분 무한루프) 의 직접 원인이 이 케이스.
+          if (resultMsg.stop_reason === "max_tokens") {
+            console.warn("[V3] ⚠️ stop_reason=max_tokens — output truncated, signalling Ralph loop");
+            incr("engine.stop_reason.max_tokens");
+            fullText = "__TRUNCATED_MAX_TOKENS__\n\n" + fullText;
+          }
         } else {
           console.error(`[V3] Result error: ${resultMsg.subtype}`);
           if (resultMsg.subtype === "error_max_turns") {

@@ -15,7 +15,7 @@ import { join } from "path";
 import { clearSession } from "./claude-engine";
 import { askClaudeLight, runEvaluator, type EvalResult } from "./evaluator";
 import { runRatchet } from "./test-ratchet";
-import { incr, formatOneLineSummary, getTotals } from "./metrics";
+import { incr, formatOneLineSummary } from "./metrics";
 import { appendMemoryLog } from "./lemonclaw";
 
 // ═══════════════════════════════════════════════════════════════
@@ -52,12 +52,11 @@ export interface TaskPRD {
   items: TaskItem[];
   lastCompressLine: number;
   /**
-   * 비용 한도 (Phase R0.3 W5). 단위: USD. 초과 시 task 자동 stop.
-   * undefined → 한도 없음 (legacy task 호환).
+   * 벽시계 한도 (Phase R1.2). 단위: 초. 누적 경과 시간이 한도 초과 시 자동 stop.
+   * default: env RALPH_MAX_WALLCLOCK_SEC 또는 7200 (2시간).
+   * 정액제 환경에서 token cost 계산 무의미 → 시간 기반 안전망으로 대체.
    */
-  maxBudgetUsd?: number;
-  /** task 시작 시점의 봇 전체 누적 cost milli — 진행 중 누적치 계산용 baseline. */
-  costStartMilli?: number;
+  maxWallclockSec?: number;
 }
 
 export type AskClaudeFn = (chatId: string, message: string) => Promise<string>;
@@ -77,8 +76,8 @@ export interface RalphLoopResult {
 const TASKS_DIR = join(import.meta.dir, "..", "tasks");
 const MAX_ITERATIONS = parseInt(process.env.RALPH_MAX_ITERATIONS || "30");
 const COMPRESS_THRESHOLD = 60;
-/** 환경변수 default — 개별 task 가 maxBudgetUsd 명시 안 하면 이 값 적용. */
-const DEFAULT_MAX_BUDGET_USD = parseFloat(process.env.RALPH_MAX_BUDGET_USD || "0") || undefined;
+/** 벽시계 한도 (Phase R1.2). 정액제 환경에서 비용 계산 무의미 → 시간 기반. */
+const DEFAULT_MAX_WALLCLOCK_SEC = parseInt(process.env.RALPH_MAX_WALLCLOCK_SEC || "7200");
 
 const REPO_PATHS: Record<string, string> = {
   "lemon-front": "/home/angrylawyer/lemon-front",
@@ -185,6 +184,55 @@ function readContext(taskId: string): string {
   } catch { return ""; }
 }
 
+// ═══════════════════════════════════════════════════════════════
+// Phase R1.3 — Fuzzy stuck fingerprint
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * evaluator.reason 의 표면 변동 (숫자/공백/대소문자/조사 등) 흡수해서
+ * 의미 있게 같은 사유인지 판별하는 fingerprint.
+ *
+ * 예) "보고서 미완성 (35%)" 와 "보고서가 미완성 (52%)" → 동일 fingerprint.
+ *
+ * 알고리즘:
+ *   1. lowercase
+ *   2. 숫자/퍼센트/소수점 제거
+ *   3. 공백/구두점 정규화 (한 글자로 압축)
+ *   4. 첫 120 글자만 사용 (긴 사유는 앞부분이 핵심)
+ */
+function reasonFingerprint(reason: string): string {
+  if (!reason) return "";
+  return reason
+    .toLowerCase()
+    .replace(/[\d.%]+/g, "") // 숫자/퍼센트/소수점 제거
+    .replace(/[\s,.\-—!?:;()'"`]+/g, " ") // 구두점 → 공백
+    .trim()
+    .slice(0, 120);
+}
+
+/**
+ * Phase R1.4 — 응답이 "다음에 진행할게요" 류 미완 종결로 끝나면 truncation 후보로 마킹.
+ *   stop_reason=max_tokens 가 1차 방어선이지만, SDK 가 마커 못 붙이는 경로 (legacy v1, askClaudeLight 등)
+ *   대비 2차 방어선. 같은 미완 종결 패턴이 2회 연속이면 stuck 처리.
+ *
+ * 패턴:
+ *   - "...하겠습니다" / "...진행하겠습니다" / "...수정하겠습니다" 류로 끝
+ *   - 마지막 200자 안에 "이어서" / "다음에" 가 있고 마침표/줄바꿈 없이 종료
+ */
+function looksTruncatedKo(text: string): boolean {
+  if (!text) return false;
+  const tail = text.slice(-200).trim();
+  // 미완 종결 패턴 (한국어)
+  if (/(?:하|되|되겠|할|진행하|수정하|작성하|확인하|검토하|진행|작성|수정|확인|검토)겠습니다\s*\.?$/.test(tail)) {
+    return true;
+  }
+  // 마침표 없이 -겠습니다/-할게요 로 갑자기 끝
+  if (/(?:겠습니다|할게요|해드릴게요|이어서|계속해서|다음에)\s*$/.test(tail) && !/[.!?]\s*$/.test(tail)) {
+    return true;
+  }
+  return false;
+}
+
 function writeContext(taskId: string, content: string): void {
   ensureTaskDir(taskId);
   writeFileSync(join(taskDir(taskId), "context.md"), content);
@@ -269,8 +317,8 @@ export function createTask(params: {
   branch: string;
   files: string[];
   items: Array<{ description: string; maxIterations?: number }>;
-  /** USD 한도 — undefined 면 default (env RALPH_MAX_BUDGET_USD) 또는 무한. */
-  maxBudgetUsd?: number;
+  /** 벽시계 한도(초) — undefined 면 default (env RALPH_MAX_WALLCLOCK_SEC) 또는 7200. */
+  maxWallclockSec?: number;
 }): TaskPRD {
   const taskId = params.taskId || randomUUID().slice(0, 8);
   const prd: TaskPRD = {
@@ -290,29 +338,14 @@ export function createTask(params: {
       maxIterations: item.maxIterations ?? MAX_ITERATIONS,
     })),
     lastCompressLine: 0,
-    maxBudgetUsd: params.maxBudgetUsd ?? DEFAULT_MAX_BUDGET_USD,
+    maxWallclockSec: params.maxWallclockSec ?? DEFAULT_MAX_WALLCLOCK_SEC,
   };
   savePRD(prd);
   appendProgress(taskId, `TASK CREATED: ${params.originalPrompt.slice(0, 200)}`);
-  if (prd.maxBudgetUsd) {
-    appendProgress(taskId, `BUDGET: $${prd.maxBudgetUsd.toFixed(2)} USD`);
+  if (prd.maxWallclockSec) {
+    appendProgress(taskId, `WALLCLOCK LIMIT: ${prd.maxWallclockSec}s (${Math.round(prd.maxWallclockSec / 60)}min)`);
   }
   return prd;
-}
-
-// ═══════════════════════════════════════════════════════════════
-// Cost helpers (Phase R0.3 W5)
-// ═══════════════════════════════════════════════════════════════
-
-/** 봇 전체 누적 cost (milli USD). */
-function getCurrentCostMilli(): number {
-  return getTotals()["engine.cost_usd_milli"]?.count ?? 0;
-}
-
-/** task 시작 후 누적된 cost (USD). */
-function getTaskCostUsd(prd: TaskPRD): number {
-  if (prd.costStartMilli === undefined) return 0;
-  return Math.max(0, getCurrentCostMilli() - prd.costStartMilli) / 1000;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -413,9 +446,9 @@ export async function runRalphLoop(
   }
 
   prd.status = "running";
-  // Phase R0.3 — cost baseline 기록 (resume 시 기존 값 유지)
-  if (prd.costStartMilli === undefined) {
-    prd.costStartMilli = getCurrentCostMilli();
+  // Phase R1.2 — wallclock 한도가 누락된 legacy task 에 default 주입
+  if (prd.maxWallclockSec === undefined) {
+    prd.maxWallclockSec = DEFAULT_MAX_WALLCLOCK_SEC;
   }
   savePRD(prd);
   appendProgress(taskId, `RALPH LOOP START (pid=${process.pid} bot=${process.env.BOT_NAME ?? "?"})`);
@@ -435,7 +468,7 @@ export async function runRalphLoop(
     if (item.lastEvalReason === undefined) item.lastEvalReason = "";
 
     while (!item.passes && item.iteration < item.maxIterations) {
-      // Phase R0.3 — 매 iteration 진입 시 budget + 사용자 stop 신호 체크.
+      // Phase R1.2 — 매 iteration 진입 시 wallclock + 사용자 stop 신호 체크.
       //   prd 를 reload 해서 외부 (다른 process / /ralph stop 명령) 변경 반영.
       const fresh = loadPRD(taskId);
       if (fresh && fresh.status === "stopped") {
@@ -449,19 +482,21 @@ export async function runRalphLoop(
         return { taskId, completed: false, totalIterations, error: "stopped" };
       }
 
-      // budget guard
-      if (prd.maxBudgetUsd) {
-        const spent = getTaskCostUsd(prd);
-        if (spent >= prd.maxBudgetUsd) {
-          const msg = `💰 Ralph #${taskId} 예산 초과: $${spent.toFixed(3)} ≥ $${prd.maxBudgetUsd.toFixed(2)} (item ${item.id}, iter ${item.iteration})`;
-          appendProgress(taskId, `BUDGET EXCEEDED: ${msg}`);
+      // wallclock guard — 정액제 환경에서 token cost 무의미 → 시간 한도가 유일한 안전망
+      if (prd.maxWallclockSec) {
+        const elapsedSec = Math.round((Date.now() - prd.createdAt) / 1000);
+        if (elapsedSec >= prd.maxWallclockSec) {
+          const min = Math.round(elapsedSec / 60);
+          const limitMin = Math.round(prd.maxWallclockSec / 60);
+          const msg = `⏰ Ralph #${taskId} 시간 한도 초과: ${min}분 ≥ ${limitMin}분 (item ${item.id}, iter ${item.iteration})`;
+          appendProgress(taskId, `WALLCLOCK EXCEEDED: ${elapsedSec}s ≥ ${prd.maxWallclockSec}s`);
           await sendTg(prd.requestedBy, msg + `\n수동 확인 후 /ralph status ${taskId}`);
-          item.error = `budget exceeded: $${spent.toFixed(3)}`;
-          incr("ralph.budget_exceeded");
+          item.error = `wallclock exceeded: ${elapsedSec}s`;
+          incr("ralph.wallclock_exceeded");
           prd.status = "failed";
           savePRD(prd);
           releaseTaskLock(taskId);
-          return { taskId, completed: false, totalIterations, error: "budget exceeded" };
+          return { taskId, completed: false, totalIterations, error: "wallclock exceeded" };
         }
       }
 
@@ -487,6 +522,43 @@ export async function runRalphLoop(
         const elapsed = Math.round((Date.now() - iterStart) / 1000);
         appendProgress(taskId, `ITERATION ${item.iteration} END: ${elapsed}s`);
         appendProgress(taskId, `RESPONSE: ${response.replace(/\n/g, " ").slice(0, 300)}`);
+
+        // Phase R1.1 — claude-v3 가 stop_reason=max_tokens 감지 시 prepend 한 마커 검사.
+        //   truncated 응답을 evaluator 에 보내면 항상 incomplete 라 무한 루프 (호성님 사고 사례).
+        //   즉시 stuck 처리 → 사용자 에스컬레이트.
+        if (response.startsWith("__TRUNCATED_MAX_TOKENS__")) {
+          incr("ralph.truncated_halt");
+          appendProgress(taskId, `TRUNCATED OUTPUT DETECTED → halting item (max_tokens)`);
+          await sendTg(prd.requestedBy,
+            `⚠️ Ralph #${taskId} — ${item.id} 응답 잘림 (max_tokens) → 자동 중단\n` +
+            `iter ${item.iteration}/${item.maxIterations}, ${elapsed}s\n` +
+            `대응: 작업을 더 작은 단위로 분해하거나 보고서를 파일로 저장하도록 재요청\n` +
+            `/ralph status ${taskId}`,
+          );
+          item.error = "truncated (max_tokens)";
+          savePRD(prd);
+          break; // 다음 item 으로 진행 (이 item 은 실패 처리)
+        }
+
+        // Phase R1.4 — 미완 종결 패턴 감지 (2차 방어선).
+        //   stop_reason 마커가 없는 경로 (askClaudeLight, legacy v1) 대비.
+        //   같은 패턴 2회 연속이면 stuck 처리 (3회 reason 매칭보다 빠르게).
+        if (looksTruncatedKo(response)) {
+          item.stuckCount = (item.stuckCount ?? 0) + 1;
+          appendProgress(taskId, `TRUNCATED-LIKE TAIL: stuckCount=${item.stuckCount}`);
+          if ((item.stuckCount ?? 0) >= 2) {
+            incr("ralph.truncated_halt");
+            await sendTg(prd.requestedBy,
+              `⚠️ Ralph #${taskId} — ${item.id} 응답이 미완 종결 패턴 ${item.stuckCount}회 연속\n` +
+              `iter ${item.iteration}/${item.maxIterations}\n` +
+              `대응: 보고서를 파일로 저장하도록 재요청 (출력 길이 제약 우회)\n` +
+              `/ralph status ${taskId}`,
+            );
+            item.error = "truncated-like (mid-sentence end)";
+            savePRD(prd);
+            break;
+          }
+        }
 
         // 3. 컨텍스트 압축 체크
         const lineCount = readProgressLines(taskId).length;
@@ -515,10 +587,13 @@ export async function runRalphLoop(
         }
         incr("ralph.iteration.end");
 
-        // 6. Stuck 감지 — 동일 미완료 사유 3회 연속이면 사용자 에스컬레이트
-        //    카운터는 item.stuckCount/lastEvalReason 에 저장 → 봇 재시작 시 일관성 유지
+        // 6. Stuck 감지 — fingerprint 기반 fuzzy 비교 (Phase R1.3)
+        //    이전엔 reason 문자열 정확 매칭 → 평가자가 매번 약간 다르게 표현하면 카운트 reset
+        //    → 38분 무한 루프 사고. 이제 lowercase + 숫자제거 + 첫 120자 normalize 후 비교.
         if (!evalResult.complete) {
-          if (evalResult.reason === item.lastEvalReason) {
+          const newFp = reasonFingerprint(evalResult.reason);
+          const oldFp = reasonFingerprint(item.lastEvalReason || "");
+          if (newFp && newFp === oldFp) {
             item.stuckCount = (item.stuckCount ?? 0) + 1;
           } else {
             item.stuckCount = 0;
@@ -691,7 +766,7 @@ export async function startRalphTask(params: {
   askClaude: AskClaudeFn;
   sendTg: SendTelegramFn;
   autoStart?: boolean; // default true (기존 동작 유지)
-  maxBudgetUsd?: number;
+  maxWallclockSec?: number;
 }): Promise<{ taskId: string; planText: string; autoStart: boolean }> {
   const repo = params.repo || "";
   const autoStart = params.autoStart !== false;
@@ -718,7 +793,7 @@ export async function startRalphTask(params: {
     branch: "",
     files: [],
     items,
-    maxBudgetUsd: params.maxBudgetUsd,
+    maxWallclockSec: params.maxWallclockSec,
   });
 
   if (!autoStart) {
@@ -897,13 +972,11 @@ export function formatRalphStatus(taskId: string): string {
     `📝 ${prd.originalPrompt.slice(0, 100)}`,
   ];
 
-  // 비용 정보
-  const cost = getTaskCostUsd(prd);
-  if (prd.maxBudgetUsd) {
-    const pct = Math.round((cost / prd.maxBudgetUsd) * 100);
-    lines.push(`💰 $${cost.toFixed(3)} / $${prd.maxBudgetUsd.toFixed(2)} (${pct}%)`);
-  } else if (cost > 0) {
-    lines.push(`💰 $${cost.toFixed(3)}`);
+  // 시간 한도 진행률 (정액제 환경에서 budget 대신)
+  if (prd.maxWallclockSec && prd.status !== "completed") {
+    const pct = Math.round((elapsed / prd.maxWallclockSec) * 100);
+    const limitMin = Math.round(prd.maxWallclockSec / 60);
+    lines.push(`⏰ ${elapsedStr} / ${limitMin}min (${pct}%)`);
   }
 
   // lock 정보
