@@ -7,7 +7,7 @@ import {
   executeWorkerTask, getWorkerBots, formatAffinityReport,
   quickDelegate, detectDelegateMessage,
 } from "./orchestrator";
-import { formatRalphStatus, listTasks, startRalphTask } from "./ralph-loop";
+import { formatRalphStatus, listTasks, startRalphTask, stopTask, approveAndStart, cancelPendingTask } from "./ralph-loop";
 import {
   detectApprovalRequest,
   getApprovalEmoji,
@@ -327,19 +327,45 @@ bot.command("sync", async (ctx) => {
   await ctx.reply(`📦 동기화 결과 (<code>${branch}</code>):\n\n${lines.join("\n\n")}`, { parse_mode: "HTML" });
 });
 
-// --- Ralph Loop Commands ---
+// --- Ralph Loop Commands (Phase R0.4 — plan 승인 gate + stop/cancel) ---
+function ralphIcon(status: string): string {
+  return status === "completed" ? "✅"
+    : status === "running" ? "🔄"
+    : status === "failed" ? "❌"
+    : status === "stopped" ? "⏹"
+    : status === "pending" ? "⏸"
+    : "❓";
+}
+
 bot.command("ralph", async (ctx) => {
   const arg = ctx.match?.trim();
+  const chatId = ctx.chat.id.toString();
+  const sendTg: (targetChatId: string, msg: string) => Promise<void> = async (targetChatId, msg) => {
+    try {
+      for (const chunk of splitMessage(msg)) {
+        await bot.api.sendMessage(parseInt(targetChatId) || ctx.chat.id, chunk, { parse_mode: "HTML" });
+      }
+    } catch (e: any) {
+      console.error(`[Ralph] sendTg error: ${e.message}`);
+    }
+  };
+
   if (!arg) {
     const tasks = listTasks(5);
     if (!tasks.length) {
-      await ctx.reply("📋 Ralph 태스크 없음\n\n사용법:\n/ralph status <taskId>\n/ralph list");
+      await ctx.reply(
+        "📋 Ralph 태스크 없음\n\n사용법:\n" +
+        "  /ralph <지시>            — 계획 수립 후 승인 대기\n" +
+        "  /ralph! <지시>           — 즉시 실행 (승인 생략)\n" +
+        "  /ralph go <id>           — 승인 후 시작\n" +
+        "  /ralph stop <id>         — 실행 중단\n" +
+        "  /ralph cancel <id>       — pending plan 폐기\n" +
+        "  /ralph status <id>       — 상세 상태\n" +
+        "  /ralph list              — 최근 태스크"
+      );
       return;
     }
-    const lines = tasks.map(t => {
-      const icon = t.status === "completed" ? "✅" : t.status === "running" ? "🔄" : t.status === "failed" ? "❌" : "⏸";
-      return `${icon} #${t.taskId}: ${t.originalPrompt.slice(0, 60)}`;
-    });
+    const lines = tasks.map(t => `${ralphIcon(t.status)} #${t.taskId}: ${t.originalPrompt.slice(0, 60)}`);
     await ctx.reply(`📋 최근 Ralph 태스크:\n\n${lines.join("\n")}`);
     return;
   }
@@ -354,17 +380,66 @@ bot.command("ralph", async (ctx) => {
     const tasks = listTasks(10);
     if (!tasks.length) { await ctx.reply("태스크 없음"); return; }
     const lines = tasks.map(t => {
-      const icon = t.status === "completed" ? "✅" : t.status === "running" ? "🔄" : t.status === "failed" ? "❌" : "⏸";
       const elapsed = Math.round(((t.completedAt || Date.now()) - t.createdAt) / 1000);
-      return `${icon} #${t.taskId} (${elapsed}s) — ${t.originalPrompt.slice(0, 50)}`;
+      return `${ralphIcon(t.status)} #${t.taskId} (${elapsed}s) — ${t.originalPrompt.slice(0, 50)}`;
     });
     await ctx.reply(`📋 Ralph 태스크 목록:\n\n${lines.join("\n")}`);
     return;
   }
 
-  // 서브커맨드가 아니면 새 Ralph 태스크 시작
+  // /ralph go <taskId>  — pending plan 승인 후 시작
+  if (arg.startsWith("go ")) {
+    const taskId = arg.slice(3).trim();
+    const r = approveAndStart(taskId, askClaude, sendTg);
+    await ctx.reply(r.ok ? `✅ ${r.message}\n<code>/ralph status ${taskId}</code>` : `❌ ${r.message}`, { parse_mode: "HTML" });
+    return;
+  }
+
+  // /ralph stop <taskId>  — 실행 중인 task 중단 (다음 iteration 끝에 종료)
+  if (arg.startsWith("stop ")) {
+    const taskId = arg.slice(5).trim();
+    const r = stopTask(taskId);
+    await ctx.reply(r.ok ? `⏹ ${r.message}` : `❌ ${r.message}`);
+    return;
+  }
+
+  // /ralph cancel <taskId>  — pending plan 폐기
+  if (arg.startsWith("cancel ")) {
+    const taskId = arg.slice(7).trim();
+    const r = cancelPendingTask(taskId);
+    await ctx.reply(r.ok ? `🗑 ${r.message}` : `❌ ${r.message}`);
+    return;
+  }
+
+  // 새 Ralph 태스크 — plan 승인 gate 활성 (호성님 "설계 → 승인 → 구현" 원칙)
+  await ctx.reply("🔍 목표 분해 및 계획 수립 중...");
+  try {
+    const result = await startRalphTask({
+      originalPrompt: arg,
+      requestedBy: chatId,
+      askClaude,
+      sendTg,
+      autoStart: false, // ← Phase R0.4: 승인 대기
+    });
+    await ctx.reply(
+      `📋 <b>Ralph #${result.taskId} 계획 수립 완료</b>\n\n` +
+      `${escapeHtml(result.planText)}\n\n` +
+      `▶️ 시작: <code>/ralph go ${result.taskId}</code>\n` +
+      `🗑 취소: <code>/ralph cancel ${result.taskId}</code>\n` +
+      `📊 상세: <code>/ralph status ${result.taskId}</code>`,
+      { parse_mode: "HTML" }
+    );
+  } catch (e: any) {
+    await ctx.reply(`❌ Ralph 계획 수립 실패: ${escapeHtml(e.message)}`, { parse_mode: "HTML" });
+  }
+});
+
+// /ralph! <지시>  — 즉시 실행 (legacy 호환, 승인 단계 생략)
+bot.command("ralph_now", async (ctx) => {
+  const arg = ctx.match?.trim();
+  if (!arg) { await ctx.reply("사용법: /ralph_now <지시>"); return; }
   const chatId = ctx.chat.id.toString();
-  const sendTg: (targetChatId: string, msg: string) => Promise<void> = async (targetChatId, msg) => {
+  const sendTg = async (targetChatId: string, msg: string) => {
     try {
       for (const chunk of splitMessage(msg)) {
         await bot.api.sendMessage(parseInt(targetChatId) || ctx.chat.id, chunk, { parse_mode: "HTML" });
@@ -374,18 +449,19 @@ bot.command("ralph", async (ctx) => {
     }
   };
 
-  await ctx.reply("🔍 목표 분해 및 계획 수립 중...");
+  await ctx.reply("🔍 목표 분해 및 즉시 실행...");
   try {
     const result = await startRalphTask({
       originalPrompt: arg,
       requestedBy: chatId,
       askClaude,
       sendTg,
+      autoStart: true,
     });
     await ctx.reply(
-      `✅ <b>Ralph #${result.taskId} 시작!</b>\n\n` +
+      `✅ <b>Ralph #${result.taskId} 시작</b>\n\n` +
       `📋 <b>계획:</b>\n${escapeHtml(result.planText)}\n\n` +
-      `백그라운드에서 실행 중 — 완료 시 자동 알림.\n` +
+      `백그라운드 실행 중 — 완료 시 자동 알림.\n` +
       `<code>/ralph status ${result.taskId}</code>`,
       { parse_mode: "HTML" }
     );

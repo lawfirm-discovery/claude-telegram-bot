@@ -15,7 +15,7 @@ import { join } from "path";
 import { clearSession } from "./claude-engine";
 import { askClaudeLight, runEvaluator, type EvalResult } from "./evaluator";
 import { runRatchet } from "./test-ratchet";
-import { incr, formatOneLineSummary } from "./metrics";
+import { incr, formatOneLineSummary, getTotals } from "./metrics";
 import { appendMemoryLog } from "./lemonclaw";
 
 // ═══════════════════════════════════════════════════════════════
@@ -31,6 +31,12 @@ export interface TaskItem {
   startedAt?: number;
   completedAt?: number;
   error?: string;
+  /**
+   * 동일 미완료 reason 누적 — 봇 재시작 시 stuck 감지 일관성 유지.
+   * 메모리 변수만 사용하면 resume 시 0부터 다시 세어 stuck 한 번 더 못 잡음.
+   */
+  stuckCount?: number;
+  lastEvalReason?: string;
 }
 
 export interface TaskPRD {
@@ -40,11 +46,18 @@ export interface TaskPRD {
   repo: string;
   branch: string;
   files: string[];
-  status: "pending" | "running" | "completed" | "failed";
+  status: "pending" | "running" | "completed" | "failed" | "stopped";
   createdAt: number;
   completedAt?: number;
   items: TaskItem[];
   lastCompressLine: number;
+  /**
+   * 비용 한도 (Phase R0.3 W5). 단위: USD. 초과 시 task 자동 stop.
+   * undefined → 한도 없음 (legacy task 호환).
+   */
+  maxBudgetUsd?: number;
+  /** task 시작 시점의 봇 전체 누적 cost milli — 진행 중 누적치 계산용 baseline. */
+  costStartMilli?: number;
 }
 
 export type AskClaudeFn = (chatId: string, message: string) => Promise<string>;
@@ -64,6 +77,8 @@ export interface RalphLoopResult {
 const TASKS_DIR = join(import.meta.dir, "..", "tasks");
 const MAX_ITERATIONS = parseInt(process.env.RALPH_MAX_ITERATIONS || "30");
 const COMPRESS_THRESHOLD = 60;
+/** 환경변수 default — 개별 task 가 maxBudgetUsd 명시 안 하면 이 값 적용. */
+const DEFAULT_MAX_BUDGET_USD = parseFloat(process.env.RALPH_MAX_BUDGET_USD || "0") || undefined;
 
 const REPO_PATHS: Record<string, string> = {
   "lemon-front": "/home/angrylawyer/lemon-front",
@@ -99,10 +114,62 @@ function savePRD(prd: TaskPRD): void {
   renameSync(tmp, target);
 }
 
+/**
+ * Phase R0.5 — progress 를 두 파일에 기록.
+ * - progress.log: 사람이 보기 좋은 plain text (legacy 호환)
+ * - progress.jsonl: 한 줄 = JSON, 자동화 (jq, dashboard) 친화
+ *
+ * payload 자동 추론:
+ *   "ITERATION N START: ..." → { phase: "iter_start", n }
+ *   "TEST RATCHET: PASS/FAIL ..." → { phase: "ratchet", passed, output }
+ *   "EVALUATOR: complete=..." → { phase: "evaluator", complete, reason }
+ *   기타 → { phase: "log" }
+ */
 function appendProgress(taskId: string, message: string): void {
   ensureTaskDir(taskId);
   const ts = new Date().toISOString();
   appendFileSync(join(taskDir(taskId), "progress.log"), `[${ts}] ${message}\n`);
+
+  // structured event 도 기록 — 실패해도 본 동작 막지 않음
+  try {
+    const event: Record<string, unknown> = { ts, taskId, message };
+    if (/^ITERATION (\d+).*START/.test(message)) {
+      const m = message.match(/^ITERATION (\d+)\/(\d+) START: (.+)$/);
+      event.phase = "iter_start";
+      if (m) { event.iter = +m[1]; event.maxIter = +m[2]; event.itemId = m[3]; }
+    } else if (/^ITERATION (\d+) END/.test(message)) {
+      const m = message.match(/^ITERATION (\d+) END: (\d+)s/);
+      event.phase = "iter_end";
+      if (m) { event.iter = +m[1]; event.elapsedSec = +m[2]; }
+    } else if (message.startsWith("TEST RATCHET:")) {
+      event.phase = "ratchet";
+      event.passed = /^TEST RATCHET: PASS/.test(message);
+    } else if (message.startsWith("EVALUATOR:")) {
+      event.phase = "evaluator";
+      event.complete = /complete=true/.test(message);
+    } else if (message.startsWith("ITEM DONE:")) {
+      event.phase = "item_done";
+    } else if (message.startsWith("ITEM FAILED:") || message.startsWith("STUCK DETECTED:")) {
+      event.phase = "item_failed";
+    } else if (message.startsWith("BUDGET EXCEEDED:")) {
+      event.phase = "budget_exceeded";
+    } else if (message.startsWith("STOP REQUESTED") || message.startsWith("STOPPED BY USER")) {
+      event.phase = "stop";
+    } else if (message.startsWith("RALPH LOOP START")) {
+      event.phase = "loop_start";
+    } else if (message.startsWith("RALPH LOOP END")) {
+      event.phase = "loop_end";
+    } else if (message.startsWith("CONTEXT COMPRESSED:")) {
+      event.phase = "compress";
+    } else if (message.startsWith("LOCK CONFLICT")) {
+      event.phase = "lock_conflict";
+    } else {
+      event.phase = "log";
+    }
+    appendFileSync(join(taskDir(taskId), "progress.jsonl"), JSON.stringify(event) + "\n");
+  } catch {
+    // structured 기록 실패는 무시 (.log 만으로도 충분)
+  }
 }
 
 function readProgressLines(taskId: string): string[] {
@@ -124,6 +191,73 @@ function writeContext(taskId: string, content: string): void {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// Task Lock — 같은 task 의 동시 실행 방지 (Phase R0.2 W4)
+// ═══════════════════════════════════════════════════════════════
+
+interface LockFile {
+  pid: number;
+  bot: string;
+  acquiredAt: number;
+}
+
+function lockPath(taskId: string): string {
+  return join(taskDir(taskId), ".lock");
+}
+
+/**
+ * 다른 프로세스 / 봇이 이 task 를 잡고 있는지 확인.
+ * 같은 PID 가 살아있으면 hot lock, PID 죽었으면 stale → 해제 가능.
+ */
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0); // signal 0 = exists check
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** lock 획득 시도. 실패 시 기존 lock 정보 반환 (호출자가 사용자 알림). */
+export function acquireTaskLock(taskId: string): { ok: true } | { ok: false; existing: LockFile } {
+  ensureTaskDir(taskId);
+  const path = lockPath(taskId);
+  if (existsSync(path)) {
+    try {
+      const existing: LockFile = JSON.parse(readFileSync(path, "utf-8"));
+      if (existing.pid && isProcessAlive(existing.pid)) {
+        return { ok: false, existing };
+      }
+      // stale lock — 무시하고 덮어씀
+      appendProgress(taskId, `STALE LOCK 해제: pid=${existing.pid} bot=${existing.bot ?? "?"}`);
+    } catch {
+      // 손상된 lock 파일 → 덮어씀
+    }
+  }
+  const lock: LockFile = {
+    pid: process.pid,
+    bot: process.env.BOT_NAME || process.env.HOSTNAME || "unknown",
+    acquiredAt: Date.now(),
+  };
+  writeFileSync(path, JSON.stringify(lock, null, 2));
+  return { ok: true };
+}
+
+export function releaseTaskLock(taskId: string): void {
+  const path = lockPath(taskId);
+  try {
+    if (existsSync(path)) {
+      const lock: LockFile = JSON.parse(readFileSync(path, "utf-8"));
+      // 자기 PID 의 lock 만 해제
+      if (lock.pid === process.pid) {
+        require("fs").unlinkSync(path);
+      }
+    }
+  } catch (e) {
+    appendProgress(taskId, `LOCK 해제 실패 (무시): ${(e as Error).message}`);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
 // Task Creation
 // ═══════════════════════════════════════════════════════════════
 
@@ -135,6 +269,8 @@ export function createTask(params: {
   branch: string;
   files: string[];
   items: Array<{ description: string; maxIterations?: number }>;
+  /** USD 한도 — undefined 면 default (env RALPH_MAX_BUDGET_USD) 또는 무한. */
+  maxBudgetUsd?: number;
 }): TaskPRD {
   const taskId = params.taskId || randomUUID().slice(0, 8);
   const prd: TaskPRD = {
@@ -154,10 +290,29 @@ export function createTask(params: {
       maxIterations: item.maxIterations ?? MAX_ITERATIONS,
     })),
     lastCompressLine: 0,
+    maxBudgetUsd: params.maxBudgetUsd ?? DEFAULT_MAX_BUDGET_USD,
   };
   savePRD(prd);
   appendProgress(taskId, `TASK CREATED: ${params.originalPrompt.slice(0, 200)}`);
+  if (prd.maxBudgetUsd) {
+    appendProgress(taskId, `BUDGET: $${prd.maxBudgetUsd.toFixed(2)} USD`);
+  }
   return prd;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Cost helpers (Phase R0.3 W5)
+// ═══════════════════════════════════════════════════════════════
+
+/** 봇 전체 누적 cost (milli USD). */
+function getCurrentCostMilli(): number {
+  return getTotals()["engine.cost_usd_milli"]?.count ?? 0;
+}
+
+/** task 시작 후 누적된 cost (USD). */
+function getTaskCostUsd(prd: TaskPRD): number {
+  if (prd.costStartMilli === undefined) return 0;
+  return Math.max(0, getCurrentCostMilli() - prd.costStartMilli) / 1000;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -248,9 +403,22 @@ export async function runRalphLoop(
   const prd = loadPRD(taskId);
   if (!prd) return { taskId, completed: false, totalIterations: 0, error: "prd.json not found" };
 
+  // Phase R0.2 — task lock 획득 (동시 실행 방지)
+  const lockResult = acquireTaskLock(taskId);
+  if (!lockResult.ok) {
+    const ex = lockResult.existing;
+    const errMsg = `이미 실행 중: pid=${ex.pid} bot=${ex.bot} (${Math.round((Date.now() - ex.acquiredAt) / 1000)}s 전 시작)`;
+    appendProgress(taskId, `LOCK CONFLICT: ${errMsg}`);
+    return { taskId, completed: false, totalIterations: 0, error: errMsg };
+  }
+
   prd.status = "running";
+  // Phase R0.3 — cost baseline 기록 (resume 시 기존 값 유지)
+  if (prd.costStartMilli === undefined) {
+    prd.costStartMilli = getCurrentCostMilli();
+  }
   savePRD(prd);
-  appendProgress(taskId, `RALPH LOOP START`);
+  appendProgress(taskId, `RALPH LOOP START (pid=${process.pid} bot=${process.env.BOT_NAME ?? "?"})`);
 
   const syntheticChatId = `ralph-${taskId}`;
   let totalIterations = 0;
@@ -262,10 +430,41 @@ export async function runRalphLoop(
     appendProgress(taskId, `ITEM START: ${item.id} — ${item.description.slice(0, 100)}`);
 
     let lastEvalFeedback: EvalResult | undefined;
-    let stuckCount = 0;
-    let lastEvalReason = "";
+    // ── stuck 상태는 prd.json 에 영속 — 봇 재시작 시 카운터 유지 (Phase R0.1 W1+W8) ──
+    if (item.stuckCount === undefined) item.stuckCount = 0;
+    if (item.lastEvalReason === undefined) item.lastEvalReason = "";
 
     while (!item.passes && item.iteration < item.maxIterations) {
+      // Phase R0.3 — 매 iteration 진입 시 budget + 사용자 stop 신호 체크.
+      //   prd 를 reload 해서 외부 (다른 process / /ralph stop 명령) 변경 반영.
+      const fresh = loadPRD(taskId);
+      if (fresh && fresh.status === "stopped") {
+        appendProgress(taskId, `STOPPED BY USER (status='stopped' detected at iteration ${item.iteration + 1})`);
+        await sendTg(prd.requestedBy,
+          `⏹ Ralph #${taskId} 사용자 요청으로 중단됨 (item ${item.id}, iter ${item.iteration})`,
+        );
+        item.error = item.error || "stopped by user";
+        savePRD(prd);
+        releaseTaskLock(taskId);
+        return { taskId, completed: false, totalIterations, error: "stopped" };
+      }
+
+      // budget guard
+      if (prd.maxBudgetUsd) {
+        const spent = getTaskCostUsd(prd);
+        if (spent >= prd.maxBudgetUsd) {
+          const msg = `💰 Ralph #${taskId} 예산 초과: $${spent.toFixed(3)} ≥ $${prd.maxBudgetUsd.toFixed(2)} (item ${item.id}, iter ${item.iteration})`;
+          appendProgress(taskId, `BUDGET EXCEEDED: ${msg}`);
+          await sendTg(prd.requestedBy, msg + `\n수동 확인 후 /ralph status ${taskId}`);
+          item.error = `budget exceeded: $${spent.toFixed(3)}`;
+          incr("ralph.budget_exceeded");
+          prd.status = "failed";
+          savePRD(prd);
+          releaseTaskLock(taskId);
+          return { taskId, completed: false, totalIterations, error: "budget exceeded" };
+        }
+      }
+
       item.iteration++;
       totalIterations++;
       const iterStart = Date.now();
@@ -317,28 +516,30 @@ export async function runRalphLoop(
         incr("ralph.iteration.end");
 
         // 6. Stuck 감지 — 동일 미완료 사유 3회 연속이면 사용자 에스컬레이트
+        //    카운터는 item.stuckCount/lastEvalReason 에 저장 → 봇 재시작 시 일관성 유지
         if (!evalResult.complete) {
-          if (evalResult.reason === lastEvalReason) {
-            stuckCount++;
+          if (evalResult.reason === item.lastEvalReason) {
+            item.stuckCount = (item.stuckCount ?? 0) + 1;
           } else {
-            stuckCount = 0;
-            lastEvalReason = evalResult.reason;
+            item.stuckCount = 0;
+            item.lastEvalReason = evalResult.reason;
           }
-          if (stuckCount >= 3) {
+          if ((item.stuckCount ?? 0) >= 3) {
             const stuckMsg =
               `⚠️ Ralph #${taskId} — ${item.id} stuck!\n` +
-              `동일 문제 ${stuckCount + 1}회 반복: ${evalResult.reason}\n` +
+              `동일 문제 ${(item.stuckCount ?? 0) + 1}회 반복: ${evalResult.reason}\n` +
               `${evalResult.nextFocus ? `집중 영역: ${evalResult.nextFocus}\n` : ""}` +
               `수동 확인 후 /ralph status ${taskId}`;
             await sendTg(prd.requestedBy, stuckMsg);
             appendProgress(taskId, `STUCK DETECTED: ${evalResult.reason}`);
             item.error = `stuck: ${evalResult.reason}`;
             incr("ralph.stuck");
+            savePRD(prd);
             break;
           }
         } else {
-          stuckCount = 0;
-          lastEvalReason = "";
+          item.stuckCount = 0;
+          item.lastEvalReason = "";
         }
 
         // 7. 다음 반복에 평가 피드백 전달
@@ -373,6 +574,7 @@ export async function runRalphLoop(
         if (/auth|billing|api_key/i.test(e.message)) {
           prd.status = "failed";
           savePRD(prd);
+          releaseTaskLock(taskId); // 인증 실패도 정상 종료 — lock 해제
           return { taskId, completed: false, totalIterations, error: e.message };
         }
       }
@@ -395,6 +597,9 @@ export async function runRalphLoop(
 
   const elapsed = Math.round((prd.completedAt - prd.createdAt) / 1000);
   appendProgress(taskId, `RALPH LOOP END: ${prd.status} (${elapsed}s, ${totalIterations} iterations)`);
+
+  // Phase R0.2 — lock 해제 (정상 종료)
+  releaseTaskLock(taskId);
 
   // LemonClaw 공유 메모리에 한 줄 요약 append → 다음 ralph가 system prompt로 자기 패턴 인지
   try {
@@ -473,14 +678,23 @@ function buildIterationPrompt(
 // startRalphTask — 사용자 직접 호출용 (bot.ts /ralph 커맨드)
 // ═══════════════════════════════════════════════════════════════
 
+/**
+ * Phase R0.4 — plan 승인 gate + 자동 시작 정책.
+ *
+ * autoStart=true (legacy 호환, default) → 기존처럼 즉시 백그라운드 실행
+ * autoStart=false                       → status='pending' 으로 저장 후 사용자 /ralph go <taskId> 대기
+ */
 export async function startRalphTask(params: {
   originalPrompt: string;
   requestedBy: string;
   repo?: string;
   askClaude: AskClaudeFn;
   sendTg: SendTelegramFn;
-}): Promise<{ taskId: string; planText: string }> {
+  autoStart?: boolean; // default true (기존 동작 유지)
+  maxBudgetUsd?: number;
+}): Promise<{ taskId: string; planText: string; autoStart: boolean }> {
   const repo = params.repo || "";
+  const autoStart = params.autoStart !== false;
 
   // 작업을 서브목표로 분해 (실패하면 단일 아이템으로 폴백)
   let items: Array<{ description: string; maxIterations: number }>;
@@ -504,30 +718,100 @@ export async function startRalphTask(params: {
     branch: "",
     files: [],
     items,
+    maxBudgetUsd: params.maxBudgetUsd,
   });
 
-  // 백그라운드 실행 — bot에는 즉시 응답, 루프는 별도로 진행
+  if (!autoStart) {
+    // pending 상태 유지 — 사용자가 /ralph go <taskId> 호출해야 시작.
+    appendProgress(prd.taskId, "AWAITING USER APPROVAL");
+    return { taskId: prd.taskId, planText, autoStart: false };
+  }
+
+  startBackgroundLoop(prd.taskId, params.askClaude, params.sendTg);
+  return { taskId: prd.taskId, planText, autoStart: true };
+}
+
+/**
+ * 승인된 task 의 백그라운드 루프 실행 — startRalphTask 와 /ralph go 모두 사용.
+ */
+export function startBackgroundLoop(
+  taskId: string,
+  askClaude: AskClaudeFn,
+  sendTg: SendTelegramFn,
+): void {
+  const prd = loadPRD(taskId);
+  if (!prd) return;
+  const requestedBy = prd.requestedBy;
+  const createdAt = prd.createdAt;
+
   (async () => {
     try {
-      const result = await runRalphLoop(prd.taskId, params.askClaude, params.sendTg);
-      const elapsed = Math.round(((loadPRD(prd.taskId)?.completedAt || Date.now()) - prd.createdAt) / 1000);
+      const result = await runRalphLoop(taskId, askClaude, sendTg);
+      const elapsed = Math.round(((loadPRD(taskId)?.completedAt || Date.now()) - createdAt) / 1000);
       if (result.completed) {
-        await params.sendTg(
-          params.requestedBy,
-          `🎉 Ralph #${prd.taskId} 전체 완료!\n⏱ ${elapsed}s | ${result.totalIterations} iterations`,
+        await sendTg(
+          requestedBy,
+          `🎉 Ralph #${taskId} 전체 완료!\n⏱ ${elapsed}s | ${result.totalIterations} iterations`,
         );
+      } else if (result.error === "stopped") {
+        // 사용자 요청 중단은 별도 알림 이미 발송됨
       } else {
-        await params.sendTg(
-          params.requestedBy,
-          `❌ Ralph #${prd.taskId} 미완료\n⏱ ${elapsed}s | ${result.totalIterations} iterations\n사유: ${result.error || "일부 아이템 실패"}\n/ralph status ${prd.taskId}`,
+        await sendTg(
+          requestedBy,
+          `❌ Ralph #${taskId} 미완료\n⏱ ${elapsed}s | ${result.totalIterations} iterations\n사유: ${result.error || "일부 아이템 실패"}\n/ralph status ${taskId}`,
         );
       }
     } catch (e: any) {
-      await params.sendTg(params.requestedBy, `❌ Ralph #${prd.taskId} 예외: ${e.message}`).catch(() => {});
+      await sendTg(requestedBy, `❌ Ralph #${taskId} 예외: ${e.message}`).catch(() => {});
     }
   })();
+}
 
-  return { taskId: prd.taskId, planText };
+// ═══════════════════════════════════════════════════════════════
+// User control commands (Phase R0.4 W3) — stop / pause / resume
+// ═══════════════════════════════════════════════════════════════
+
+/** /ralph stop — task 를 즉시 중단 신호 (다음 iteration 진입 시 감지). */
+export function stopTask(taskId: string): { ok: boolean; message: string } {
+  const prd = loadPRD(taskId);
+  if (!prd) return { ok: false, message: `태스크 ${taskId} 없음` };
+  if (prd.status === "completed" || prd.status === "failed" || prd.status === "stopped") {
+    return { ok: false, message: `이미 종료됨 (status=${prd.status})` };
+  }
+  prd.status = "stopped";
+  savePRD(prd);
+  appendProgress(taskId, `STOP REQUESTED BY USER`);
+  return { ok: true, message: `Ralph #${taskId} 중단 신호 보냄 (다음 iteration 끝에 종료)` };
+}
+
+/** /ralph go — pending task 시작. */
+export function approveAndStart(
+  taskId: string,
+  askClaude: AskClaudeFn,
+  sendTg: SendTelegramFn,
+): { ok: boolean; message: string } {
+  const prd = loadPRD(taskId);
+  if (!prd) return { ok: false, message: `태스크 ${taskId} 없음` };
+  if (prd.status !== "pending") {
+    return { ok: false, message: `시작 불가 (현재 status=${prd.status})` };
+  }
+  appendProgress(taskId, `APPROVED BY USER → starting`);
+  startBackgroundLoop(taskId, askClaude, sendTg);
+  return { ok: true, message: `Ralph #${taskId} 시작됨` };
+}
+
+/** /ralph cancel — pending task 자체를 cancel (실행 시작 안 한 plan 폐기). */
+export function cancelPendingTask(taskId: string): { ok: boolean; message: string } {
+  const prd = loadPRD(taskId);
+  if (!prd) return { ok: false, message: `태스크 ${taskId} 없음` };
+  if (prd.status !== "pending") {
+    return { ok: false, message: `pending 상태가 아님 (status=${prd.status}) — /ralph stop 사용` };
+  }
+  prd.status = "stopped";
+  prd.completedAt = Date.now();
+  savePRD(prd);
+  appendProgress(taskId, `CANCELLED BY USER (plan 단계)`);
+  return { ok: true, message: `Ralph #${taskId} plan 취소됨` };
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -551,8 +835,24 @@ export async function resumeInProgressTasks(
   sendTg: SendTelegramFn,
 ): Promise<void> {
   const tasks = getInProgressTasks();
-  if (!tasks.length) return;
+  // pending (승인 대기) task 도 알림 — autoStart 하지 않음
+  const pendingTasks = listTasks(50).filter(t => t.status === "pending");
 
+  if (!tasks.length && !pendingTasks.length) return;
+
+  if (pendingTasks.length) {
+    for (const prd of pendingTasks) {
+      try {
+        await sendTg(prd.requestedBy,
+          `⏸ Ralph #${prd.taskId} 승인 대기 중\n` +
+          `${prd.originalPrompt.slice(0, 100)}\n` +
+          `시작: /ralph go ${prd.taskId} | 취소: /ralph cancel ${prd.taskId}`
+        );
+      } catch {}
+    }
+  }
+
+  if (!tasks.length) return;
   console.log(`[RalphLoop] Resuming ${tasks.length} in-progress task(s)`);
 
   for (const prd of tasks) {
@@ -568,6 +868,8 @@ export async function resumeInProgressTasks(
         await sendTg(prd.requestedBy,
           `✅ Ralph #${prd.taskId} 재개 완료 (${result.totalIterations} iterations)`
         );
+      } else if (result.error === "stopped") {
+        // 사용자 stop 알림은 이미 발송됨
       } else {
         await sendTg(prd.requestedBy,
           `❌ Ralph #${prd.taskId} 재개 실패: ${result.error || "미완료 아이템 존재"}`
@@ -593,13 +895,34 @@ export function formatRalphStatus(taskId: string): string {
     `📋 Ralph #${prd.taskId} — ${prd.status}`,
     `⏱ ${elapsedStr} | ${prd.repo || "no-repo"} | ${prd.branch || "no-branch"}`,
     `📝 ${prd.originalPrompt.slice(0, 100)}`,
-    "",
   ];
+
+  // 비용 정보
+  const cost = getTaskCostUsd(prd);
+  if (prd.maxBudgetUsd) {
+    const pct = Math.round((cost / prd.maxBudgetUsd) * 100);
+    lines.push(`💰 $${cost.toFixed(3)} / $${prd.maxBudgetUsd.toFixed(2)} (${pct}%)`);
+  } else if (cost > 0) {
+    lines.push(`💰 $${cost.toFixed(3)}`);
+  }
+
+  // lock 정보
+  try {
+    const path = lockPath(taskId);
+    if (existsSync(path)) {
+      const lock: LockFile = JSON.parse(readFileSync(path, "utf-8"));
+      const alive = isProcessAlive(lock.pid);
+      lines.push(`🔒 lock: pid=${lock.pid} bot=${lock.bot}${alive ? "" : " (stale)"}`);
+    }
+  } catch {}
+
+  lines.push("");
 
   for (const item of prd.items) {
     const icon = item.passes ? "✅" : item.iteration > 0 ? "🔄" : "⏸";
     lines.push(`${icon} ${item.id}: ${item.description.slice(0, 80)}`);
-    lines.push(`   iter ${item.iteration}/${item.maxIterations}${item.passes ? " ✓" : ""}${item.error ? ` ❗${item.error}` : ""}`);
+    const stuckSuffix = (item.stuckCount && item.stuckCount > 0) ? ` ⚠️stuck×${item.stuckCount}` : "";
+    lines.push(`   iter ${item.iteration}/${item.maxIterations}${item.passes ? " ✓" : ""}${stuckSuffix}${item.error ? ` ❗${item.error}` : ""}`);
   }
 
   return lines.join("\n");
