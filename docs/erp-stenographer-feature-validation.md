@@ -1,6 +1,6 @@
 # 속기사(Court Reporter) ERP 핵심 기능 검증
 
-> 최종 업데이트: 2026-05-08 (Iteration 10 — 에러 복원력 + 성능 패턴 + 접근성 검증 완료)
+> 최종 업데이트: 2026-05-08 (Iteration 11 — STT 파이프라인 + 파일 관리 + TranscriptStudio 검증 완료)
 > 검증 방법: 코드 레벨 정적분석 + Spring API 라이브 테스트 (17개 엔드포인트 전수 검증) + 이슈 코드라인 재검증
 
 ---
@@ -825,3 +825,227 @@ idx_cr_final_files_job (job_id)
 5. **접근성**: role/aria-label/keyboard nav 핵심 부분 구현, 일부 개선 여지
 
 **치명적 이슈: 없음** — 개선 권장 사항 6건 (PF-1~4, A11-1~2)은 비치명적
+
+---
+
+## 11. STT 파이프라인 + 파일 관리 + TranscriptStudio 워크플로우 검증
+
+> Iteration 11 — 2026-05-08
+
+### 11-A. STT 파이프라인 End-to-End 검증
+
+#### 트리거 플로우
+
+| 단계 | 위치 | 동작 |
+|------|------|------|
+| 1. 사용자 클릭 | JobDetailDialog:496-508 | "STT 변환" 버튼 → `sttTriggering` Set에 fileId 추가 |
+| 2. API 요청 | `POST /files/{fileId}/stt/trigger` | body: `{ model: 'clova' \| 'whisper' }` (선택) |
+| 3. 검증 (백엔드) | Service:541-565 | 파일 존재, 소유권, ldriveFileId 존재, PROCESSING 아님, 시도 ≤3회 |
+| 4. 상태 전환 | Service:560 | `sttStatus` → `PROCESSING` |
+| 5. 비동기 실행 | Service:563-564 | `runSttAsync()` — LDrive 다운로드 → FastAPI 전송 |
+
+#### 비동기 STT 실행 (`runSttAsync` — Service:568-613)
+
+```
+LDrive 파일 다운로드 (ldriveServiceV3.downloadFileBytes)
+    ↓
+Multipart 폼 빌드 (file + model)
+    ↓
+POST ${fastApiUrl}/transcription/transcribe-audio (타임아웃 10분)
+    ↓
+응답 파싱: transcription, segments, speakerCount, service
+    ↓
+segments → ObjectMapper → JSON string
+    ↓
+sttStatus=COMPLETED + Transcript 엔티티 생성
+    ↓ (실패 시)
+catch → sttStatus=FAILED + 로그
+```
+
+#### 프론트엔드 폴링
+
+| 항목 | 값 | 위치 |
+|------|-----|------|
+| 주기 | 8초 (`CR_CONFIG.STT_POLL_MS`) | courtReporterConstants.ts:14 |
+| 조건 | `job.files?.some(f => f.sttStatus === 'PROCESSING')` | JobDetailDialog:189-195 |
+| 동작 | `onRefresh()` 전체 job 재조회 | |
+| 완료 감지 | `prevSttStatusesRef` 비교 → PROCESSING→COMPLETED 시 탭 자동전환 | JobDetailDialog:197-222 |
+
+#### STT 이슈
+
+| ID | 이슈 | 위치 | 심각도 |
+|----|------|------|--------|
+| STT-1 | `stt_attempt_count` 감소 불가 — 3회 실패 시 영구 차단 | Service:338,556-558 | 중 |
+| STT-2 | 동시 트리거 경쟁 조건 — 두 요청 모두 PENDING 확인 후 중복 실행 | Service:553-555 | 중 |
+| STT-3 | `segmentsJson` 직렬화 실패 시 malformed JSON 저장 가능 | Service:594 | 낮 |
+| STT-4 | `speakerCount` 파싱 NumberFormatException 무시 | Service:599 | 낮 |
+| STT-5 | 폴링 중 다이얼로그 닫으면 업데이트 중단 (재오픈 시 재개) | JobDetailDialog:195 | 낮 |
+
+---
+
+### 11-B. 파일 업로드 플로우
+
+#### 프론트엔드 → LDrive → API (JobDetailDialog:340-382)
+
+| 단계 | 동작 | 검증 |
+|------|------|------|
+| 1. 파일 선택 | `<input type="file">` | 오디오/비디오만 허용 (345-348) |
+| 2. 크기 체크 | 500MB 하드 리밋, 100MB 초과 시 확인 팝업 | 350-359 |
+| 3. LDrive 업로드 | `ldriveApiV3.uploadFile()` → `lemon-erp/court-reporter/jobs/{jobId}` | UUID 반환 |
+| 4. 메타 등록 | `POST /api/court-reporter/jobs/{jobId}/files` | ldriveFileId, originalName, fileSize, mimeType |
+| 5. DB 저장 | `CourtReporterJobFileEntity` 생성 (sttStatus=PENDING) | Service:284-309 |
+
+#### 파일 엔티티 구조
+
+| 컬럼 | 타입 | 설명 |
+|------|------|------|
+| ldrive_file_id | UUID | LDrive 참조 |
+| original_name | String(500) | 원본 파일명 |
+| file_size | Long | 바이트 |
+| mime_type | String(100) | MIME 타입 |
+| file_type | Enum | AUDIO/VIDEO/DOCUMENT |
+| stt_status | Enum | PENDING/PROCESSING/COMPLETED/FAILED |
+| stt_attempt_count | Integer | STT 시도 횟수 |
+
+#### 파일 관리 이슈
+
+| ID | 이슈 | 심각도 |
+|----|------|--------|
+| FM-1 | LDrive 업로드 성공 → API 메타 등록 실패 시 고아 파일 발생 | 중 |
+| FM-2 | 작업 삭제 시 DB 메타만 삭제, LDrive 파일 미삭제 → 스토리지 누수 | 중 |
+| FM-3 | LDrive에서 외부 삭제된 파일 → STT 트리거 시 다운로드 실패 | 낮 |
+
+---
+
+### 11-C. 최종파일 등록 및 납품
+
+#### 최종파일 vs 일반파일
+
+| 구분 | 일반파일 (job_files) | 최종파일 (final_files) |
+|------|---------------------|----------------------|
+| 용도 | 작업용 (오디오/비디오) | 납품용 (속기록/PDF) |
+| STT | PENDING→PROCESSING→COMPLETED/FAILED | 없음 |
+| 이메일 발송 | 불가 | 가능 (send 엔드포인트) |
+| 테이블 | erp_court_reporter_job_files | erp_court_reporter_final_files |
+
+#### 납품 이메일 발송 (`POST /jobs/{jobId}/final-files/{fileId}/send`)
+
+**플로우** (Service:430-480):
+1. 작업/파일 소유권 검증
+2. `job.clientEmail` null/blank 체크 → BAD_REQUEST
+3. AWS SES 이메일 발송 (EmailServiceV2 → ISesGateway)
+4. 성공 시 `sentAt` 타임스탬프 설정 (파일 + 작업)
+
+**이메일 내용**:
+- 제목: `[리걸몬스터] 속기록 납품 안내 - {jobTitle}`
+- 본문: 의뢰인 이름, 작업 제목, 파일명, 추적 링크
+- 추적 URL: `https://legalmonster.co.kr/tracking/{trackingCode}`
+- 형식: Plain text (HTML 아님)
+
+#### 납품 이슈
+
+| ID | 이슈 | 심각도 |
+|----|------|--------|
+| DL-1 | clientEmail 미등록 시 발송 불가 (대안 없음) | 중 |
+| DL-2 | 이메일 발송 실패 시 재시도 메커니즘 없음 (수동 재발송만 가능) | 낮 |
+| DL-3 | 이메일 Plain text만 지원 — HTML 템플릿 미사용 | 낮 |
+| DL-4 | 추적 URL 도메인이 `legalmonster.co.kr` 하드코딩 (환경별 분기 없음) | 낮 |
+
+---
+
+### 11-D. TranscriptStudio 에디터 검증
+
+#### 데이터 로딩 우선순위 (TranscriptStudio:93-104)
+
+```
+1. transcriptionV7Json (구조화된 V7 문서)     → 최우선
+2. transcriptionEdited (편집된 평문)           → 차선
+3. segmentsJson (STT 세그먼트)               → V7 자동 변환
+4. 파싱 실패 시                              → 빈 V7 문서 반환
+```
+
+#### 에디터 모드
+
+| 모드 | 설명 | 변환 |
+|------|------|------|
+| block | 블록 편집기 (기본) | V7 ↔ Editor: `v7NativeToEditorDocument()` / `editorDocumentToV7Native()` |
+| canvas | 캔버스 편집기 | 메타데이터 보존 (141-143, 200-206) |
+| sebulsik | 세벌식 입력기 | `plainTextToV7Document()` / `v7DocumentToPlainText()` (150-155) |
+
+#### 저장 플로우
+
+| 단계 | 동작 |
+|------|------|
+| 1. 저장 | `PATCH /api/court-reporter/jobs/transcripts/{transcriptId}` |
+| 2. 페이로드 | `{ transcriptionEdited, transcriptionV7Json, isFinal }` |
+| 3. V7 JSON 크기 | 최대 5MB (Controller:214) |
+| 4. 최종 확정 | `isFinal=true` → 이후 편집 차단 (Service:373-380) |
+| 5. 자동 상태 | 모든 파일 STT 완료 + 속기록 확정 → 작업 상태 COMPLETED (392-403) |
+
+#### 오디오 패널 (CourtReporterAudioPanel.tsx — 185줄)
+
+- 클릭: 해당 세그먼트 시간으로 이동 + 재생
+- 더블클릭: 에디터에 텍스트 삽입 (`"{speaker} : {text}"`)
+- 활성 세그먼트: `audio.currentTime` 기반 하이라이트
+
+#### TranscriptStudio 이슈
+
+| ID | 이슈 | 심각도 |
+|----|------|--------|
+| TS-1 | V7 JSON 5MB 제한이 프론트에서 미검증 (서버에서만 400 반환) | 낮 |
+| TS-2 | 모드 변환 에러 시 상태에만 기록, 롤백 없음 | 낮 |
+| TS-3 | dirty 상태가 에디터 변경만 추적 — 파일 업로드/확정은 미반영 | 낮 |
+| TS-4 | 최종 확정 실패 시 `isFinal=true`와 작업 상태 불일치 가능 | 중 |
+
+---
+
+### 11-E. 작업 삭제 시 리소스 정리
+
+**삭제 순서** (Service:526-537):
+```
+1. transcriptRepository.deleteByJobId(jobId)
+2. fileRepository.deleteByJobId(jobId)
+3. finalFileRepository.deleteByJobId(jobId)
+4. jobRepository.delete(job)
+```
+
+**문제점**: DB 메타데이터만 삭제. LDrive/S3 파일은 삭제 안 됨.
+- `ldriveServiceV3.deleteFile()` 호출 없음
+- 고아 파일 무한 축적 → 스토리지 비용 증가
+- `LDriveTrashCleanupScheduler` 존재하나 court-reporter 파일 커버 미확인
+
+---
+
+### 11-F. Iteration 11 이슈 종합
+
+| ID | 이슈 | 카테고리 | 심각도 |
+|----|------|---------|--------|
+| STT-1 | STT 3회 실패 시 영구 차단 (카운터 리셋 불가) | STT | 중 |
+| STT-2 | 동시 STT 트리거 경쟁 조건 | STT | 중 |
+| STT-3 | segmentsJson 직렬화 실패 시 malformed JSON | STT | 낮 |
+| STT-4 | speakerCount 파싱 예외 무시 | STT | 낮 |
+| STT-5 | 다이얼로그 닫힘 시 폴링 중단 | STT | 낮 |
+| FM-1 | LDrive 업로드 성공 + API 실패 → 고아 파일 | 파일 | 중 |
+| FM-2 | 작업 삭제 시 LDrive 파일 미삭제 → 누수 | 파일 | 중 |
+| FM-3 | 외부 삭제된 LDrive 파일 → STT 실패 | 파일 | 낮 |
+| DL-1 | clientEmail 미등록 시 납품 불가 | 납품 | 중 |
+| DL-2 | 이메일 발송 실패 재시도 없음 | 납품 | 낮 |
+| DL-3 | 이메일 Plain text only | 납품 | 낮 |
+| DL-4 | 추적 URL 하드코딩 | 납품 | 낮 |
+| TS-1 | V7 JSON 크기 프론트 미검증 | 에디터 | 낮 |
+| TS-2 | 모드 변환 에러 롤백 없음 | 에디터 | 낮 |
+| TS-3 | dirty 상태 불완전 추적 | 에디터 | 낮 |
+| TS-4 | 최종 확정 실패 시 상태 불일치 | 에디터 | 중 |
+
+**심각도 분포**: 중 6건, 낮 10건 — 치명적(상) 이슈 없음
+
+### 11-G. Iteration 11 결론
+
+**STT 파이프라인 + 파일 관리 + TranscriptStudio 검증 결과: 양호 (개선 여지 있음)**
+
+1. **STT 파이프라인**: 트리거→비동기→폴링→완료 흐름 구조적으로 건전. 동시성 보호(STT-2)와 재시도 리셋(STT-1)이 주요 개선점
+2. **파일 관리**: 업로드/등록 정상 동작. LDrive 파일 정리 미구현(FM-2)이 장기적 스토리지 이슈
+3. **납품 플로우**: 이메일 발송 동작 확인, clientEmail 사전 검증 강화 필요
+4. **TranscriptStudio**: V7 스키마 통합, 3개 모드 전환, 세그먼트 삽입 모두 구현 완료. 최종 확정 시 트랜잭션 일관성(TS-4) 개선 권장
+
+**누적 이슈**: Iteration 8~11 총 28건 (상 0, 중 12, 낮 16)
