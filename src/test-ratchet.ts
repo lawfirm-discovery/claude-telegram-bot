@@ -51,6 +51,12 @@ const REPO_PATHS: Record<string, string> = {
 const DEFAULT_TIMEOUT_MS = 120_000;
 
 function defaultCommandsFor(repo: string): RatchetCommand[] {
+  // Phase R3.4 — repo 별 default 검증 명령. 호성님 절대 규칙 준수:
+  //   - lemon-front: tsc --noEmit (craco/vite build 절대 금지)
+  //   - spring: compileJava (build/bootJar 금지, bootRun 사용)
+  //   - flutter: analyze --no-pub (build 는 rtx6000 만)
+  //   - FastAPI: ratchet 미설정 (호성님 작업 중인 미완성 코드가 항상 있을 가능성 → false positive)
+  //              → 명시적 tasks.json 설정 시에만 활성
   if (repo === "lemon_flutter") {
     return [{
       name: "flutter-analyze",

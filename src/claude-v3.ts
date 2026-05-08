@@ -31,6 +31,7 @@ import {
 } from "./lemonclaw";
 import { makeLoopDetectorHook, clearLoopHistory } from "./hooks/loop-detector";
 import { dangerousCmdHook } from "./hooks/dangerous-cmd";
+import { codeQualityHook } from "./hooks/code-quality";
 import { incr, addCostUsd } from "./metrics";
 
 // ═══════════════════════════════════════════════════════════════
@@ -336,7 +337,7 @@ export function askClaudeWithProgress(
 
 function buildHooks(chatId: string): NonNullable<Parameters<typeof query>[0]["options"]>["hooks"] {
   if (DISABLE_HOOKS) return undefined;
-  const preHooks: HookCallback[] = [makeLoopDetectorHook(chatId), dangerousCmdHook];
+  const preHooks: HookCallback[] = [makeLoopDetectorHook(chatId), dangerousCmdHook, codeQualityHook];
   return {
     PreToolUse: [{ hooks: preHooks }],
   };

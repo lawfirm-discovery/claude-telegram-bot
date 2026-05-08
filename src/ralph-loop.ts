@@ -288,6 +288,86 @@ function progressStateHash(args: {
   return ratchetSig + "||" + sigParts.join("|");
 }
 
+// ═══════════════════════════════════════════════════════════════
+// Phase R3.3 + R3.5 — Git workflow 자동화 (1인 사용자 + 단일 브랜치)
+// ═══════════════════════════════════════════════════════════════
+
+import { execSync } from "child_process";
+
+/**
+ * Phase R3.5 — 자동 commit/push 활성화 flag.
+ * default OFF (안전) — 호성님이 명시적으로 RALPH_AUTO_GIT=true 설정 시 활성.
+ * test 환경 / 의심스러운 환경에서 실제 repo 건드리는 사고 방지.
+ */
+const AUTO_GIT_ENABLED = process.env.RALPH_AUTO_GIT === "true";
+
+/** repo 디렉토리에서 git 명령 실행. 실패 시 null 반환 (사후 진단 용도, 비치명적). */
+function runGitInRepo(repo: string, args: string[]): string | null {
+  const cwd = REPO_PATHS[repo];
+  if (!cwd) return null;
+  try {
+    return execSync(`git ${args.map((a) => `'${a.replace(/'/g, "'\\''")}'`).join(" ")}`,
+      { cwd, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"], timeout: 30_000 }
+    ).toString();
+  } catch {
+    return null;
+  }
+}
+
+/** Phase R3.3 — git diff --stat 을 progress 에 기록 + responses/{itemId}-{N}.diff 에 full diff 저장. */
+function captureGitDiff(taskId: string, itemId: string, iter: number, repo: string): { hasChanges: boolean; statSummary: string } {
+  if (!repo || !AUTO_GIT_ENABLED) return { hasChanges: false, statSummary: "" };
+  const stat = runGitInRepo(repo, ["diff", "--stat"]) ?? "";
+  const status = runGitInRepo(repo, ["status", "--porcelain"]) ?? "";
+  const hasChanges = !!status.trim() || !!stat.trim();
+  if (!hasChanges) return { hasChanges: false, statSummary: "" };
+
+  // full diff 도 별도 파일로 저장 (사후 진단 용도)
+  try {
+    const fullDiff = runGitInRepo(repo, ["diff", "HEAD"]);
+    if (fullDiff) {
+      const dir = join(taskDir(taskId), "responses");
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, `${itemId}-${String(iter).padStart(3, "0")}.diff`), fullDiff);
+    }
+  } catch {}
+
+  // stat summary — 한 줄로 (마지막 line 이 보통 'X files changed')
+  const statLines = stat.trim().split("\n");
+  const statSummary = statLines.length > 0
+    ? statLines[statLines.length - 1] + (statLines.length > 1 ? ` (${statLines.length - 1} files)` : "")
+    : "";
+  return { hasChanges: true, statSummary };
+}
+
+/**
+ * Phase R3.5 — Option C Hybrid:
+ *   - 매 iter 끝에 ratchet 통과 + 변경 있으면 자동 commit (amend 금지, 항상 새 commit)
+ *   - item 완료 (passes=true) 시 자동 push origin dev-hs-rtx6000-new
+ *   - ratchet 실패 시 commit 안 함 (깨진 코드 push 차단)
+ */
+function autoCommit(repo: string, taskId: string, itemId: string, iter: number, summary: string): boolean {
+  if (!repo || !AUTO_GIT_ENABLED) return false;
+  const status = runGitInRepo(repo, ["status", "--porcelain"]);
+  if (!status || !status.trim()) return false; // 변경 없음
+
+  const botName = process.env.BOT_NAME || process.env.HOSTNAME || "ralph";
+  const safeSummary = summary.replace(/['"]/g, "").slice(0, 80) || "iteration progress";
+  const msg = `[${botName}] ralph #${taskId} iter ${iter} ${itemId}: ${safeSummary}`;
+
+  const addResult = runGitInRepo(repo, ["add", "-A"]);
+  if (addResult === null) return false;
+  const commitResult = runGitInRepo(repo, ["commit", "-m", msg]);
+  return commitResult !== null;
+}
+
+function autoPush(repo: string): boolean {
+  if (!repo || !AUTO_GIT_ENABLED) return false;
+  // 호성님 절대 규칙: dev-hs-rtx6000-new 브랜치만
+  const result = runGitInRepo(repo, ["push", "origin", "dev-hs-rtx6000-new"]);
+  return result !== null;
+}
+
 /**
  * Phase R2.1 — 매 iteration 의 raw response 를 압축과 무관하게 보존.
  *   tasks/{taskId}/responses/iter-{itemId}-{n}.txt
@@ -752,13 +832,36 @@ export async function runRalphLoop(
           await sendTg(prd.requestedBy, iterMsg);
         }
 
+        // Phase R3.3 — git diff --stat 자동 기록 (변경 가시성)
+        const diffInfo = captureGitDiff(taskId, item.id, item.iteration, prd.repo);
+        if (diffInfo.hasChanges) {
+          appendProgress(taskId, `GIT DIFF: ${diffInfo.statSummary}`);
+        }
+
+        // Phase R3.5 — Option C Hybrid: ratchet 통과 시 자동 commit (매 iter)
+        if (testResult.passed && diffInfo.hasChanges) {
+          const commitMsg = lastEvalFeedback?.nextFocus || evalResult.reason || item.description.slice(0, 80);
+          const committed = autoCommit(prd.repo, taskId, item.id, item.iteration, commitMsg);
+          appendProgress(taskId, committed ? `AUTO COMMIT: ${diffInfo.statSummary}` : `AUTO COMMIT 실패`);
+          if (committed) incr("ralph.auto_commit");
+        } else if (diffInfo.hasChanges && !testResult.passed) {
+          appendProgress(taskId, `COMMIT SKIPPED: ratchet 실패 (변경 있지만 커밋 안 함 — 깨진 코드 차단)`);
+        }
+
         if (evalResult.complete && testResult.passed) {
           item.passes = true;
           item.completedAt = Date.now();
           appendProgress(taskId, `ITEM DONE: ${item.id}`);
           incr("ralph.item.passed");
+
+          // Phase R3.5 — item 완료 시 push (rtx6000 동기화 의미 있는 단위)
+          const pushed = autoPush(prd.repo);
+          appendProgress(taskId, pushed ? `AUTO PUSH: dev-hs-rtx6000-new` : `AUTO PUSH 실패 (또는 변경 없음)`);
+          if (pushed) incr("ralph.auto_push");
+
           await sendTg(prd.requestedBy,
             `✅ Ralph #${taskId} — ${item.id} 완료 (iter ${item.iteration}): ${item.description.slice(0, 80)}`
+            + (pushed ? `\n📤 ${prd.repo} → dev-hs-rtx6000-new push 완료` : "")
           );
         } else if (!testResult.passed) {
           appendProgress(taskId, `TEST FAILED → next iteration will fix`);
@@ -826,6 +929,14 @@ function buildIterationPrompt(
   lastEvalFeedback?: EvalResult,
 ): string {
   const parts: string[] = [];
+
+  // Phase R3.2 — 매 iteration 시작 시 프로젝트 규칙 인지 강제 (절대 규칙 위반 방지)
+  parts.push(`## 작업 전 필수 확인 (READ FIRST)
+1. 작업 대상 레포의 \`CLAUDE.md\` 를 먼저 read — 호성님 절대 규칙 (ddl-auto=validate, port 3000 금지, bootJar 금지, dev-hs-rtx6000-new 브랜치만, craco 금지 등) 인지
+2. \`.claude/agents/\` 에 sub-agent 가이드가 있으면 read
+3. 기존 패턴 따르기 — 새 추상화/의존성 도입 전 grep 으로 기존 코드 검색
+4. 'as any' TypeScript 사용 지양 — 정확한 타입 작성
+5. 최소 변경 원칙 — 인접 코드 리팩토링 금지`);
 
   if (context) {
     parts.push(`## 이전 작업 진행 상황\n${context}`);
