@@ -216,14 +216,47 @@ function readContext(taskId: string): string {
  *   3. 공백/구두점 정규화 (한 글자로 압축)
  *   4. 첫 120 글자만 사용 (긴 사유는 앞부분이 핵심)
  */
+/**
+ * Phase R4.2 — keyword 기반 fingerprint.
+ *
+ * 호성님 사고 (3060 d9941d81) 분석:
+ *   evaluator reason 이 매번 표현 다름:
+ *     "원본 작업은 '플러터 갭 구현 반복'인데 실제 구현 단계에 진입하지 못함..."
+ *     "갭 분석·우선순위 결정은 완료했으나 플러터 실제 코드 수정이 전혀 없음..."
+ *     "B1(주주명부), B2(이사회의사록) 등 나머지 약 5개 이상의 항목이 여전히 미구현..."
+ *   → 첫 120자 정확 매칭 실패 → stuck 카운트 0 → 무한 iter
+ *
+ * 개선:
+ *   1. 한국어 단어 단위 split (공백/구두점)
+ *   2. 의미 약한 어미/조사/접속사 제거 (stop words)
+ *   3. 핵심 keyword 추출 후 정렬 → 표현 변동 흡수
+ *   4. 첫 N개 keyword 의 hash → 의미 비슷하면 동일 fingerprint
+ */
+const STOP_WORDS = new Set([
+  "이", "그", "저", "이것", "그것", "저것", "이런", "그런", "저런",
+  "은", "는", "이", "가", "을", "를", "에", "의", "와", "과", "로", "으로",
+  "있", "없", "것", "수", "더", "안", "또", "그리고", "그러나", "하지만", "그래서",
+  "원본", "작업", "현재", "이번", "다음", "여전히", "아직",
+  "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+  "to", "of", "in", "on", "at", "by", "for", "with", "as",
+  "and", "or", "but", "if", "then", "so", "not", "no", "yes",
+]);
+
 function reasonFingerprint(reason: string): string {
   if (!reason) return "";
-  return reason
+  // 1. 정규화: lowercase + 숫자/퍼센트/구두점 제거
+  const cleaned = reason
     .toLowerCase()
-    .replace(/[\d.%]+/g, "") // 숫자/퍼센트/소수점 제거
-    .replace(/[\s,.\-—!?:;()'"`]+/g, " ") // 구두점 → 공백
-    .trim()
-    .slice(0, 120);
+    .replace(/[\d.%]+/g, " ")
+    .replace(/[,.\-—!?:;()'"`·•/_\[\]{}<>「」『』]+/g, " ");
+  // 2. 단어 split + stop word 제거 + 1글자 단어 제거 (한국어 1글자 keyword 거의 무의미)
+  const tokens = cleaned
+    .split(/\s+/)
+    .map((t) => t.trim())
+    .filter((t) => t.length >= 2 && !STOP_WORDS.has(t));
+  // 3. 정렬 후 첫 N개 — 표현 순서 변동 흡수
+  const top = Array.from(new Set(tokens)).sort().slice(0, 8);
+  return top.join("|");
 }
 
 /**
@@ -241,7 +274,12 @@ function looksTruncatedKo(text: string): boolean {
   // 종결 부호 (마침표/물음표/느낌표) 로 끝나면 정상 종결 → truncation 아님.
   if (/[.!?。？！]\s*$/.test(tail)) return false;
   // 마침표 없이 미완 종결로 갑자기 끝나는 경우만 truncation 후보:
-  if (/(?:겠습니다|할게요|해드릴게요|진행하겠|수정하겠|작성하겠|확인하겠|검토하겠|이어서|계속해서|다음에)\s*$/.test(tail)) {
+  if (/(?:겠습니다|할게요|해드릴게요|진행하겠|수정하겠|작성하겠|확인하겠|검토하겠|이어가겠|이어서|계속해서|다음에)\s*$/.test(tail)) {
+    return true;
+  }
+  // Phase R4.3 — 호성님 d9941d81 사고 데이터 기반 추가 패턴 (마침표 없는 작업 보고 끝):
+  //   "다음 우선순위", "순차 진행", "구현 진행", "ITERATION X 시작", "확인 후 ...", 등
+  if (/(?:다음\s*(?:우선순위|항목|단계|작업)|순차\s*(?:진행|구현)|구현\s*진행|작업\s*진행|확인\s*후|분석\s*후|ITERATION\s*\d+\s*시작)/i.test(tail)) {
     return true;
   }
   return false;
@@ -529,10 +567,19 @@ ${originalPrompt}${repoInfo}
   const parsed = JSON.parse(match[0]);
   if (!Array.isArray(parsed) || !parsed.length) throw new Error("planSubGoals: 빈 결과");
 
-  return parsed.map((g: any) => ({
-    description: String(g.description || "").slice(0, 500),
-    maxIterations: Math.min(40, Math.max(5, parseInt(g.maxIterations) || MAX_ITERATIONS)),
-  }));
+  return parsed.map((g: any) => {
+    const description = String(g.description || "").slice(0, 500);
+    let maxIterations = Math.min(40, Math.max(5, parseInt(g.maxIterations) || MAX_ITERATIONS));
+    // Phase R4.4 — 보고서/분석/문서 류 task 의 maxIter 자동 cap (호성님 d9941d81 사고 패턴 차단)
+    //   응답 truncation 으로 무한 iter 가능성이 큰 task 를 미리 5회로 제한.
+    //   출력이 짧지 않은 task 는 plan 단계에서 파일 저장 형태로 분해되어야 함 (R2.4 prompt 보강 참조).
+    const isReportLike = /보고서|분석|문서|리포트|요약|정리|점검|검토|체크|review|report|analysis|summary|audit/i.test(description);
+    if (isReportLike && maxIterations > 5) {
+      console.log(`[planSubGoals] report-like task → maxIter ${maxIterations} → 5: ${description.slice(0, 60)}`);
+      maxIterations = 5;
+    }
+    return { description, maxIterations };
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -999,6 +1046,49 @@ function buildIterationPrompt(
 // ═══════════════════════════════════════════════════════════════
 
 /**
+ * Phase R4.1 (W1) — Claude CLI 인증 상태 사전 검증.
+ *
+ * lawbotss-mm / macmini 같은 봇이 'Not logged in · Please run /login' 응답으로
+ * 무한 stuck 되는 사고를 ralph 시작 전 단계에서 차단.
+ *
+ * 검증 방식: askClaudeLight("__ping__") — 빈 ping 메시지. 응답에 "Not logged in" 또는
+ * "Please run /login" 또는 "auth" 류 에러 메시지 포함되면 인증 만료로 판단.
+ * 정상 응답이면 (어떤 텍스트든) 인증 OK.
+ *
+ * 반환: { ok: true } | { ok: false; reason: string }
+ */
+async function verifyClaudeAuth(): Promise<{ ok: true } | { ok: false; reason: string }> {
+  try {
+    const reply = await askClaudeLight("ping (one-word reply: pong)", { timeoutMs: 15_000 });
+    const lower = reply.toLowerCase();
+    // 인증 관련 에러 텍스트 패턴 — 실제 호성님 사고에서 발견된 메시지 + 일반 OAuth 에러
+    const authFailPatterns = [
+      "not logged in",
+      "please run /login",
+      "claude login",
+      "no api key",
+      "authentication required",
+      "auth failed",
+      "unauthorized",
+    ];
+    for (const p of authFailPatterns) {
+      if (lower.includes(p)) {
+        return { ok: false, reason: `Claude CLI 인증 실패: '${reply.slice(0, 100)}'. 봇 접속 후 'claude login' 실행 필요.` };
+      }
+    }
+    return { ok: true };
+  } catch (e: any) {
+    const msg = (e?.message || String(e)).toLowerCase();
+    // exit code 1 + 'not logged in' / 'please run /login' 류 stderr 도 검출
+    if (/not logged in|please run|auth|unauthorized|api key/i.test(msg)) {
+      return { ok: false, reason: `Claude CLI 인증 실패: ${e?.message?.slice(0, 100)}. 'claude login' 실행 필요.` };
+    }
+    // 다른 에러는 일시적일 수 있으니 인증 문제로 간주하지 않음 (false positive 방지)
+    return { ok: true };
+  }
+}
+
+/**
  * Phase R0.4 — plan 승인 gate + 자동 시작 정책.
  *
  * autoStart=true (legacy 호환, default) → 기존처럼 즉시 백그라운드 실행
@@ -1012,9 +1102,20 @@ export async function startRalphTask(params: {
   sendTg: SendTelegramFn;
   autoStart?: boolean; // default true (기존 동작 유지)
   maxWallclockSec?: number;
-}): Promise<{ taskId: string; planText: string; autoStart: boolean }> {
+}): Promise<{ taskId: string; planText: string; autoStart: boolean; authError?: string }> {
   const repo = params.repo || "";
   const autoStart = params.autoStart !== false;
+
+  // Phase R4.1 (W1) — Claude CLI 인증 사전 검증
+  const auth = await verifyClaudeAuth();
+  if (!auth.ok) {
+    return {
+      taskId: "",
+      planText: "",
+      autoStart: false,
+      authError: auth.reason,
+    };
+  }
 
   // 작업을 서브목표로 분해 (실패하면 단일 아이템으로 폴백)
   let items: Array<{ description: string; maxIterations: number }>;
@@ -1052,6 +1153,30 @@ export async function startRalphTask(params: {
 }
 
 /**
+ * Phase R4.5 — 종료 사유 분류 (사용자가 한 눈에 파악).
+ * runRalphLoop result.error + prd.items 의 error 패턴 → 사람이 읽기 쉬운 분류.
+ */
+function classifyEndReason(prd: TaskPRD | null, resultError?: string): string {
+  if (!prd) return "?";
+  if (prd.status === "completed") return "✅ 모든 item 통과";
+  if (resultError === "stopped") return "⏹ 사용자 중단";
+  if (resultError === "wallclock exceeded") return "⏰ 시간 한도 (2h) 초과";
+  if (resultError === "resumption burst") return "🌀 봇 재시작 루프";
+  if (resultError === "budget exceeded") return "💰 예산 초과";
+
+  // item 별 error 패턴 분석
+  const errors = prd.items.map((i) => i.error || "").filter(Boolean);
+  if (!errors.length) return "❌ 알 수 없음";
+
+  if (errors.some((e) => /truncat|max_tokens/i.test(e))) return "✂️ 응답 잘림 (truncation)";
+  if (errors.some((e) => /invariant stuck/i.test(e))) return "🧱 진척 없음 (state-hash invariant)";
+  if (errors.some((e) => /stuck:/i.test(e))) return "🔁 동일 사유 반복 stuck";
+  if (errors.some((e) => /max iterations/i.test(e))) return "🔢 최대 반복 초과";
+  if (errors.some((e) => /auth|login|api[_ ]?key/i.test(e))) return "🔐 Claude CLI 인증 실패";
+  return `❌ ${errors[0]?.slice(0, 60) || "기타"}`;
+}
+
+/**
  * 승인된 task 의 백그라운드 루프 실행 — startRalphTask 와 /ralph go 모두 사용.
  */
 export function startBackgroundLoop(
@@ -1067,18 +1192,29 @@ export function startBackgroundLoop(
   (async () => {
     try {
       const result = await runRalphLoop(taskId, askClaude, sendTg);
-      const elapsed = Math.round(((loadPRD(taskId)?.completedAt || Date.now()) - createdAt) / 1000);
+      const finalPrd = loadPRD(taskId);
+      const elapsed = Math.round(((finalPrd?.completedAt || Date.now()) - createdAt) / 1000);
+      const passedCount = finalPrd?.items.filter((i) => i.passes).length ?? 0;
+      const totalCount = finalPrd?.items.length ?? 0;
+      // Phase R4.5 — 종료 사유 분류 표시
+      const reason = classifyEndReason(finalPrd, result.error);
+
       if (result.completed) {
         await sendTg(
           requestedBy,
-          `🎉 Ralph #${taskId} 전체 완료!\n⏱ ${elapsed}s | ${result.totalIterations} iterations`,
+          `🎉 Ralph #${taskId} 전체 완료!\n` +
+          `⏱ ${elapsed}s | ${result.totalIterations} iter | items ${passedCount}/${totalCount}\n` +
+          `결과: ${reason}`,
         );
       } else if (result.error === "stopped") {
         // 사용자 요청 중단은 별도 알림 이미 발송됨
       } else {
         await sendTg(
           requestedBy,
-          `❌ Ralph #${taskId} 미완료\n⏱ ${elapsed}s | ${result.totalIterations} iterations\n사유: ${result.error || "일부 아이템 실패"}\n/ralph status ${taskId}`,
+          `❌ Ralph #${taskId} 미완료\n` +
+          `⏱ ${elapsed}s | ${result.totalIterations} iter | items ${passedCount}/${totalCount}\n` +
+          `사유: ${reason}\n` +
+          `/ralph status ${taskId}`,
         );
       }
     } catch (e: any) {

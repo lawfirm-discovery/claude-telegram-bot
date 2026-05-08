@@ -431,6 +431,10 @@ bot.command("ralph", async (ctx) => {
       sendTg,
       autoStart: false, // ← Phase R0.4: 승인 대기
     });
+    if (result.authError) {
+      await ctx.reply(`🔐 <b>Claude CLI 인증 만료</b>\n\n${escapeHtml(result.authError)}`, { parse_mode: "HTML" });
+      return;
+    }
     await ctx.reply(
       `📋 <b>Ralph #${result.taskId} 계획 수립 완료</b>\n\n` +
       `${escapeHtml(result.planText)}\n\n` +
@@ -468,6 +472,10 @@ bot.command("ralph_now", async (ctx) => {
       sendTg,
       autoStart: true,
     });
+    if (result.authError) {
+      await ctx.reply(`🔐 <b>Claude CLI 인증 만료</b>\n\n${escapeHtml(result.authError)}`, { parse_mode: "HTML" });
+      return;
+    }
     await ctx.reply(
       `✅ <b>Ralph #${result.taskId} 시작</b>\n\n` +
       `📋 <b>계획:</b>\n${escapeHtml(result.planText)}\n\n` +
