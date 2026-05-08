@@ -1,110 +1,120 @@
 # 속기사(Court Reporter) ERP 핵심 기능 검증
 
-> 최종 업데이트: 2026-05-08
-> 검증 방법: 코드 레벨 분석 (Spring API 502로 라이브 테스트 불가)
+> 최종 업데이트: 2026-05-08 (Iteration 2)
+> 검증 방법: 코드 레벨 정적분석 + Spring API 라이브 테스트 (200 OK 복구)
 
 ---
 
-## 검증 범위
+## 검증 환경
 
-| 기능 | 프론트엔드 | 백엔드 | 상태 |
-|------|-----------|--------|------|
-| 작업 생성 (CREATE) | CourtReporterJobCreateDialog.tsx | CourtReporterJobService:174-200 | 동작 확인 (이슈 6건) |
-| 작업 조회 (LIST) | CourtReporterWorkListPage.tsx | CourtReporterJobController:44-60 | 동작 확인 (이슈 1건) |
-| 필터링 (FILTER) | WorkListPage 탭/검색 | Repository nativeQuery | 동작 확인 (이슈 1건) |
-| 상태 변경 (UPDATE/status) | JobDetailDialog:230 | Service:224 | 동작 확인 |
-| 정보 수정 (UPDATE/info) | JobDetailDialog:310-315 | Service:153-155 | 동작 확인 (이슈 1건) |
-| 메모 수정 (UPDATE/memo) | JobDetailDialog:684 | Service:250 | 동작 확인 |
-| 수수료 수정 (UPDATE/fee) | JobDetailDialog:287-294 | Service:260-276 | 동작 확인 (이슈 1건) |
-| 속기록 수정 (UPDATE/transcript) | JobDetailDialog:241,262 | Service:373-386 | 동작 확인 (이슈 1건) |
-| 작업 삭제 (DELETE) | WorkListPage:279 | Service:527 | 동작 확인 (이슈 1건) |
+| 항목 | 상태 |
+|------|------|
+| 프론트엔드 서버 | https://100.108.86.92:3011 — **200 OK** |
+| Spring API | https://100.108.86.92:3011/api — **200 OK** (복구됨) |
+| 인증 보호 | 모든 엔드포인트 401 반환 확인 (공개 추적 제외) |
+| 공개 추적 API | 404 + 정확한 에러 메시지 반환 확인 |
+| 프론트엔드 라우트 | 5개 모두 200 OK (dashboard/work/schedule/fee/tracking) |
+
+### 라이브 테스트 결과
+
+| 엔드포인트 | 메서드 | 인증없이 | 예상 | 실제 |
+|-----------|--------|---------|------|------|
+| `/api/court-reporter/jobs` | GET | 401 | 401 | **PASS** |
+| `/api/court-reporter/jobs/stats` | GET | 401 | 401 | **PASS** |
+| `/api/court-reporter/jobs` | POST | 401 | 401 | **PASS** |
+| `/api/court-reporter/jobs/1` | DELETE | 401 | 401 | **PASS** |
+| `/api/court-reporter/jobs/public/tracking/ABCDEF123456` | GET | 404 | 404 | **PASS** |
+| `/api/court-reporter/jobs/public/tracking/` | GET | 404 | 404 | **PASS** |
+
+---
+
+## 검증 범위 총괄
+
+| 기능 | 프론트엔드 | 백엔드 | API 라이브 | 판정 |
+|------|-----------|--------|-----------|------|
+| 작업 생성 (CREATE) | CourtReporterJobCreateDialog.tsx | Service:174-200 | 인증보호 확인 | **PASS** (이슈 6건) |
+| 작업 조회 (LIST) | CourtReporterWorkListPage.tsx | Controller:44-60 | 인증보호 확인 | **PASS** (이슈 1건) |
+| 필터링 (FILTER) | WorkListPage 탭/검색 | Repository nativeQuery | 코드검증 | **PASS** (이슈 1건) |
+| 상태 변경 (UPDATE/status) | JobDetailDialog | Service:213-240 | 코드검증 | **PASS** |
+| 정보 수정 (UPDATE/info) | JobDetailDialog | Service:143-170 | 코드검증 | **PASS** (이슈 1건) |
+| 메모 수정 (UPDATE/memo) | JobDetailDialog | Service:244-252 | 코드검증 | **PASS** |
+| 수수료 수정 (UPDATE/fee) | JobDetailDialog + FeePage | Service:256-280 | 코드검증 | **PASS** (이슈 1건) |
+| 속기록 수정 (UPDATE/transcript) | TranscriptStudio | Service:361-405 | 코드검증 | **PASS** (이슈 1건) |
+| 파일 업로드 | JobDetailDialog | Service:284-309 | 코드검증 | **PASS** |
+| STT 트리거 | JobDetailDialog | Service:541-565 | 코드검증 | **PASS** |
+| 최종파일 등록/발송 | JobDetailDialog | Service:409-480 | 코드검증 | **PASS** |
+| 공개 추적 | TrackingPage | Service:484-500 | **라이브 404 확인** | **PASS** |
+| 작업 삭제 (DELETE) | WorkListPage | Service:526-537 | 인증보호 확인 | **PASS** (이슈 1건) |
+| 통계 조회 | DashboardPage | Service:504-522 | 인증보호 확인 | **PASS** |
 
 ---
 
 ## 1. 작업 생성 (CREATE)
 
-### 프론트엔드: CourtReporterJobCreateDialog.tsx
+### API: `POST /api/court-reporter/jobs`
 
-**수집 필드:**
-- title (필수), eventType (선택: 법정속기/회의속기/영상속기/인터뷰속기/기타)
-- priority (NORMAL/HIGH/URGENT, 기본 NORMAL)
-- eventDate (선택, datetime-local), durationMinutes (선택, 정수)
-- location (선택), clientName/clientPhone/clientEmail (선택)
-- memo (선택, 멀티라인)
+**프론트엔드 (CourtReporterJobCreateDialog.tsx)**
+- 필수: title (trim 후 blank 검사)
+- 선택: eventType (5종 드롭다운), priority (3종), eventDate, durationMinutes (1-1440), location, client 정보, memo
+- 검증: title 필수, durationMinutes 범위, eventDate 파싱
 
-**프론트엔드 검증 (handleSubmit:64-90):**
-- title: 비어있으면 거부 (trim 후 검사)
-- eventDate: 입력 시 Date 파싱 유효성 확인
-- durationMinutes: 입력 시 정수 > 0, <= 1440 (24시간)
-- 이메일/전화번호 형식 검증 없음
+**백엔드 (Service:174-200)**
+- title blank 불가, durationMinutes 1-1440
+- priority null → "NORMAL" 기본값
+- trackingCode 12자 SecureRandom 자동생성 (유니크 보장, 최대 20회 재시도)
+- status="PENDING", feeStatus 미설정(null)
 
-**성공 동작:** 폼 초기화 + onCreated() 콜백 호출 (부모 컴포넌트가 목록 갱신)
-**에러 처리:** axios 에러 메시지 추출, 실패 시 "생성 실패" Alert 표시
+### 이슈
 
-### 백엔드: CourtReporterJobService:174-200
-
-**검증:**
-- title: blank 불가 (IllegalArgumentException)
-- durationMinutes: 입력 시 1-1440 범위
-
-**처리:**
-- priority null이면 "NORMAL" 기본값 설정
-- 12자 영숫자 trackingCode 자동 생성
-- 상태 PENDING으로 초기화
-
-### 발견된 이슈
-
-| # | 이슈 | 심각도 | 위치 |
-|---|------|--------|------|
-| C1 | priority 백엔드 enum 검증 없음 (프론트만 제한) | 중 | Service:195 |
-| C2 | clientEmail/clientPhone 형식 검증 없음 (양쪽 모두) | 중 | Dialog:64-90, Service:174-200 |
-| C3 | eventType 백엔드 화이트리스트 없음 (임의 문자열 저장 가능) | 낮 | Service:190 |
-| C4 | clientName/Phone/Email 백엔드 trim 누락 (PATCH에서는 trim 있음) | 낮 | Service:174-200 vs 161-163 |
-| C5 | clientEmail null 허용 → 나중에 최종파일 발송 시 에러 발생 지연 | 중 | Service:441-444 |
-| C6 | durationMinutes 프론트에서 string→number 변환 시 fragile | 낮 | Dialog:79 |
+| # | 이슈 | 심각도 |
+|---|------|--------|
+| C1 | priority 백엔드 enum 검증 없음 (프론트만 제한) | 중 |
+| C2 | clientEmail/clientPhone 형식 검증 없음 | 중 |
+| C3 | eventType 백엔드 화이트리스트 없음 | 낮 |
+| C4 | clientName/Phone/Email 백엔드 trim 누락 (PATCH에서는 있음) | 낮 |
+| C5 | clientEmail null → 최종파일 발송 시 에러 지연 발생 | 중 |
+| C6 | durationMinutes string→number 변환 fragile | 낮 |
 
 ---
 
 ## 2. 작업 조회 및 필터링 (LIST/FILTER)
 
-### 프론트엔드: CourtReporterWorkListPage.tsx
+### API: `GET /api/court-reporter/jobs[?status=&search=&page=&size=&startDate=&endDate=]`
 
-**필터 파라미터:**
-- status: 6개 탭 (PENDING, IN_PROGRESS, COMPLETED, DELIVERED, CANCELLED, 전체)
-- search: 300ms 디바운스 적용
-- 뷰 모드: list, stt (STT 처리), edit (편집 대기)
-- 페이지 크기: 30 (CR_CONFIG.PAGE_SIZE)
+**프론트엔드 (WorkListPage.tsx)**
+- 6개 상태 탭 + 3개 뷰 모드(list/stt/edit)
+- search: 300ms 디바운스, 필터 변경 시 page 0 리셋
+- 페이지네이션: CR_CONFIG.PAGE_SIZE=30, MUI Pagination
 
-**페이지네이션:**
-- MUI Pagination: 1-based 표시 / 0-based 내부 저장 (정확)
-- totalPages > 1일 때만 표시
-- 필터 변경 시 pageNum 0으로 리셋 (useEffect:233)
+**백엔드 (Repository nativeQuery)**
+- 검색: title, client_name, client_phone, tracking_code (LIKE, 대소문자 무관)
+- 날짜: event_date 범위 (startDate/endDate)
+- 정렬: created_at DESC (고정)
+- 페이지: page >= 0, size 1-200 클램핑
 
-### 백엔드: CourtReporterJobController:44-60, Repository:20-62
+### 이슈
 
-**쿼리 파라미터:** status, search, page, size, startDate, endDate
-**검색 대상:** title, client_name, client_phone, tracking_code (대소문자 무관)
-**정렬:** created_at DESC (고정)
-**페이지네이션 안전장치:** page >= 0, size 1-200 범위 클램핑
-
-### 발견된 이슈
-
-| # | 이슈 | 심각도 | 위치 |
-|---|------|--------|------|
-| L1 | 날짜 범위 필터: 백엔드 구현됨, 프론트엔드에서 미전송 | 중 | WorkListPage:211-213 |
+| # | 이슈 | 심각도 |
+|---|------|--------|
+| L1 | 날짜 범위 필터: 백엔드 구현됨, WorkListPage에서 미전송 (SchedulePage/FeePage에서는 사용) | 중 |
 
 ---
 
 ## 3. 상태 변경 (UPDATE/status)
 
-### 동작 흐름
-- UI: "상태 변경" 섹션의 Chip 버튼 클릭 (JobDetailDialog:587)
-- Payload: `{ status: string }`
-- 백엔드: VALID_STATUSES 배열로 검증 (Service:224)
-- 성공: Toast 표시, 목록 갱신
+### API: `PATCH /api/court-reporter/jobs/{jobId}/status`
 
-### 상태값
-PENDING → IN_PROGRESS → COMPLETED → DELIVERED / CANCELLED
+**상태 전이 규칙 (Service:213-220)**
+```
+PENDING     → {IN_PROGRESS, CANCELLED}
+IN_PROGRESS → {COMPLETED, CANCELLED}
+COMPLETED   → {DELIVERED, IN_PROGRESS, CANCELLED}
+DELIVERED   → {COMPLETED}
+CANCELLED   → {PENDING}
+```
+
+- 무효 전이 시 409 CONFLICT 반환
+- 소유권(courtReporterId) 검증 → 404 NOT_FOUND
 
 **이슈 없음.** 정상 구현.
 
@@ -112,27 +122,29 @@ PENDING → IN_PROGRESS → COMPLETED → DELIVERED / CANCELLED
 
 ## 4. 정보 수정 (UPDATE/info)
 
-### 동작 흐름
-- UI: "기본 정보" 섹션의 편집 아이콘 클릭 → 인라인 폼 표시 (JobDetailDialog:601)
-- Payload: title, priority, clientName/Phone/Email, eventType, eventDate, durationMinutes, location
-- 프론트엔드 검증: title 필수, durationMinutes 1-1440
-- 백엔드 검증: 동일 + priority enum 체크 (Service:153-155)
+### API: `PATCH /api/court-reporter/jobs/{jobId}/info`
 
-### 발견된 이슈
+**백엔드 (Service:143-170)**
+- title: trim 후 blank 불가
+- durationMinutes: 1-1440 범위
+- priority: VALID_PRIORITIES {NORMAL, HIGH, URGENT} 검증
+- 나머지: null이 아닌 필드만 업데이트 (partial update)
+- clientName/Phone/Email/location: trim 처리 + blank → null 변환
 
-| # | 이슈 | 심각도 | 위치 |
-|---|------|--------|------|
-| U1 | 취소 시 폼 상태 미초기화 (stale values) | 낮 | JobDetailDialog:610 |
+### 이슈
+
+| # | 이슈 | 심각도 |
+|---|------|--------|
+| U1 | 취소 시 폼 상태 미초기화 (stale values) | 낮 |
 
 ---
 
 ## 5. 메모 수정 (UPDATE/memo)
 
-### 동작 흐름
-- UI: 메모 섹션 인라인 편집 (JobDetailDialog:684)
-- Payload: `{ memo: string }`
-- 백엔드: trim 처리 (Service:250)
-- 길이 제한 없음 (의도적으로 보임)
+### API: `PATCH /api/court-reporter/jobs/{jobId}/memo`
+
+- 백엔드: trim 처리, blank → null 변환
+- 길이 제한 없음 (의도적)
 
 **이슈 없음.** 정상 구현.
 
@@ -140,81 +152,154 @@ PENDING → IN_PROGRESS → COMPLETED → DELIVERED / CANCELLED
 
 ## 6. 수수료 수정 (UPDATE/fee)
 
-### 동작 흐름
-- UI: "수수료 현황" 편집 버튼 (JobDetailDialog:943)
-- Payload: `{ feeAmount: number|null, feeStatus, feeNote }`
-- 프론트엔드: feeAmount >= 0, <= 999,999,999 (lines 287-294)
-- 백엔드: BigDecimal 검증 + VALID_FEE_STATUSES 체크 (Service:260-265)
-- 상태 전이 시 feeBilledAt/feePaidAt 자동 타임스탬프 (Service:273-276)
+### API: `PATCH /api/court-reporter/jobs/{jobId}/fee`
 
-### 발견된 이슈
+**백엔드 (Service:256-280)**
+- feeAmount: BigDecimal >= 0 (음수 불가)
+- feeStatus: {PENDING, BILLED, PAID, CANCELLED} enum 검증
+- 자동 타임스탬프: BILLED 최초 전환 → feeBilledAt, PAID 최초 전환 → feePaidAt (Asia/Seoul)
 
-| # | 이슈 | 심각도 | 위치 |
-|---|------|--------|------|
-| F1 | 동시 수정 보호 없음 (optimistic locking 부재) | 중 | Service:260-276 |
+**프론트엔드 (FeePage.tsx)**
+- FEE_VALID_TRANSITIONS: PENDING→{BILLED,CANCELLED}, BILLED→{PAID,PENDING,CANCELLED}, PAID→{} (terminal), CANCELLED→{PENDING}
+- Optimistic UI update with rollback
+
+### 이슈
+
+| # | 이슈 | 심각도 |
+|---|------|--------|
+| F1 | 동시 수정 보호 없음 (optimistic locking 부재) | 중 |
 
 ---
 
 ## 7. 속기록 수정 (UPDATE/transcript)
 
-### 동작 흐름
-- UI: 속기록 행의 편집 버튼 (JobDetailDialog:797) 또는 "최종 확정" 버튼 (line 786)
-- Payload: `{ transcriptionEdited: string }` 또는 `{ isFinal: true }`
-- 백엔드: isFinal=true인 속기록은 수정 거부 (Service:373-379)
-- V7Json 처리: 평문 수정 시 V7Json 리셋 (Service:384-386)
-- 최종 확정 시 confirmation 다이얼로그 표시
+### API: `PATCH /api/court-reporter/jobs/transcripts/{transcriptId}`
 
-### 발견된 이슈
+**백엔드 (Service:361-405)**
+- isFinal=true인 속기록은 내용 수정 거부 (409 CONFLICT)
+- isFinal=true인 속기록의 isFinal 해제도 거부
+- 평문 수정 시 V7Json null로 리셋 (재생성 유도)
+- V7Json 최대 5MB (Controller:214-215)
+- 최종 확정 시 모든 파일 STT COMPLETED이면 job 자동 COMPLETED 전환
 
-| # | 이슈 | 심각도 | 위치 |
-|---|------|--------|------|
-| T1 | 버전 잠금 없음 — 동시 편집 시 last-write-wins | 높 | TranscriptRepository (optimistic locking 부재) |
+### 이슈
+
+| # | 이슈 | 심각도 |
+|---|------|--------|
+| T1 | 버전 잠금 없음 — 동시 편집 시 last-write-wins | 높 |
 
 ---
 
-## 8. 작업 삭제 (DELETE)
+## 8. 파일 업로드 및 STT
 
-### 동작 흐름
-- UI: "작업 삭제" 버튼 (JobDetailDialog:1035)
-- 확인: confirmDialog danger=true — "관련 파일과 속기록도 모두 삭제됩니다" (WorkListPage:280)
-- 백엔드 처리 순서 (Service:527):
-  1. job 조회 (reporterId 소유권 확인)
-  2. transcripts 삭제
-  3. files 삭제
-  4. finalFiles 삭제
-  5. job 삭제
+### API: `POST /api/court-reporter/jobs/{jobId}/files` + `POST /files/{fileId}/stt/trigger`
 
-### 발견된 이슈
+**파일 등록 (Service:284-309)**
+- ldriveFileId 필수 (LDrive 업로드 후 UUID 전달)
+- fileType: {AUDIO, VIDEO, DOCUMENT} (기본 AUDIO)
+- sttStatus: PENDING으로 초기화
 
-| # | 이슈 | 심각도 | 위치 |
-|---|------|--------|------|
-| D1 | 감사 로그/소프트 삭제 없음 — 완전 삭제만 가능 | 중 | Service:527 |
+**STT 트리거 (Service:541-565)**
+- PROCESSING 중이면 409 CONFLICT
+- 최대 3회 시도 (초과 시 429 TOO_MANY_REQUESTS)
+- 비동기 처리: FastAPI `/transcription/transcribe-audio` 호출, 10분 타임아웃
+- 완료 시 자동으로 transcript 엔티티 생성 (버전 자동 증분)
+- 실패 시 sttStatus → FAILED
+
+**이슈 없음.** 정상 구현.
+
+---
+
+## 9. 최종파일 등록/발송
+
+### API: `POST /jobs/{jobId}/final-files` + `POST /jobs/{jobId}/final-files/{fileId}/send`
+
+**등록 (Service:409-426)**
+- originalName 필수 (Controller:239-240)
+- ldriveFileId로 LDrive 파일 참조
+
+**발송 (Service:430-480)**
+- clientEmail 없으면 400 BAD_REQUEST
+- 이메일: "[리걸몬스터] 속기록 납품 안내 - {title}" + 추적 링크
+- sentAt 타임스탬프 설정 (파일 + job 양쪽)
+- 이메일 실패 시 500 + 로그
+
+**이슈 없음.** 정상 구현.
+
+---
+
+## 10. 공개 추적 (라이브 테스트 완료)
+
+### API: `GET /api/court-reporter/jobs/public/tracking/{trackingCode}`
+
+**라이브 테스트 결과:**
+- 존재하지 않는 코드 → 404 + `{"error":"Not Found","message":"존재하지 않는 추적코드입니다."}`
+- 빈 코드 → 404 (라우트 매칭 실패)
+- 인증 불필요 (확인됨)
+
+**응답 구조 (코드분석):**
+trackingCode, title, eventType, eventDate, location, status, hasFinalFile, updatedAt
+
+**이슈 없음.** 정상 구현.
+
+---
+
+## 11. 작업 삭제 (DELETE)
+
+### API: `DELETE /api/court-reporter/jobs/{jobId}`
+
+**백엔드 (Service:526-537)**
+- 소유권 확인 (courtReporterId)
+- 캐스케이드 삭제 순서: transcripts → files → finalFiles → job
+
+### 이슈
+
+| # | 이슈 | 심각도 |
+|---|------|--------|
+| D1 | 감사 로그/소프트 삭제 없음 — 완전 삭제만 가능 | 중 |
 
 ---
 
 ## 전체 이슈 요약
 
-| 심각도 | 건수 | 상세 |
-|--------|------|------|
+| 심각도 | 건수 | 이슈 ID |
+|--------|------|---------|
 | 높 (High) | 1 | T1: 속기록 동시 편집 race condition |
-| 중 (Medium) | 6 | C1(priority), C2(이메일형식), C5(이메일null), L1(날짜필터), F1(수수료동시수정), D1(감사로그) |
+| 중 (Medium) | 6 | C1(priority), C2(이메일형식), C5(이메일null지연), L1(날짜필터), F1(수수료동시수정), D1(감사로그) |
 | 낮 (Low) | 4 | C3(eventType), C4(trim), C6(타입변환), U1(폼초기화) |
 
-### 권장 개선 사항 (우선순위순)
+### 권장 개선 (우선순위)
 
-1. **T1 (높)**: 속기록에 `@Version` 필드 추가하여 optimistic locking 적용
-2. **C2 (중)**: clientEmail에 최소한의 형식 검증 추가 (@ 포함 여부)
-3. **L1 (중)**: 프론트엔드에 날짜 범위 필터 UI 추가 (백엔드 이미 구현됨)
-4. **C5 (중)**: 최종파일 발송 시 clientEmail 없으면 사전 경고 표시
-5. **D1 (중)**: soft delete (deletedAt 컬럼) 도입 검토
+1. **T1**: `@Version` 필드로 optimistic locking 적용
+2. **C2/C5**: clientEmail 형식 검증 + 최종파일 UI에서 이메일 미등록 경고
+3. **L1**: WorkListPage에 날짜 범위 필터 UI 추가 (백엔드 이미 구현됨)
+4. **D1**: soft delete (deletedAt) 도입 검토
 
 ---
 
-## 검증 환경
+## 검증 대상 파일
 
-- **프론트엔드 서버**: https://100.108.86.92:3011 (200 OK)
-- **Spring API**: 502 Bad Gateway (서비스 다운 상태)
-- **검증 방법**: 프론트엔드/백엔드 소스코드 정적 분석
-- **검증 대상 파일**:
-  - FE: `lemon-front/src/erp/pages/CourtReporter/` (페이지 5개 + 컴포넌트 8개)
-  - BE: `lemon-api-server-spring/.../courtreporter/` (Controller 1개 + Service 1개 + Entity 4개)
+**프론트엔드 (`lemon-front/src/erp/pages/CourtReporter/`)**
+| 파일 | 용도 |
+|------|------|
+| CourtReporterDashboardPage.tsx | 대시보드 (통계+최근작업+오늘일정) |
+| CourtReporterWorkListPage.tsx | 작업 목록 (list/stt/edit 3뷰) |
+| CourtReporterSchedulePage.tsx | 캘린더 일정 관리 |
+| CourtReporterFeePage.tsx | 수수료 관리 (필터+CSV) |
+| CourtReporterTrackingPage.tsx | 공개 추적 페이지 |
+| components/CourtReporterJobCreateDialog.tsx | 작업 생성 다이얼로그 |
+| components/CourtReporterJobDetailDialog.tsx | 작업 상세 (4탭: 파일/속기록/최종본/수수료) |
+| components/CourtReporterTranscriptStudio.tsx | 속기록 편집 스튜디오 (block/canvas/sebulsik) |
+| courtReporterConstants.ts | API 엔드포인트/설정 상수 |
+
+**백엔드 (`lemon-api-server-spring/.../courtreporter/`)**
+| 파일 | 용도 |
+|------|------|
+| CourtReporterJobController.java (291줄) | REST 컨트롤러 (16 엔드포인트) |
+| CourtReporterJobService.java (641줄) | 비즈니스 로직 + STT 비동기 |
+| CourtReporterJobEntity.java | 작업 엔티티 (erp_court_reporter_jobs) |
+| CourtReporterTranscriptEntity.java | 속기록 엔티티 |
+| CourtReporterJobFileEntity.java | 작업 파일 엔티티 |
+| CourtReporterFinalFileEntity.java | 최종 납품 파일 엔티티 |
+| CourtReporterJobRepository.java (73줄) | 네이티브 SQL 필터 쿼리 |
+| CourtReporterJobDto.java | DTO (Create/Update/Response 전체) |
