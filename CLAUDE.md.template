@@ -185,6 +185,37 @@ yt-dlp --cookies-from-browser chrome --no-part \
 
 ---
 
+## 🚨 워커봇 진단/관리 규칙 (필수)
+
+워커봇은 supervisor (systemd / launchd) 가 자동 재시작을 관리한다. **봇 process 를 직접 죽이거나 띄우면 supervisor 와 race 발생** → 봇이 1~3분마다 SIGTERM 받고 죽는 사고 발생 (2026-05-08 4060 봇 사고).
+
+### ❌ 절대 금지 (사고 재발 방지)
+- `pkill -f "bun.*index.ts"` — supervisor 가 띄운 봇 process 를 죽임 (SIGTERM race)
+- `pkill -f bun` — 위와 동일, 더 광범위
+- `kill -9 <bot-pid>` 직접 실행 — supervisor 가 즉시 재시작 → 두 instance 충돌
+- `nohup bun run index.ts &` 수동 launch — supervisor 가 띄운 instance 와 동시 존재 → 두 instance 충돌
+
+### ✅ 안전한 방식
+| 작업 | 명령 |
+|------|------|
+| 봇 재시작 (Linux) | `systemctl --user restart claude-telegram-bot.service` |
+| 봇 재시작 (macOS) | `launchctl kickstart -k "gui/$(id -u)/<label>"` (label: `launchctl list \| grep claude-telegram-bot`) |
+| 봇 상태 확인 | `systemctl --user status claude-telegram-bot.service` / `launchctl list \| grep claude-telegram-bot` |
+| 봇 로그 확인 | `journalctl --user -u claude-telegram-bot.service -n 100` / `tail -100 ~/claude-telegram-bot/bot.log` |
+| 봇 정지 (수동) | `systemctl --user stop claude-telegram-bot.service` |
+| 원격 재시작 (네트워크) | `bot-status.sh restart` 사용 (HTTP `/restart` endpoint → `process.exit(1)` → supervisor 자동 재시작) |
+
+### 진단 시 주의
+- `ps -ef \| grep bun` 로 process 정보 보는 것은 안전 (read-only)
+- 봇이 응답 없을 때도 `kill` 직접 사용 금지 — `systemctl restart` / `launchctl kickstart -k` 사용
+- 두 봇 instance 가 동시 존재하면 PID file race 가 자동으로 정리하지만 (R11.1 `isBotProcess()`), 의도적으로 만들지 말 것
+
+### 봇 launcher script (start-claudebot.sh)
+- 이 script 가 존재한다면 반드시 **supervisor 호출** (systemctl/launchctl) 형태여야 함
+- `pkill` / `nohup` / `kill -9` 패턴 발견 시 즉시 supervisor 호출 형태로 교체
+
+---
+
 ## Bun 프로젝트 규칙
 
 Default to using Bun instead of Node.js.

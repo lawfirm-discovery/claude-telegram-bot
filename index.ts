@@ -6,6 +6,7 @@ import { startWorkerApi, stopWorkerApi } from "./src/worker-api";
 import { BOT_ROLE, stopHealthCheck } from "./src/orchestrator";
 import { initBuildInfo } from "./src/build-info";
 import { existsSync, writeFileSync, readFileSync, unlinkSync } from "fs";
+import { execSync } from "child_process";
 import { join } from "path";
 // ssh-proxy는 리드봇에서만 동적 import (워커에서 키 파일 없어서 크래시 방지)
 
@@ -45,13 +46,18 @@ async function waitForPollingSlot(token: string, maxWaitMs = 60_000): Promise<bo
 const PID_FILE = join(import.meta.dir, process.env.BOT_PID_FILE || "bot.pid");
 
 function isBotProcess(pid: number): boolean {
-  // /proc/<pid>/cmdline 읽어서 bun + index.ts 실행 중인지 확인 (Linux). macOS 는 ps.
+  // Linux: /proc/<pid>/cmdline 가 가장 정확
   try {
     const cmdline = readFileSync(`/proc/${pid}/cmdline`, "utf-8").replace(/\0/g, " ");
     return /bun/.test(cmdline) && /index\.ts/.test(cmdline);
   } catch {
-    // /proc 없음 (macOS) — 일단 true 반환 (낙관적, kill 직전 한 번 더 확인 가능)
-    return true;
+    // /proc 없음 (macOS) — ps fallback. 보수적: ps 도 실패하면 false (다른 unrelated process 죽이지 않게)
+    try {
+      const out = execSync(`ps -p ${pid} -o command=`, { encoding: "utf-8", timeout: 2000, stdio: ["ignore", "pipe", "ignore"] });
+      return /bun/.test(out) && /index\.ts/.test(out);
+    } catch {
+      return false;
+    }
   }
 }
 
