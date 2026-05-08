@@ -371,3 +371,70 @@ trackingCode, title, eventType, eventDate, location, status, hasFinalFile, updat
 - 자식 엔티티 3종(transcripts/files/finalFiles) 순차 삭제 후 본 엔티티 삭제
 - **영향**: 삭제 후 복구 불가, 감사 이력 없음
 - **수정 제안**: deletedAt soft delete + 30일 후 batch 정리 검토
+
+---
+
+## Iteration 7: 권한/보안 + 에지 케이스 검증 (2026-05-08)
+
+### 7-A. 백엔드 권한/인증 분석
+
+#### 인증 구조
+- 모든 엔드포인트: `@AuthenticationPrincipal UsersDetails` 사용
+- `getReporterId()` 유틸리티 (Controller:27-32): 일관된 인증 검증
+- 공개 엔드포인트: `/public/tracking/{trackingCode}` (permitAll, 의도된 설계)
+- `@PreAuthorize`/`@Secured`/`@RolesAllowed` 미사용 (메서드 레벨 권한 부재)
+
+#### 데이터 접근 제어 — reporterId 기반 (일관성 양호)
+| 메서드 | 위치 | 검증 방식 |
+|--------|------|-----------|
+| getJob | Service:124 | `j.getCourtReporterId().equals(reporterId)` |
+| updateJobInfo | Service:157 | 동일 패턴 |
+| updateStatus | Service:228 | 동일 패턴 |
+| updateTranscript | Service:369 | 동일 패턴 |
+| 파일 추가 | Service:293 | jobId + reporterId 체인 검증 |
+| STT 상태 업데이트 | Service:321-324 | 파일→작업→reporterId 체인 |
+| 최종파일 전송 | Service:432-439 | job + file 모두 검증 |
+
+#### 에러 응답
+- 403 FORBIDDEN: "접근 권한이 없습니다" (Service:324,371,549)
+- 404 NOT_FOUND: 리소스 미존재 (Service:126,269,415)
+- 400 BAD_REQUEST: 이메일 미등록 시 (Service:442-444)
+
+#### 보안 이슈 3건
+| ID | 이슈 | 심각도 | 상세 |
+|----|------|--------|------|
+| S1 | 조직 격리 부족 | 낮 | orgId 필드 없음, reporterId로만 격리 (현재 단일 조직이면 문제 없음) |
+| S2 | 공개 추적코드 정보노출 | 낮 | 12자 랜덤, 상태/제목/일정 공개 (Rate Limit 권장) |
+| S3 | LDrive 파일 다운로드 권한 | 중 | 다운로드 시 reporterId 별도 검증 로직 없음 |
+
+### 7-B. 프론트엔드 에지 케이스 분석
+
+#### 페이지별 에지 케이스 처리 매트릭스
+| 페이지 | 빈 상태 | 에러처리 | 로딩 | 페이지네이션 | 입력검증 | 삭제확인 | 동시수정 |
+|--------|---------|---------|------|-------------|---------|---------|---------|
+| Dashboard | ✅ | ✅ | ✅ | N/A | N/A | N/A | ❌ |
+| WorkList | ✅ | ✅ | ✅ | ✅ | ✅ 300ms | ✅ | ⚠️ |
+| Schedule | ❌ | ✅ | ✅ | N/A | ✅ | N/A | ✅ |
+| Tracking | ❌ | ✅ | ✅ | N/A | ✅ regex | N/A | N/A |
+| JobCreate | N/A | ✅ | ✅ | N/A | ✅ | N/A | ✅ |
+| JobDetail | N/A | ✅ | ✅ | N/A | ✅ | ✅ 5개 | ✅ |
+| Fee | ✅ | ✅ | ✅ | N/A | ✅ 300ms | ❌ | ✅ |
+
+#### 프론트엔드 이슈 3건
+| ID | 이슈 | 심각도 | 상세 |
+|----|------|--------|------|
+| F1 | SchedulePage 빈 상태 메시지 없음 | 낮 | 빈 달력만 표시, 안내 문구 부재 |
+| F2 | FeePage 상태변경 confirm 부재 | 중 | 수수료 상태 즉시 PATCH, 확인 다이얼로그 없음 |
+| F3 | 에러 dismiss 불일치 | 낮 | SchedulePage Alert에 onClose 없음 |
+
+### 7-C. 종합 품질 평가
+
+**강점:**
+- reporterId 기반 데이터 격리 일관성 우수
+- 대부분 페이지에 에러/로딩/삭제확인 구현
+- STT 폴링 중복 방지 (isPollingRef), 낙관적 업데이트 패턴
+
+**개선 필요:**
+- 메서드 레벨 권한 어노테이션 도입 검토 (@PreAuthorize)
+- LDrive 파일 다운로드 권한 검증 추가 (S3)
+- FeePage 상태변경 시 confirm 다이얼로그 추가 (F2)
