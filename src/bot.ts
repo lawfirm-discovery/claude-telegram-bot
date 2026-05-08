@@ -1194,7 +1194,8 @@ bot.catch(async (err) => {
   console.error("[Bot] Unhandled error:", msg.slice(0, 500));
 
   // Claude 사용량 한도 — 봇 자체는 살아있게, ralph 측 R6.1 이 task halt
-  if (/out\s*of\s*(extra\s*)?usage|usage\s*limit|rate\s*limit|too\s*many\s*requests/i.test(msg)) {
+  // 패턴 확장 (R11.4): "You've hit your limit · resets May 10, 1pm (UTC)" 같은 장기 한도 포함
+  if (/out\s*of\s*(extra\s*)?usage|hit\s*your\s*(\w+\s*)?limit|usage\s*limit|rate\s*limit|too\s*many\s*requests|quota\s*(reached|exceeded)|credit\s*(exhausted|out)/i.test(msg)) {
     console.warn("[Bot] Claude usage limit detected in error path — keeping bot alive");
     return;
   }
@@ -1221,7 +1222,8 @@ process.on("unhandledRejection", (reason: any) => {
   const msg = reason?.message || String(reason);
   console.error(`[Bot] unhandledRejection: ${msg.slice(0, 500)}`);
   // Claude usage limit 은 task 측에서 처리 — process 죽이지 않음
-  if (/out\s*of\s*(extra\s*)?usage|usage\s*limit/i.test(msg)) {
+  // 패턴 확장 (R11.4): "You've hit your limit · resets May 10..." 같은 장기 한도 포함
+  if (/out\s*of\s*(extra\s*)?usage|hit\s*your\s*(\w+\s*)?limit|usage\s*limit|rate\s*limit|quota\s*(reached|exceeded)|credit\s*(exhausted|out)/i.test(msg)) {
     console.warn("[Bot] Claude usage limit in unhandledRejection — keeping alive");
     return;
   }

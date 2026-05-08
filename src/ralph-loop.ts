@@ -415,9 +415,12 @@ function classifyError(msg: string): ErrorClass {
 function detectUsageLimit(text: string): { hit: boolean; resetAt?: string; raw?: string } {
   if (!text) return { hit: false };
   const lower = text.toLowerCase();
-  // Claude Code 응답 패턴 (정액제 + API)
+  // Claude Code 응답 패턴 (정액제 + API + 장기 한도)
   const patterns = [
     /you're\s*out\s*of\s*(extra\s*)?usage/i,
+    /you've\s*hit\s*your\s*limit/i,    // 장기 한도: "You've hit your limit · resets May 10, 1pm (UTC)"
+    /you\s*have\s*hit\s*your\s*limit/i,
+    /hit\s*your\s*(weekly|monthly|daily)\s*limit/i,
     /usage\s*limit\s*(reached|exceeded)/i,
     /rate\s*limit\s*(reached|exceeded)/i,
     /quota\s*(reached|exceeded|exhausted)/i,

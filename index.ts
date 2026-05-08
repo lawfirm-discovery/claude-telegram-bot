@@ -64,26 +64,21 @@ function isBotProcess(pid: number): boolean {
 async function checkAndWritePid(): Promise<void> {
   if (existsSync(PID_FILE)) {
     const oldPid = parseInt(readFileSync(PID_FILE, "utf-8").trim());
-    if (oldPid && !isNaN(oldPid)) {
-      // Phase R11.1 — 자기 자신 차단 (race condition 방지)
-      if (oldPid === process.pid) {
-        console.log(`[Bot] PID file references self (pid=${oldPid}) — skipping kill`);
-      } else {
-        try {
-          process.kill(oldPid, 0); // exists check
-          // R11.1 — 실제 bun 봇 process 인지 확인 (다른 unrelated process 죽이지 않게)
-          if (isBotProcess(oldPid)) {
-            console.log(`[Bot] Killing previous bot instance (PID ${oldPid})...`);
-            process.kill(oldPid, "SIGTERM");
-            Bun.sleepSync(3000);
-            try { process.kill(oldPid, "SIGKILL"); } catch {}
-            Bun.sleepSync(1000);
-          } else {
-            console.log(`[Bot] PID ${oldPid} exists but not a bot process — skipping kill`);
-          }
-        } catch {
-          // 프로세스가 이미 죽어있음 — 정상
+    if (oldPid && !isNaN(oldPid) && oldPid !== process.pid) {
+      try {
+        process.kill(oldPid, 0); // exists check
+        if (isBotProcess(oldPid)) {
+          // Phase R11.4 — 양보 (yield) 패턴: 기존 봇이 살아있으면 새 instance 가 종료
+          // 기존: 새 봇이 기존 봇 SIGTERM → race / bot.log truncate / 사고 재발
+          // 신규: supervisor 가 띄운 instance 가 단일 진실 — 새 launcher 봇은 그냥 종료
+          // 강제 takeover 가 필요하면 supervisor 통해 (systemctl restart / launchctl kickstart -k)
+          console.log(`[Bot] Existing bot instance found (PID ${oldPid}) — yielding (this instance exits with code 0)`);
+          process.exit(0);
+        } else {
+          console.log(`[Bot] PID ${oldPid} exists but not a bot process — skipping`);
         }
+      } catch {
+        // 기존 process 죽어있음 — 정상, 새로 띄움
       }
     }
   }
