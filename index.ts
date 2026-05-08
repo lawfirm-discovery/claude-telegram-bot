@@ -188,8 +188,13 @@ async function startBot(): Promise<void> {
 startBot();
 
 // #4 Graceful shutdown — 진행 중 작업 완료 대기 후 종료
-const shutdown = async () => {
-  console.log("\nShutting down...");
+// Phase R7.1: signal source + uptime 진단 로깅 (사후 봇 재시작 사이클 분석용)
+const __startupTime = Date.now();
+const shutdown = async (signal: string) => {
+  const uptimeSec = Math.round((Date.now() - __startupTime) / 1000);
+  const uptimeStr = uptimeSec >= 60 ? `${Math.floor(uptimeSec / 60)}m${uptimeSec % 60}s` : `${uptimeSec}s`;
+  console.log(`\nShutting down... (signal=${signal}, uptime=${uptimeStr}, pid=${process.pid})`);
+  console.log(`[shutdown] reason: ${signal === "SIGTERM" ? "SIGTERM (외부 신호 — launchd/systemd/manual)" : signal === "SIGINT" ? "SIGINT (Ctrl+C 또는 스크립트)" : signal}`);
   try { unlinkSync(PID_FILE); } catch {}
   stopLemonClaw();
   stopHealthCheck();
@@ -201,5 +206,6 @@ const shutdown = async () => {
   process.exit(0);
 };
 
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
+process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGHUP", () => shutdown("SIGHUP"));

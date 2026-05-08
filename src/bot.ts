@@ -1184,9 +1184,48 @@ bot.on("message:voice", async (ctx) => {
   setTimeout(() => cleanupFile(tmpPath), 120_000);
 });
 
-// --- Error handler: send errors to Telegram ---
+// --- Error handler: 분류 + 자세한 진단 (Phase R7.1) ---
+//   호성님 사고 패턴 분석:
+//   - 'You're out of extra usage' → Claude Code 정액제 한도 (재시작 X — task 측 R6.1 처리)
+//   - 'EFATAL/polling stopped/network error/ETELEGRAM' → polling 회복 불가, process 재시작이 빠름
+//   - 그 외 → log only (봇 재시작 안 함, polling 재시도)
 bot.catch(async (err) => {
-  console.error("[Bot] Unhandled error:", err.message);
+  const msg = err.message || String(err);
+  console.error("[Bot] Unhandled error:", msg.slice(0, 500));
+
+  // Claude 사용량 한도 — 봇 자체는 살아있게, ralph 측 R6.1 이 task halt
+  if (/out\s*of\s*(extra\s*)?usage|usage\s*limit|rate\s*limit|too\s*many\s*requests/i.test(msg)) {
+    console.warn("[Bot] Claude usage limit detected in error path — keeping bot alive");
+    return;
+  }
+
+  // Telegram polling fatal: process 재시작이 회복 가장 빠름 (launchd/systemd 가 자동 재시작)
+  const fatal = ["EFATAL", "polling stopped", "network error", "ETELEGRAM", "EAI_AGAIN", "ECONNRESET"]
+    .some((p) => msg.toLowerCase().includes(p.toLowerCase()));
+  if (fatal) {
+    console.error("[Bot] Fatal polling error → exiting for supervisor restart");
+    try { await killActiveProcesses(); } catch {}
+    process.exit(1);
+  }
+  // 그 외: 로그만 — bot.dispose/restart 안 함
+});
+
+// --- Phase R7.1: uncaught exception / unhandled rejection 진단 로깅 ---
+// 봇이 graceful shutdown 없이 죽는 path 를 명시적으로 잡음. fatal exit (1) 을 supervisor 가 재시작.
+process.on("uncaughtException", (err) => {
+  console.error(`[Bot] uncaughtException: ${err.message}\n${err.stack?.split("\n").slice(0, 8).join("\n")}`);
+  // 안전하게 종료 — supervisor 재시작
+  process.exit(1);
+});
+process.on("unhandledRejection", (reason: any) => {
+  const msg = reason?.message || String(reason);
+  console.error(`[Bot] unhandledRejection: ${msg.slice(0, 500)}`);
+  // Claude usage limit 은 task 측에서 처리 — process 죽이지 않음
+  if (/out\s*of\s*(extra\s*)?usage|usage\s*limit/i.test(msg)) {
+    console.warn("[Bot] Claude usage limit in unhandledRejection — keeping alive");
+    return;
+  }
+  // 다른 unhandledRejection 도 일단 keep alive (정상 동작 가능성) — 단 로그 남김
 });
 
 export { bot };

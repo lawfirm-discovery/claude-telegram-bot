@@ -94,6 +94,14 @@ const INVARIANT_STUCK_THRESHOLD = parseInt(process.env.RALPH_INVARIANT_THRESHOLD
 /** Phase R5.6 — 봇 process RSS 가 이 한도 (MB) 초과 시 사용자 경고. 0 = 비활성. */
 const MEMORY_WARN_RSS_MB = parseInt(process.env.RALPH_MEMORY_WARN_RSS_MB || "2048");
 /**
+ * Phase R7.2 — Claude 사용량 한도 도달 시 자동 wait 모드.
+ *  - default false: R6.1 그대로 (즉시 halt + 알림)
+ *  - true: resetAt 까지 시간이 RALPH_MAX_WAIT_USAGE_SEC 이내면 자동 sleep + 재개
+ *  - 1시간 이상이면 halt (default 동작)
+ */
+const AUTO_WAIT_USAGE_RESET = process.env.RALPH_AUTO_WAIT_USAGE_RESET === "true";
+const MAX_WAIT_USAGE_SEC = parseInt(process.env.RALPH_MAX_WAIT_USAGE_SEC || "3600"); // default 1h cap
+/**
  * Phase R2.5 — resumption-aware iteration cap.
  * 봇이 재시작되며 같은 task 가 반복 resume → loop → resume 사이클을 탈 때:
  *   현재 resume 후 RESUMPTION_BURST_SEC 안에 RESUMPTION_BURST_ITERS 회 이상 iter 가
@@ -286,6 +294,33 @@ function reasonFingerprint(reason: string): string {
  *
  * Returns: { hit: true, resetAt?: string } | { hit: false }
  */
+/**
+ * Phase R7.2 — Claude 응답의 reset 시각 ("9:10pm") → 현재 시각 기준 ms 차이.
+ * "9:10pm (Asia/Seoul)" / "9:10 PM" / "21:10" 등 다양한 형식 지원.
+ * 파싱 실패 또는 음수 (이미 지났음) 면 null.
+ */
+function parseResetTimeToMs(resetStr: string): number | null {
+  if (!resetStr) return null;
+  // "9:10pm" / "9:10 pm" / "21:10" 패턴 추출
+  const m = resetStr.match(/(\d{1,2}):(\d{2})\s*(am|pm)?/i);
+  if (!m) return null;
+  let hour = parseInt(m[1]);
+  const min = parseInt(m[2]);
+  const ampm = m[3]?.toLowerCase();
+  if (ampm === "pm" && hour < 12) hour += 12;
+  if (ampm === "am" && hour === 12) hour = 0;
+  // 현재 시각 (Asia/Seoul) 의 hour/min 과 비교
+  const now = new Date();
+  const target = new Date(now);
+  target.setHours(hour, min, 0, 0);
+  // target 이 과거면 다음날 같은 시각으로
+  if (target.getTime() < now.getTime()) target.setDate(target.getDate() + 1);
+  const diffMs = target.getTime() - now.getTime();
+  // 24h 이상은 비정상 (다음날 가능성 또는 파싱 오류)
+  if (diffMs > 24 * 3600 * 1000) return null;
+  return diffMs;
+}
+
 function detectUsageLimit(text: string): { hit: boolean; resetAt?: string; raw?: string } {
   if (!text) return { hit: false };
   const lower = text.toLowerCase();
@@ -837,6 +872,34 @@ export async function runRalphLoop(
         if (usage.hit) {
           incr("ralph.usage_limit_hit");
           appendProgress(taskId, `USAGE LIMIT HIT: ${usage.raw?.slice(0, 100)}`);
+
+          // Phase R7.2 — AUTO_WAIT 모드: resetAt 까지 sleep 후 재개 시도
+          if (AUTO_WAIT_USAGE_RESET && usage.resetAt) {
+            const waitMs = parseResetTimeToMs(usage.resetAt);
+            if (waitMs && waitMs > 0 && waitMs <= MAX_WAIT_USAGE_SEC * 1000) {
+              const waitSec = Math.round(waitMs / 1000);
+              appendProgress(taskId, `AUTO WAIT: ${waitSec}s until reset (${usage.resetAt})`);
+              await sendTg(prd.requestedBy,
+                `⏳ Ralph #${taskId} — Claude 한도 도달 → 자동 대기 (${Math.round(waitSec / 60)}분)\n` +
+                `Reset: ${usage.resetAt}\n` +
+                `대기 후 자동 재개. 취소: /ralph stop ${taskId}`,
+              );
+              incr("ralph.usage_auto_wait");
+              await new Promise((r) => setTimeout(r, waitMs + 30_000)); // reset + 30s buffer
+              // 사용자가 sleep 중에 stop 했는지 체크
+              const fresh2 = loadPRD(taskId);
+              if (fresh2 && fresh2.status === "stopped") {
+                appendProgress(taskId, `STOPPED BY USER during auto-wait`);
+                item.error = "stopped during auto-wait";
+                releaseTaskLock(taskId);
+                return { taskId, completed: false, totalIterations, error: "stopped" };
+              }
+              appendProgress(taskId, `AUTO WAIT 종료 → iteration 재시도`);
+              await sendTg(prd.requestedBy, `🔄 Ralph #${taskId} 한도 reset → 재개`);
+              continue; // 같은 iteration 다시 (item.iteration++ 안 됨)
+            }
+          }
+          // 기본 동작 (R6.1) 또는 wait 한도 초과 — 즉시 halt
           await sendTg(prd.requestedBy,
             `⛔ Ralph #${taskId} — Claude 사용량 한도 도달 → 자동 중단\n` +
             `iter ${item.iteration}/${item.maxIterations}, ${elapsed}s\n` +
@@ -846,7 +909,6 @@ export async function runRalphLoop(
             `/ralph status ${taskId}`,
           );
           item.error = `usage limit hit${usage.resetAt ? ` (resets ${usage.resetAt})` : ""}`;
-          // task 자체도 failed — 더 진행 의미 없음
           prd.status = "failed";
           savePRD(prd);
           releaseTaskLock(taskId);
