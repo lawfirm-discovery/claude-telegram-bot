@@ -126,6 +126,47 @@ export function startWorkerApi(bot: Bot): void {
         }
       }
 
+      // Phase R5.5 — Ralph health check: GET /ralph-health
+      // 응답: { ok, activeTaskCount, tasks[], authOk, memoryRss, lastIter }
+      if (url.pathname === "/ralph-health") {
+        try {
+          const { listTasks, loadPRD } = await import("./ralph-loop");
+          const all = listTasks(50);
+          const active = all.filter((t) => t.status === "running");
+          const tasksDigest = active.map((t) => {
+            const prd = loadPRD(t.taskId);
+            const lastItem = prd?.items.find((i) => !i.passes && i.iteration > 0);
+            const totalIters = prd?.items.reduce((sum, i) => sum + (i.iteration || 0), 0) || 0;
+            return {
+              taskId: t.taskId,
+              status: t.status,
+              prompt: t.originalPrompt.slice(0, 80),
+              currentItem: lastItem?.id,
+              currentIter: lastItem ? `${lastItem.iteration}/${lastItem.maxIterations}` : "-",
+              totalIters,
+              repo: t.repo,
+              elapsedSec: Math.round((Date.now() - t.createdAt) / 1000),
+            };
+          });
+          const recentFailed = all
+            .filter((t) => t.status === "failed" || t.status === "stopped")
+            .slice(0, 3)
+            .map((t) => ({ taskId: t.taskId, status: t.status, prompt: t.originalPrompt.slice(0, 60) }));
+          const memoryRss = Math.round(process.memoryUsage().rss / 1024 / 1024); // MB
+          return jsonRes({
+            ok: true,
+            botName: process.env.BOT_NAME || "unknown",
+            activeTaskCount: active.length,
+            tasks: tasksDigest,
+            recentFailed,
+            memoryRssMB: memoryRss,
+            timestamp: Date.now(),
+          });
+        } catch (e: any) {
+          return jsonRes({ ok: false, error: e.message }, 500);
+        }
+      }
+
       // 로그 조회: GET /logs?lines=100
       if (url.pathname === "/logs") {
         const lines = parseInt(url.searchParams.get("lines") || "100");

@@ -43,6 +43,11 @@ export interface TaskItem {
    */
   lastStateHash?: string;
   invariantStuckCount?: number;
+  /**
+   * Phase R5.3 — plan refinement depth. stuck 시 자동으로 sub-task 분해를 1회 시도.
+   * 0 = 한 번도 refinement 안 됨 (가장 흔함), 1 = 이미 한 번 분해됨 (다시 stuck 시 break).
+   */
+  refinedDepth?: number;
 }
 
 export interface TaskPRD {
@@ -86,6 +91,8 @@ const COMPRESS_THRESHOLD = 60;
 const DEFAULT_MAX_WALLCLOCK_SEC = parseInt(process.env.RALPH_MAX_WALLCLOCK_SEC || "7200");
 /** Phase R2.2 — 같은 state-hash N회 연속이면 stuck (default 4 — 평소 의미있는 변화 없는 반복). */
 const INVARIANT_STUCK_THRESHOLD = parseInt(process.env.RALPH_INVARIANT_THRESHOLD || "4");
+/** Phase R5.6 — 봇 process RSS 가 이 한도 (MB) 초과 시 사용자 경고. 0 = 비활성. */
+const MEMORY_WARN_RSS_MB = parseInt(process.env.RALPH_MEMORY_WARN_RSS_MB || "2048");
 /**
  * Phase R2.5 — resumption-aware iteration cap.
  * 봇이 재시작되며 같은 task 가 반복 resume → loop → resume 사이클을 탈 때:
@@ -624,6 +631,21 @@ ${newLines.join("\n")}
 // Ralph Loop — 메인 반복 실행
 // ═══════════════════════════════════════════════════════════════
 
+/**
+ * Phase R5.1 — 봇 당 동시 ralph task 1개로 제한.
+ * 다른 task 가 status='running' 인 상태에서 새 task 진입 시 reject.
+ * 같은 repo 동시 git push 충돌, ratchet 동시 실행, evaluator 동시 호출 등 차단.
+ */
+function findOtherRunningTask(currentTaskId: string): TaskPRD | null {
+  const tasks = listTasks(50);
+  for (const t of tasks) {
+    if (t.taskId !== currentTaskId && t.status === "running") {
+      return t;
+    }
+  }
+  return null;
+}
+
 export async function runRalphLoop(
   taskId: string,
   askClaude: AskClaudeFn,
@@ -631,6 +653,19 @@ export async function runRalphLoop(
 ): Promise<RalphLoopResult> {
   const prd = loadPRD(taskId);
   if (!prd) return { taskId, completed: false, totalIterations: 0, error: "prd.json not found" };
+
+  // Phase R5.1 — 동시 ralph task limit (봇 당 1개)
+  const conflicting = findOtherRunningTask(taskId);
+  if (conflicting) {
+    appendProgress(taskId, `CONCURRENT TASK BLOCKED: ${conflicting.taskId} 가 이미 running`);
+    await sendTg(prd.requestedBy,
+      `🚫 Ralph #${taskId} 시작 거부 — 동시 실행 중인 task 가 있습니다.\n` +
+      `진행 중: #${conflicting.taskId} — ${conflicting.originalPrompt.slice(0, 60)}\n` +
+      `먼저 완료/중단 후 재시도: /ralph stop ${conflicting.taskId}`,
+    );
+    incr("ralph.concurrent_blocked");
+    return { taskId, completed: false, totalIterations: 0, error: `concurrent task ${conflicting.taskId} running` };
+  }
 
   // Phase R0.2 — task lock 획득 (동시 실행 방지)
   const lockResult = acquireTaskLock(taskId);
@@ -716,6 +751,23 @@ export async function runRalphLoop(
         savePRD(prd);
         releaseTaskLock(taskId);
         return { taskId, completed: false, totalIterations, error: "resumption burst" };
+      }
+
+      // Phase R5.6 — memory guard. RSS 가 임계 초과 시 경고 (자동 종료는 X — 호성님 결정에 맡김).
+      if (MEMORY_WARN_RSS_MB > 0) {
+        const rssMB = Math.round(process.memoryUsage().rss / 1024 / 1024);
+        if (rssMB >= MEMORY_WARN_RSS_MB) {
+          appendProgress(taskId, `MEMORY WARN: RSS ${rssMB}MB ≥ ${MEMORY_WARN_RSS_MB}MB`);
+          // 같은 task 안에서 한 번만 알림
+          if (!(item as any)._memWarned) {
+            (item as any)._memWarned = true;
+            await sendTg(prd.requestedBy,
+              `⚠️ Ralph #${taskId} — 봇 메모리 ${rssMB}MB (한도 ${MEMORY_WARN_RSS_MB}MB)\n` +
+              `봇 재시작 권장 (task 끝난 후): 'systemctl --user restart claude-telegram-bot'`,
+            );
+            incr("ralph.memory_warn");
+          }
+        }
       }
 
       item.iteration++;
@@ -825,13 +877,39 @@ export async function runRalphLoop(
         }
         if ((item.invariantStuckCount ?? 0) >= INVARIANT_STUCK_THRESHOLD) {
           incr("ralph.invariant_stuck");
+          // Phase R5.3 — break 대신 자동 sub-decompose 1회 시도
+          const itemIdx = prd.items.indexOf(item);
+          const refine = await tryRefineStuckItem(prd, itemIdx, evalResult.reason, evalResult.nextFocus);
+          if (refine.ok && refine.subItems && refine.subItems.length) {
+            // 현재 item 은 fail 처리, 새 sub-items 를 그 다음에 삽입
+            item.refinedDepth = (item.refinedDepth ?? 0) + 1;
+            item.error = `invariant stuck → refined into ${refine.subItems.length} sub-items`;
+            const newItems: TaskItem[] = refine.subItems.map((g, i) => ({
+              id: `${item.id}.${i + 1}`,
+              description: g.description,
+              passes: false,
+              iteration: 0,
+              maxIterations: g.maxIterations,
+              refinedDepth: 1, // 자식도 더 분해 안 되도록 미리 1로 마킹
+            }));
+            prd.items.splice(itemIdx + 1, 0, ...newItems);
+            appendProgress(taskId, `REFINED: ${item.id} → ${refine.subItems.length} sub-items 자동 분해`);
+            await sendTg(prd.requestedBy,
+              `🧩 Ralph #${taskId} — ${item.id} 진척 없음 → ${refine.subItems.length} 개 sub-task 로 자동 분해\n` +
+              refine.subItems.map((g, i) => `  ${item.id}.${i + 1}: ${g.description.slice(0, 60)}`).join("\n"),
+            );
+            incr("ralph.refined");
+            savePRD(prd);
+            break; // 현재 item loop 종료, 다음 outer iteration 에서 새 sub-items 부터 진행
+          }
+          // refinement 실패 시 기존 동작 (사용자 알림 + break)
           await sendTg(prd.requestedBy,
             `🧱 Ralph #${taskId} — ${item.id} 진척 없음 (${item.invariantStuckCount}회 연속 동일 상태)\n` +
             `iter ${item.iteration}/${item.maxIterations}\n` +
             `state-hash: ${stateHash.slice(0, 80)}\n` +
             `대응: 작업 분해 또는 다른 접근 필요\n/ralph status ${taskId}`,
           );
-          appendProgress(taskId, `INVARIANT STUCK: ${item.invariantStuckCount}× → halting item`);
+          appendProgress(taskId, `INVARIANT STUCK: ${item.invariantStuckCount}× → halting item (refinement 실패)`);
           item.error = `invariant stuck (${item.invariantStuckCount}× same state)`;
           savePRD(prd);
           break;
@@ -1046,6 +1124,62 @@ function buildIterationPrompt(
 // ═══════════════════════════════════════════════════════════════
 
 /**
+ * Phase R5.3 — stuck item 의 자동 sub-decompose.
+ *
+ * stuck/invariant_stuck 시 break 대신 1회 시도:
+ *   1. 현재 item 의 description + lastEvalReason + nextFocus 를 input 으로 askClaudeLight
+ *   2. 더 작은 sub-task 2~4개로 분해된 JSON 받음
+ *   3. prd.items 의 현재 위치 다음에 새 sub-items 삽입 (refinedDepth=1)
+ *   4. 현재 item 은 그대로 fail 상태 유지, 다음 iter 에서 새 sub-items 부터 진행
+ *
+ * 무한 refinement 방지: refinedDepth >= 1 이면 break (한 번만 분해).
+ */
+async function tryRefineStuckItem(
+  prd: TaskPRD,
+  itemIndex: number,
+  lastEvalReason: string,
+  lastNextFocus: string | undefined,
+): Promise<{ ok: boolean; subItems?: Array<{ description: string; maxIterations: number }> }> {
+  const item = prd.items[itemIndex];
+  if (!item) return { ok: false };
+  if ((item.refinedDepth ?? 0) >= 1) return { ok: false }; // 이미 1회 분해됨
+
+  const prompt = `당신은 stuck 된 작업을 작은 sub-task 로 재분해하는 계획자입니다.
+
+## 원래 작업
+${item.description}
+
+## stuck 사유
+${lastEvalReason}
+
+## 다음 집중 영역 (evaluator 가 제시)
+${lastNextFocus || "(없음)"}
+
+## 규칙
+- 2~4개의 더 작은 sub-task 로 분해
+- 각 sub-task 는 독립적으로 완료 가능 + 검증 방법 명확
+- 보고서/분석 류는 maxIterations=5 이하, 코드 수정은 10~20
+- JSON 배열만 반환 (다른 텍스트 없이):
+
+[{"description": "구체적 sub-task", "maxIterations": 10}]`;
+
+  try {
+    const raw = await askClaudeLight(prompt, { timeoutMs: 30_000 });
+    const match = raw.match(/\[[\s\S]*\]/);
+    if (!match) return { ok: false };
+    const parsed = JSON.parse(match[0]);
+    if (!Array.isArray(parsed) || !parsed.length) return { ok: false };
+    const subItems = parsed.map((g: any) => ({
+      description: String(g.description || "").slice(0, 500),
+      maxIterations: Math.min(20, Math.max(3, parseInt(g.maxIterations) || 10)),
+    }));
+    return { ok: true, subItems };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/**
  * Phase R4.1 (W1) — Claude CLI 인증 상태 사전 검증.
  *
  * lawbotss-mm / macmini 같은 봇이 'Not logged in · Please run /login' 응답으로
@@ -1227,7 +1361,14 @@ export function startBackgroundLoop(
 // User control commands (Phase R0.4 W3) — stop / pause / resume
 // ═══════════════════════════════════════════════════════════════
 
-/** /ralph stop — task 를 즉시 중단 신호 (다음 iteration 진입 시 감지). */
+/**
+ * /ralph stop — task 를 즉시 중단 신호 (다음 iteration 진입 시 감지).
+ *
+ * Phase R5.4 — cleanup 추가:
+ *   - prd.repo 의 uncommitted 변경 → git stash push (잃지 않게 보존)
+ *   - task lock 파일 강제 해제 (다른 봇이 같은 task ID 잡지 못 했을 때 빠른 회수)
+ *   - progress 에 STOPPED + STASH 기록
+ */
 export function stopTask(taskId: string): { ok: boolean; message: string } {
   const prd = loadPRD(taskId);
   if (!prd) return { ok: false, message: `태스크 ${taskId} 없음` };
@@ -1237,7 +1378,29 @@ export function stopTask(taskId: string): { ok: boolean; message: string } {
   prd.status = "stopped";
   savePRD(prd);
   appendProgress(taskId, `STOP REQUESTED BY USER`);
-  return { ok: true, message: `Ralph #${taskId} 중단 신호 보냄 (다음 iteration 끝에 종료)` };
+
+  // Phase R5.4 — uncommitted 변경 보존 (git stash)
+  let stashMsg = "";
+  if (prd.repo && AUTO_GIT_ENABLED) {
+    try {
+      const status = runGitInRepo(prd.repo, ["status", "--porcelain"]);
+      if (status && status.trim()) {
+        const stashLabel = `ralph-stop-${taskId}-${new Date().toISOString().slice(0, 16).replace(/[T:]/g, "_")}`;
+        const stash = runGitInRepo(prd.repo, ["stash", "push", "-u", "-m", stashLabel]);
+        if (stash !== null) {
+          stashMsg = ` (변경사항은 git stash 에 보존: '${stashLabel}')`;
+          appendProgress(taskId, `STASH SAVED: ${stashLabel}`);
+        }
+      }
+    } catch {
+      // stash 실패 시 무시 — 본 정지 동작 막지 않음
+    }
+  }
+
+  // task lock 해제 (자기 봇 lock 만 해제)
+  releaseTaskLock(taskId);
+
+  return { ok: true, message: `Ralph #${taskId} 중단 신호 보냄 (다음 iter 끝에 종료)${stashMsg}` };
 }
 
 /** /ralph go — pending task 시작. */
