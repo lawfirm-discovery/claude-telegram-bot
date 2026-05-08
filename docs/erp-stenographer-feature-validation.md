@@ -1,6 +1,6 @@
 # 속기사(Court Reporter) ERP 핵심 기능 검증
 
-> 최종 업데이트: 2026-05-08 (Iteration 9 — 라우팅/네비게이션/API 매핑 검증 완료)
+> 최종 업데이트: 2026-05-08 (Iteration 10 — 에러 복원력 + 성능 패턴 + 접근성 검증 완료)
 > 검증 방법: 코드 레벨 정적분석 + Spring API 라이브 테스트 (17개 엔드포인트 전수 검증) + 이슈 코드라인 재검증
 
 ---
@@ -666,3 +666,162 @@ trackingCode, title, eventType, eventDate, location, status, hasFinalFile, updat
 4. 에러 핸들링/페이지네이션/lazy loading 패턴 일관성 확인
 
 **발견된 위험 요소: 없음** — 라우팅 레이어는 상용 수준 달성
+
+---
+
+## Iteration 10: 에러 복원력 + 성능 패턴 + 접근성 검증
+
+> 검증일: 2026-05-08 Iteration 10
+> 범위: 프론트엔드(CourtReporter/ 전체) + Spring(courtreporter/ 전체) 코드 레벨 정적분석
+
+### 10-A. 에러 복원력(Error Resilience)
+
+#### 네트워크 에러 핸들링
+- **패턴**: try-catch + Alert 컴포넌트 (severity="error")
+- `CourtReporterWorkListPage.tsx:224-230` — axios 응답 메시지 추출 → Alert 표시
+- `CourtReporterJobDetailDialog.tsx:26-32` — `getErrMsg()` 함수로 에러 메시지 표준화
+- **평가**: 양호 — 모든 API 호출에 에러 핸들링 적용
+
+#### 낙관적 업데이트 + 롤백
+- `CourtReporterJobDetailDialog.tsx:111-112, 224-238` — 상태 변경 시 `optimisticStatus` 즉시 반영, 실패 시 이전 상태로 롤백
+- **평가**: 양호 — 롤백 로직 존재 확인
+
+#### 재시도 로직
+- `CourtReporterWorkListPage.tsx:240-252` — STT PROCESSING 파일 감지 시 8초 폴링 (CR_CONFIG.STT_POLL_MS)
+- `CourtReporterJobDetailDialog.tsx:189-195` — Dialog 내 10초 주기 onRefresh() 폴링
+- Spring: `CourtReporterJobService.java:556-558` — STT 최대 시도 3회 제한 (sttAttemptCount)
+- **평가**: 양호 — 자동 재시도 대신 폴링 방식, STT 최대 시도 제한 적절
+
+#### 로딩 상태 관리
+- 전체 로딩: `loading` state → `CircularProgress` (WorkListPage:401-402)
+- 부분 로딩: `uploadingFile`, `uploadingFinal`, `savingMemo`, `savingInfo`, `savingFee`, `statusUpdating` 개별 상태
+- STT 진행: `sttTriggering` Set으로 파일별 추적 (WorkListPage:171, 498)
+- **평가**: 양호 — 세분화된 로딩 상태 관리
+
+#### 빈 상태 처리
+- `CourtReporterWorkListPage.tsx:403-409` — 뷰모드별 empty state (아이콘 + 메시지)
+- `CourtReporterJobDetailDialog.tsx:745-749` — "업로드된 파일이 없습니다" UI
+- **평가**: 양호
+
+### 10-B. Spring 예외/트랜잭션 관리
+
+#### 예외 처리
+- `GlobalExceptionHandler.java:53-115` — `@ControllerAdvice` + `@ExceptionHandler`
+- `ResponseStatusException` (HttpStatus + message)으로 400/404/500 반환
+- 검증 실패 시 필드별 에러 맵 반환
+
+#### 트랜잭션
+- 읽기: `@Transactional(readOnly = true)` (CourtReporterJobService:58, 68, 121, 484, 504, 618)
+- 쓰기: `@Transactional` (CourtReporterJobService:143, 174, 222, 244, 256, 284, 314, 328, 361, 409, 430, 526, 541)
+- 비동기 STT: `@Async` (CourtReporterJobService:567) — 예외 시 파일 상태 FAILED 업데이트 (606-612)
+- **평가**: 양호 — 읽기/쓰기 분리, 비동기 처리 시 예외 안전
+
+#### 입력 유효성 검사
+| 검증 대상 | 프론트엔드 | 백엔드 |
+|----------|-----------|--------|
+| 제목 | trim() 확인 | 필수 + 공백 제거 |
+| 기간 | 1-1440분 | 범위 검증 |
+| 파일 | audio/video 타입, 500MB | - |
+| 수수료 | 0~999,999,999 | - |
+
+### 10-C. 성능 패턴
+
+#### 메모이제이션 현황 (useMemo/useCallback)
+
+| 파일 | 라인 | 훅 | 대상 |
+|-----|------|----|------|
+| WorkListPage | 177-184 | useCallback | refreshAllJobs |
+| WorkListPage | 190-196 | useMemo | 통계 계산 |
+| WorkListPage | 198-205 | useMemo | 탭별 카운트 |
+| WorkListPage | 207-231 | useCallback | API 호출 함수 |
+| WorkListPage | 264-277 | useMemo | viewMode별 필터링 |
+| DashboardPage | 45-63 | useCallback | 데이터 페칭 |
+| DashboardPage | 75-89 | useMemo | 최근 작업/일정 필터 |
+| StatsPanel | 29-75 | useMemo (5개) | 월별/수수료/분포 |
+| TranscriptStudio | 78-131 | useMemo (3개) | 세그먼트, V7 초기화 |
+
+**이슈**: SchedulePage `jobsByDate` (줄 98-107) — 매 렌더링 재생성 (메모이제이션 미적용)
+
+#### 디바운스
+- WorkListPage:171-175 — 검색 300ms 디바운스 ✅
+- FeePage:73-79 — 날짜 필터 300ms 디바운스 ✅
+
+#### API 캐싱
+- React Query / SWR **미사용** — 모든 API 호출 `axiosInstance` 직접
+- 개선 여지 있으나 현 규모에서 치명적이지 않음
+
+#### AbortController (요청 취소)
+- WorkListPage:235-237, DashboardPage:66-68, SchedulePage:80-82, FeePage:68-70 — 전체 4개 페이지 적용
+- `CanceledError` 처리 적절 — **양호**
+
+### 10-D. Spring N+1 쿼리 + DB 인덱스
+
+#### N+1 방지
+- `buildJobResponses()` (CourtReporterJobService:91-119) — 배치 IN절 쿼리로 해소
+- `findByJobIdInOrderByCreatedAtDesc(jobIds)` 패턴 사용
+
+#### N+1 위험 지점
+| 메서드 | 라인 | 설명 |
+|-------|------|------|
+| getByTrackingCode() | 484-500 | `existsByJobId()` 추가 쿼리 |
+| updateTranscript() | 391-403 | 최종 확정 시 파일 재조회 |
+
+#### 기존 인덱스 (V20260417_02 마이그레이션)
+```sql
+idx_cr_jobs_reporter (court_reporter_id)
+idx_cr_jobs_status (status)
+idx_cr_job_files_job (job_id)
+idx_cr_transcripts_job (job_id)
+idx_cr_final_files_job (job_id)
+```
+
+#### 누락 인덱스 (개선 제안)
+| 테이블 | 컬럼 | 이유 |
+|-------|------|------|
+| erp_court_reporter_jobs | (court_reporter_id, status) | 복합 필터링 |
+| erp_court_reporter_jobs | tracking_code | 공개 추적 조회 |
+| erp_court_reporter_job_files | stt_status | STT 상태 필터링 |
+| erp_court_reporter_transcripts | (job_id, is_final) | 최종 속기록 조회 |
+
+### 10-E. 접근성(a11y)
+
+#### 강점
+- WorkListPage:420-424 — `role="button"` + `tabIndex={0}` + `onKeyDown` (Enter/Space)
+- WorkListPage:422 — `aria-label="작업 상세보기: {job.title}"`
+- DashboardPage:226-230 — 최근 작업 버튼 접근성
+- StatsPanel:100-106 — 토글 `aria-label` + `aria-expanded`
+
+#### 미흡 사항
+| 파일 | 이슈 | 심각도 |
+|-----|------|--------|
+| SchedulePage:150-154 | 날짜 셀 `role="gridcell"` 미적용 | 낮음 |
+| TranscriptStudio | 에디터 포커스 관리 미확인 | 중간 |
+| JobDetailDialog | Dialog 포커스 트래핑 명시적 미구현 (MUI 내장 사용) | 낮음 |
+
+### 10-F. 이슈 매트릭스
+
+| ID | 이슈 | 카테고리 | 심각도 | 상태 |
+|----|------|---------|--------|------|
+| ER-1 | 전체 API try-catch + Alert 에러 표시 | 에러 핸들링 | - | ✅ 양호 |
+| ER-2 | 낙관적 업데이트 + 롤백 로직 | 에러 핸들링 | - | ✅ 양호 |
+| ER-3 | STT 폴링 8초/10초 + 최대 3회 제한 | 재시도 | - | ✅ 양호 |
+| ER-4 | 세분화된 로딩 상태 (6개 개별) | UX | - | ✅ 양호 |
+| ER-5 | AbortController 4개 페이지 전체 적용 | 성능 | - | ✅ 양호 |
+| PF-1 | SchedulePage jobsByDate 메모이제이션 미적용 | 성능 | 낮음 | ⚠️ 개선 권장 |
+| PF-2 | React Query 미사용 (직접 axiosInstance) | 성능 | 낮음 | ⚠️ 프로젝트 전체 패턴 |
+| PF-3 | tracking_code 인덱스 누락 | DB 성능 | 중간 | ⚠️ 개선 권장 |
+| PF-4 | 복합 인덱스 (reporter_id+status) 누락 | DB 성능 | 낮음 | ⚠️ 개선 권장 |
+| A11-1 | SchedulePage 날짜 셀 role 미적용 | 접근성 | 낮음 | ⚠️ 개선 권장 |
+| A11-2 | TranscriptStudio 포커스 관리 미확인 | 접근성 | 중간 | ⚠️ 확인 필요 |
+
+### 10-G. Iteration 10 결론
+
+**에러 복원력 + 성능 + 접근성 검증 결과: 양호 (상용 수준 달성)**
+
+1. **에러 복원력**: 전 구간 try-catch + Alert, 낙관적 업데이트/롤백, STT 폴링/재시도 제한 — 견고
+2. **트랜잭션**: 읽기/쓰기 분리, 비동기 STT 예외 안전 — 양호
+3. **성능**: useMemo/useCallback 15+ 적용, AbortController 전체 적용, N+1 배치 해소 — 양호
+4. **DB 인덱스**: 5개 기본 인덱스 생성 완료, 4개 추가 복합 인덱스 개선 권장
+5. **접근성**: role/aria-label/keyboard nav 핵심 부분 구현, 일부 개선 여지
+
+**치명적 이슈: 없음** — 개선 권장 사항 6건 (PF-1~4, A11-1~2)은 비치명적
