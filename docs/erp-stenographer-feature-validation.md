@@ -438,3 +438,125 @@ trackingCode, title, eventType, eventDate, location, status, hasFinalFile, updat
 - 메서드 레벨 권한 어노테이션 도입 검토 (@PreAuthorize)
 - LDrive 파일 다운로드 권한 검증 추가 (S3)
 - FeePage 상태변경 시 confirm 다이얼로그 추가 (F2)
+
+---
+
+## Iteration 8: 데이터 무결성 + 동시성/경계값 검증
+
+### 8-A. 프론트엔드 데이터 무결성 분석
+
+#### 폼 검증 매트릭스
+| 필드 | 검증 | 위치 | 상세 |
+|------|------|------|------|
+| Title | Required + trim | JobCreateDialog:65 | 빈 문자열 체크 |
+| EventDate | ISO 유효성 | JobCreateDialog:66 | isNaN(new Date()) |
+| DurationMinutes | 범위 1-1440 | JobCreateDialog:69-72 | parseInt 체크 |
+| Fee Amount | 범위 0-999,999,999 | JobDetailDialog:286-293 | 범위 초과 경고 |
+| Email/Phone | 미검증 | - | 형식 검증 없음 |
+
+#### 낙관적 업데이트 분석
+| 기능 | 낙관적 업데이트 | 롤백 | 위험도 |
+|------|----------------|------|--------|
+| Status 변경 | ✅ setOptimisticStatus | ✅ prev로 복원 | 낮 |
+| Transcript 저장 | ❌ 서버 응답 대기 | N/A | 낮 |
+| 파일 업로드 | ❌ | ⚠️ LDrive 성공→API 실패 시 고아 파일 | 중 |
+| Fee 업데이트 | ❌ 직접 PATCH | N/A | 낮 |
+
+#### 페이지네이션 경계값
+- **빈 상태**: ✅ "작업이 없습니다" 렌더링 (WorkListPage:403)
+- **마지막 페이지**: ✅ content 배열 길이로 자동 처리
+- **범위 초과**: ⚠️ 빈 결과 반환, 에러 없음 (permissive)
+- **필터 변경 시 리셋**: ✅ setPageNum(0) (WorkListPage:233)
+- **URL 파라미터 bounds check**: ❌ 없음
+
+#### 날짜/시간 처리
+- **입력**: `type="datetime-local"` — 브라우저 로컬 시간 캡처
+- **서버 전송**: ISO 문자열, 타임존 미포함
+- **표시**: `new Date()` 브라우저 로컬 파싱
+- **위험**: ISO→Date→ISO 변환 시 타임존 시프트 가능 (JobDetailDialog:106)
+
+#### 동시 수정 감지
+- **Version/ETag**: ❌ 완전 부재
+- **HTTP 409 Conflict 처리**: ❌ 없음
+- **Lost Update 위험**: User A 조회 → User B 수정 → User A 제출 → User B 데이터 덮어쓰기
+
+#### 파일 업로드 무결성
+| 구분 | 오디오 파일 | 최종 파일 |
+|------|-----------|----------|
+| MIME 제한 | audio/*, video/* | 없음 |
+| 크기 제한 | 500MB 하드, 100MB 소프트경고 | 없음 |
+| 고아 파일 위험 | ⚠️ LDrive→API 2단계 | ⚠️ 동일 |
+| 언마운트 보호 | ✅ isMountedRef | ✅ isMountedRef |
+
+### 8-B. Spring 백엔드 데이터 무결성 분석
+
+#### Entity 검증 어노테이션 현황
+| 필드 | DB 제약 | @NotNull | @Size | @Pattern |
+|------|---------|---------|-------|----------|
+| title | nullable=false | ❌ | ❌ | ❌ |
+| courtReporterId | nullable=false | ❌ | ❌ | ❌ |
+| clientName | length=255 | ❌ | ❌ | ❌ |
+| clientPhone | length=50 | ❌ | ❌ | ❌ |
+| clientEmail | length=255 | ❌ | ❌ | ❌ |
+| memo | TEXT | ❌ | ❌ | ❌ |
+| feeNote | TEXT | ❌ | ❌ | ❌ |
+
+**결론**: Entity/DTO에 Bean Validation 어노테이션 완전 부재. Service 레이어에서 수동 검증에 의존.
+
+#### Service 레이어 수동 검증 현황
+| 검증 | 위치 | 상세 |
+|------|------|------|
+| Title blank check | Service:146-149, 176-179 | trim 후 빈 문자열 체크 |
+| Duration range | Service:150-152, 180-182 | 1-1440분 |
+| Priority enum | Service:153-155 | 유효 enum 값 체크 |
+| Fee non-negative | Service:260-262 | amount >= 0 |
+| Status transition | Service:213-220 | 상태 기계 규칙 적용 |
+| Fee status enum | Service:263-265 | 유효 enum 값 체크 |
+
+#### 트랜잭션 경계
+- **변경 작업**: ✅ 모든 mutating 메서드 @Transactional
+- **조회 작업**: ✅ @Transactional(readOnly=true)
+- **삭제 순서**: transcript → file → finalFile → job (Service:527-537)
+  - ⚠️ 미드-트랜잭션 실패 시 롤백은 @Transactional이 보장하나, cascade 미설정으로 직접 DB 삭제 시 고아 레코드 위험
+
+#### Cascade 설정
+- **Entity 관계**: 모든 ManyToOne에 CascadeType 없음
+- **수동 삭제**: Service.deleteJob()에서 하위 엔티티 순차 삭제
+- **위험**: Repository 직접 호출로 Job 삭제 시 하위 레코드 고아화
+
+#### 쿼리 성능
+- **목록 조회**: ✅ Bulk findByIdIn() 사용 — N+1 회피
+- **단건 조회**: ⚠️ 3개 별도 쿼리 (file, transcript, finalFile)
+- **JOIN FETCH / @EntityGraph**: ❌ 미사용
+
+#### 입력 살균 (Sanitization)
+- **XSS 방어**: ❌ 없음
+- **위험 필드**: memo, feeNote, title, clientName — trim만 수행, HTML 이스케이프 없음
+- **이메일 템플릿**: String.format()에 사용자 데이터 직접 삽입 (Service:448-465)
+- **저장 XSS**: `<img src=x onerror='alert(1)'>` 류 입력이 DB에 저장 가능
+
+### 8-C. 데이터 무결성 종합 이슈 매트릭스
+
+| ID | 이슈 | 영역 | 심각도 | 영향 |
+|----|------|------|--------|------|
+| DI-1 | Entity Bean Validation 부재 | Spring | 중 | DB 제약 의존, Service 우회 시 무효 데이터 |
+| DI-2 | 동시 수정 감지 없음 (No ETag/Version) | 전체 | 고 | Lost Update — 다수 사용자 시 데이터 유실 |
+| DI-3 | XSS 살균 부재 | Spring | 고 | 저장 XSS 취약점 |
+| DI-4 | 파일 업로드 2단계 고아 위험 | Frontend | 중 | LDrive 성공→API 실패 시 추적 불가 파일 |
+| DI-5 | 최종파일 크기/타입 제한 없음 | Frontend | 중 | 무제한 업로드 가능 |
+| DI-6 | Cascade 미설정 | Spring | 중 | Repository 직접 호출 시 고아 레코드 |
+| DI-7 | 날짜 타임존 미명시 | 전체 | 낮 | 현재 KST 단일 환경이면 문제 없으나 확장 시 위험 |
+| DI-8 | Email/Phone 형식 미검증 | Frontend | 낮 | 무효 연락처 저장 가능 |
+
+### 8-D. 이번 반복 결론
+
+**양호 항목:**
+- Service 레이어 비즈니스 검증 일관성 (title, duration, status transition)
+- 트랜잭션 경계 올바르게 설정
+- Bulk 쿼리로 N+1 회피 (목록 조회)
+- 낙관적 업데이트 롤백 (Status 변경)
+
+**즉시 조치 권장:**
+1. DI-3 (XSS): memo/title/clientName에 HTML 이스케이프 또는 sanitizer 적용
+2. DI-2 (Lost Update): Entity에 @Version 필드 추가, 프론트에 409 처리
+3. DI-5 (파일 크기): 최종파일에도 크기/타입 제한 추가
