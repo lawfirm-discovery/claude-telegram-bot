@@ -1,6 +1,6 @@
 # 속기사(Court Reporter) ERP 핵심 기능 검증
 
-> 최종 업데이트: 2026-05-08 (Iteration 6 — 이슈 재검증 + 심각도 재평가 완료)
+> 최종 업데이트: 2026-05-08 (Iteration 9 — 라우팅/네비게이션/API 매핑 검증 완료)
 > 검증 방법: 코드 레벨 정적분석 + Spring API 라이브 테스트 (17개 엔드포인트 전수 검증) + 이슈 코드라인 재검증
 
 ---
@@ -560,3 +560,109 @@ trackingCode, title, eventType, eventDate, location, status, hasFinalFile, updat
 1. DI-3 (XSS): memo/title/clientName에 HTML 이스케이프 또는 sanitizer 적용
 2. DI-2 (Lost Update): Entity에 @Version 필드 추가, 프론트에 409 처리
 3. DI-5 (파일 크기): 최종파일에도 크기/타입 제한 추가
+
+---
+
+## 9. 프론트엔드 라우팅 + 네비게이션 무결성 검증 (Iteration 9)
+
+### 9-A. 라우트 정의 구조
+
+**메뉴 정의 파일**: `CourtReporterMenuItems.tsx` (L49-241)
+
+| 메뉴 항목 | 경로 | gate() | lazy | 라인 |
+|---------|------|--------|------|------|
+| 대시보드 | `/pro/court-reporter/dashboard` | ✅ | ✅ | L62 |
+| 의뢰 관리 | `/pro/court-reporter/request` | ✅ | ✅ | L71 |
+| 의뢰 목록 | `/pro/court-reporter/request` | ✅ | ✅ | L79 |
+| 의뢰 링크 생성 | `/pro/court-reporter/request-link` | ✅ | ✅ | L88 |
+| 속기 작업 | `/pro/court-reporter/work` | ✅ | ✅ | L99 |
+| 작업 목록 | `/pro/court-reporter/work` | ✅ | ✅ | L107 |
+| STT 변환 | `/pro/court-reporter/work/stt` | ✅ | ✅ | L115 |
+| 속기록 편집 | `/pro/court-reporter/work/edit` | ✅ | ✅ | L123 |
+| 일정 관리 | `/pro/court-reporter/schedule` | ✅ | ✅ | L134 |
+| 수수료 관리 | `/pro/court-reporter/fee` | ✅ | ✅ | L143 |
+| 의뢰인 관리 | `/pro/court-reporter/client` | ✅ | ✅ | L152 |
+| 문서 관리 (4개) | `/pro/court-reporter/docs/*` | ✅ | ✅ | L161-201 |
+| 계약 관리 (2개) | `/pro/court-reporter/contract/*` | ✅ | ✅ | L209-229 |
+| 공개 추적 | `/public/court-reporter/tracking` | ❌ | ❌ | L236 |
+
+**결과**: 총 17개 메뉴 항목 중 16개 gate() 적용. 공개 추적 페이지만 의도적 미적용 (public 경로).
+
+### 9-B. 다층 권한 방어 구조
+
+| 계층 | 메커니즘 | 위치 |
+|------|---------|------|
+| 1. 메뉴 노출 | MenuFactoryV2 includeTypes 필터 | MenuFactoryV2.tsx L526-549 |
+| 2. 라우트 등록 | dtype 미매칭 시 라우트 자체 미등록 | MenuFactoryV2.tsx L350-364 |
+| 3. 컴포넌트 렌더 | AdminUserIdGate (dtype/allowedIds) | AdminUserIdGate.tsx L26-49 |
+| 4. 404 폴백 | 미등록 경로 → NotFoundPage | LemonApp.tsx L934 |
+
+**변호사가 /pro/court-reporter/dashboard 직접 입력 시**: 라우트 자체가 미등록 → NotFoundPage 렌더링. ✅ 안전.
+
+### 9-C. Lazy Loading 검증
+
+**모든 페이지 컴포넌트**: `lazyWithRetry()`로 동적 import (L24-37)
+- CourtReporterDashboardPage, WorkListPage, SchedulePage, FeePage 등 6개 페이지 모두 lazy
+- 예외: CourtReporterTrackingPage만 직접 import (다른 서비스 공유, L236)
+
+### 9-D. 프론트엔드 → 백엔드 API 매핑 검증
+
+**API 엔드포인트 15개 (courtReporterConstants.ts 기반)**:
+
+| 프론트엔드 호출 | HTTP | 백엔드 엔드포인트 | 매핑 |
+|---------------|------|------------------|------|
+| fetchJobs() | GET | /api/court-reporter/jobs | ✅ |
+| fetchData() stats | GET | /api/court-reporter/jobs/stats | ✅ |
+| handleSubmit() | POST | /api/court-reporter/jobs | ✅ |
+| 상태 변경 | PATCH | /api/court-reporter/jobs/{id} | ✅ |
+| 수수료 관리 | PATCH | /api/court-reporter/jobs/{id}/fee | ✅ |
+| 계약 조회 | GET | /api/court-reporter/jobs/{id}/contract | ✅ |
+| 기본정보 편집 | PATCH | /api/court-reporter/jobs/{id}/info | ✅ |
+| 메모 편집 | PATCH | /api/court-reporter/jobs/{id}/memo | ✅ |
+| 오디오 업로드 | POST | /api/court-reporter/jobs/{id}/files | ✅ |
+| 납품파일 업로드 | POST | /api/court-reporter/jobs/{id}/final-files | ✅ |
+| 이메일 발송 | POST | /api/court-reporter/jobs/{id}/final-files/{fileId}/send | ✅ |
+| 속기록 편집 | PATCH | /api/court-reporter/jobs/transcripts/{id} | ✅ |
+| STT 시작 | POST | /api/court-reporter/jobs/files/{id}/stt/trigger | ✅ |
+| STT 초기화 | POST | /api/court-reporter/jobs/files/{id}/stt/reset | ✅ |
+| 공개 추적 | GET | /api/court-reporter/jobs/public/tracking/{code} | ✅ |
+
+**매핑 결과**: 15/15 매핑 정상. ✅
+
+### 9-E. 에러 핸들링 패턴
+
+**통일된 패턴 확인:**
+- try-catch + AbortSignal 취소 처리 (`CanceledError` 무시)
+- `setError()` + `<Alert>` 컴포넌트로 사용자 알림
+- `LemonToast.success()` — 성공 액션 (생성/수정/발송) 후 토스트
+- Optimistic UI 업데이트 + 실패 시 롤백 (수수료/상태 변경)
+
+### 9-F. 페이지네이션 검증
+
+- **page**: 0-based (UI 1-based → API 0-based 변환 확인 L528)
+- **size**: CR_CONFIG 상수 기반 기본값
+- **totalPages/total**: 응답에서 파싱 완료
+- **필터 연동**: status, search, dateRange 파라미터 정상 전달
+
+### 9-G. 라우팅 이슈 매트릭스
+
+| ID | 이슈 | 심각도 | 상태 |
+|----|------|--------|------|
+| RT-1 | 공개 추적 페이지 gate() 미적용 | 정상 | 의도적 (public 경로) |
+| RT-2 | 모든 메뉴 항목 lazy loading 적용 | 양호 | ✅ |
+| RT-3 | 다층 권한 방어 (4계층) | 양호 | ✅ |
+| RT-4 | 404 폴백 정상 작동 | 양호 | ✅ |
+| RT-5 | API 15개 매핑 전수 일치 | 양호 | ✅ |
+| RT-6 | 페이지네이션 0-based 변환 정상 | 양호 | ✅ |
+| RT-7 | AbortSignal 취소 처리 | 양호 | ✅ |
+
+### 9-H. Iteration 9 결론
+
+**라우팅/네비게이션 검증 결과: 양호**
+
+1. 17개 메뉴 항목 중 16개 gate() 보호, 1개 의도적 공개
+2. 4계층 권한 방어 (메뉴 필터 → 라우트 미등록 → AdminUserIdGate → 404 폴백)
+3. API 15개 엔드포인트 프론트-백엔드 매핑 전수 일치
+4. 에러 핸들링/페이지네이션/lazy loading 패턴 일관성 확인
+
+**발견된 위험 요소: 없음** — 라우팅 레이어는 상용 수준 달성
