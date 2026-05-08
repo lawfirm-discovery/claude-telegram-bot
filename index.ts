@@ -1,5 +1,5 @@
 import { bot } from "./src/bot";
-import { askClaude, killActiveProcesses } from "./src/claude";
+import { askClaude, killActiveProcesses } from "./src/claude-engine";
 import { startHeartbeat, startCron, fireHook, stopLemonClaw, appendMemoryLog, startSharedMemorySync } from "./src/lemonclaw";
 import { markdownToTelegramHtml, splitMessage } from "./src/format";
 import { startWorkerApi, stopWorkerApi } from "./src/worker-api";
