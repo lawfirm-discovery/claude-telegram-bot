@@ -12,7 +12,7 @@
 import { randomUUID } from "crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, readdirSync, renameSync } from "fs";
 import { join } from "path";
-import { clearSession } from "./claude-engine";
+import { clearSession, getHudInfo } from "./claude-engine";
 import { askClaudeLight, runEvaluator, type EvalResult } from "./evaluator";
 import { runRatchet } from "./test-ratchet";
 import { incr, formatOneLineSummary } from "./metrics";
@@ -93,6 +93,11 @@ const DEFAULT_MAX_WALLCLOCK_SEC = parseInt(process.env.RALPH_MAX_WALLCLOCK_SEC |
 const INVARIANT_STUCK_THRESHOLD = parseInt(process.env.RALPH_INVARIANT_THRESHOLD || "4");
 /** Phase R5.6 — 봇 process RSS 가 이 한도 (MB) 초과 시 사용자 경고. 0 = 비활성. */
 const MEMORY_WARN_RSS_MB = parseInt(process.env.RALPH_MEMORY_WARN_RSS_MB || "2048");
+/**
+ * Phase R9.2 — context window 사용률 (%) 이 임계 넘으면 강제 compact.
+ * SDK 의 HudInfo.contextPercent 활용. default 80 = 80% 넘으면 progress.log 압축 강제.
+ */
+const CONTEXT_AUTO_COMPACT_PERCENT = parseInt(process.env.RALPH_AUTO_COMPACT_PERCENT || "80");
 /**
  * Phase R7.2 — Claude 사용량 한도 도달 시 자동 wait 모드.
  *  - default false: R6.1 그대로 (즉시 halt + 알림)
@@ -319,6 +324,45 @@ function parseResetTimeToMs(resetStr: string): number | null {
   // 24h 이상은 비정상 (다음날 가능성 또는 파싱 오류)
   if (diffMs > 24 * 3600 * 1000) return null;
   return diffMs;
+}
+
+/**
+ * Phase R9.1 — 에러 분류. stochastic (일시적, 재시도 의미 있음) vs deterministic (영구적, 즉시 halt).
+ *
+ * stochastic 예시:
+ *   - rate_limit / 429 / too many requests
+ *   - timeout / ETIMEDOUT / EAGAIN / ECONNRESET
+ *   - 5xx server error
+ *   - network error / fetch failed
+ *
+ * deterministic 예시:
+ *   - auth failed / 401 / 403 / unauthorized
+ *   - file not found / ENOENT / no such file
+ *   - permission denied / EACCES
+ *   - syntax error / parse error
+ *   - 4xx (rate_limit 외)
+ *
+ * stochastic → exponential backoff (1s → 5s → 15s) 후 retry.
+ * deterministic → 즉시 break + 사용자 알림.
+ */
+type ErrorClass = "stochastic" | "deterministic" | "unknown";
+function classifyError(msg: string): ErrorClass {
+  if (!msg) return "unknown";
+  const lower = msg.toLowerCase();
+
+  // deterministic 패턴 우선 (rate_limit 외 4xx 등)
+  if (/(?:^|\s|:)(401|403|404|409|422)\b/.test(lower)) return "deterministic";
+  if (/auth(?:_|entication)|login|unauthorized|forbidden/i.test(lower) && !/usage|out\s*of/i.test(lower)) return "deterministic";
+  if (/permission\s*denied|eacces|enoent|no\s*such\s*file/i.test(lower)) return "deterministic";
+  if (/syntax\s*error|parse\s*error|invalid\s*(input|json)|malformed/i.test(lower)) return "deterministic";
+
+  // stochastic 패턴
+  if (/rate\s*limit|429|too\s*many\s*requests/i.test(lower)) return "stochastic";
+  if (/timeout|etimedout|eagain|econnreset|esockettimedout/i.test(lower)) return "stochastic";
+  if (/5\d\d\s*(?:server|gateway|service)|internal\s*server\s*error|bad\s*gateway|service\s*unavailable/i.test(lower)) return "stochastic";
+  if (/network\s*(error|down)|fetch\s*failed|connection\s*(refused|reset|timed\s*out)/i.test(lower)) return "stochastic";
+
+  return "unknown";
 }
 
 function detectUsageLimit(text: string): { hit: boolean; resetAt?: string; raw?: string } {
@@ -666,6 +710,27 @@ async function compressContext(taskId: string, prd: TaskPRD): Promise<void> {
   const newLines = lines.slice(prd.lastCompressLine);
   if (newLines.length < 20) return;
 
+  // Phase R9.3 — pre-compact archival. context.md + progress.jsonl 의 새 부분을 immutable archive 에 보존.
+  //   압축 후 정보 잃어도 raw archive 로 사후 진단 가능.
+  try {
+    const archiveDir = join(taskDir(taskId), "responses", "archives");
+    if (!existsSync(archiveDir)) mkdirSync(archiveDir, { recursive: true });
+    const ts = new Date().toISOString().replace(/[T:]/g, "_").slice(0, 19);
+    const archivePath = join(archiveDir, `pre-compact-${ts}.txt`);
+    const existingContext = readContext(taskId);
+    const archiveContent = [
+      "## context.md (압축 전)",
+      existingContext || "(empty)",
+      "",
+      `## progress lines ${prd.lastCompressLine}~${lines.length} (${newLines.length}줄)`,
+      newLines.join("\n"),
+    ].join("\n");
+    writeFileSync(archivePath, archiveContent);
+    appendProgress(taskId, `PRE-COMPACT ARCHIVE: ${archivePath.split("/").slice(-3).join("/")}`);
+  } catch {
+    // archive 실패는 무시 — 본 압축 동작 막지 않음
+  }
+
   const existing = readContext(taskId);
 
   const prompt = `아래 작업 로그를 간결한 요약으로 합쳐주세요.
@@ -949,9 +1014,26 @@ export async function runRalphLoop(
           }
         }
 
-        // 3. 컨텍스트 압축 체크
+        // Phase R9.4 — Cache hit metrics + 토큰 사용량 progress.jsonl 기록
+        const hud = getHudInfo(syntheticChatId);
+        if (hud) {
+          appendProgress(taskId,
+            `USAGE: in=${hud.inputTokens} out=${hud.outputTokens} cache=${hud.cacheRead} ` +
+            `ctx=${hud.contextPercent}% turns=${hud.turnNumber}`
+          );
+          incr("ralph.tokens.input", hud.inputTokens);
+          incr("ralph.tokens.output", hud.outputTokens);
+          incr("ralph.tokens.cache_read", hud.cacheRead);
+        }
+
+        // 3. 컨텍스트 압축 체크 — line 기반 + Phase R9.2 budget 기반
         const lineCount = readProgressLines(taskId).length;
-        if (lineCount - prd.lastCompressLine >= COMPRESS_THRESHOLD) {
+        const contextHigh = hud && hud.contextPercent >= CONTEXT_AUTO_COMPACT_PERCENT;
+        if (lineCount - prd.lastCompressLine >= COMPRESS_THRESHOLD || contextHigh) {
+          if (contextHigh) {
+            appendProgress(taskId, `BUDGET COMPACT: ctx=${hud!.contextPercent}% ≥ ${CONTEXT_AUTO_COMPACT_PERCENT}% → 강제 압축`);
+            incr("ralph.budget_compact");
+          }
           await compressContext(taskId, prd);
         }
 
@@ -1113,12 +1195,37 @@ export async function runRalphLoop(
         appendProgress(taskId, `ITERATION ${item.iteration} ERROR: ${e.message}`);
         item.error = e.message;
 
-        if (/auth|billing|api_key/i.test(e.message)) {
+        // Phase R9.1 — 에러 분류 기반 처리
+        const errClass = classifyError(e.message || "");
+
+        // deterministic 에러 (auth/permission/parse 등) → 즉시 halt (재시도 무의미)
+        if (errClass === "deterministic" || /auth|billing|api_key/i.test(e.message)) {
+          incr("ralph.error.deterministic");
           prd.status = "failed";
           savePRD(prd);
-          releaseTaskLock(taskId); // 인증 실패도 정상 종료 — lock 해제
+          releaseTaskLock(taskId);
+          await sendTg(prd.requestedBy,
+            `🚨 Ralph #${taskId} — 영구 에러 (즉시 halt)\n` +
+            `iter ${item.iteration}: ${e.message?.slice(0, 150)}\n` +
+            `대응: 에러 원인 수정 후 새 task 시작`,
+          );
           return { taskId, completed: false, totalIterations, error: e.message };
         }
+
+        // stochastic 에러 (rate_limit/timeout/5xx) → exponential backoff retry
+        if (errClass === "stochastic") {
+          const backoffSec = Math.min(15, 1 + (item.iteration ?? 1) * 2);
+          incr("ralph.error.stochastic");
+          appendProgress(taskId, `STOCHASTIC ERROR → ${backoffSec}s backoff 후 재시도`);
+          await new Promise((r) => setTimeout(r, backoffSec * 1000));
+          // iteration 카운트 증가 안 시킴 (같은 iter 재시도)
+          item.iteration--;
+          totalIterations--;
+          savePRD(prd);
+          continue; // outer while 의 다음 반복 (iteration ++ 다시 됨 → 같은 번호)
+        }
+
+        // unknown — 기존 동작 (다음 iteration 진입, 단 iter 차감 X)
       }
 
       savePRD(prd);
