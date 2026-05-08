@@ -39,20 +39,45 @@ async function waitForPollingSlot(token: string, maxWaitMs = 60_000): Promise<bo
 }
 
 // ── PID 파일 기반 중복 실행 방지 ──
+// Phase R11.1 — 자기 자신 PID 체크 + 실제 봇 process 인지 cmdline 검증.
+//   기존 버그: oldPid === process.pid 면 자기 자신 SIGTERM. systemd 가 4060 봇을
+//   1m10s 만에 종료시킨 사고의 root cause 추정.
 const PID_FILE = join(import.meta.dir, process.env.BOT_PID_FILE || "bot.pid");
+
+function isBotProcess(pid: number): boolean {
+  // /proc/<pid>/cmdline 읽어서 bun + index.ts 실행 중인지 확인 (Linux). macOS 는 ps.
+  try {
+    const cmdline = readFileSync(`/proc/${pid}/cmdline`, "utf-8").replace(/\0/g, " ");
+    return /bun/.test(cmdline) && /index\.ts/.test(cmdline);
+  } catch {
+    // /proc 없음 (macOS) — 일단 true 반환 (낙관적, kill 직전 한 번 더 확인 가능)
+    return true;
+  }
+}
+
 async function checkAndWritePid(): Promise<void> {
   if (existsSync(PID_FILE)) {
     const oldPid = parseInt(readFileSync(PID_FILE, "utf-8").trim());
     if (oldPid && !isNaN(oldPid)) {
-      try {
-        process.kill(oldPid, 0);
-        console.log(`[Bot] Killing previous instance (PID ${oldPid})...`);
-        process.kill(oldPid, "SIGTERM");
-        Bun.sleepSync(3000);
-        try { process.kill(oldPid, "SIGKILL"); } catch {}
-        Bun.sleepSync(1000);
-      } catch {
-        // 프로세스가 이미 죽어있음 — 정상
+      // Phase R11.1 — 자기 자신 차단 (race condition 방지)
+      if (oldPid === process.pid) {
+        console.log(`[Bot] PID file references self (pid=${oldPid}) — skipping kill`);
+      } else {
+        try {
+          process.kill(oldPid, 0); // exists check
+          // R11.1 — 실제 bun 봇 process 인지 확인 (다른 unrelated process 죽이지 않게)
+          if (isBotProcess(oldPid)) {
+            console.log(`[Bot] Killing previous bot instance (PID ${oldPid})...`);
+            process.kill(oldPid, "SIGTERM");
+            Bun.sleepSync(3000);
+            try { process.kill(oldPid, "SIGKILL"); } catch {}
+            Bun.sleepSync(1000);
+          } else {
+            console.log(`[Bot] PID ${oldPid} exists but not a bot process — skipping kill`);
+          }
+        } catch {
+          // 프로세스가 이미 죽어있음 — 정상
+        }
       }
     }
   }
@@ -211,13 +236,37 @@ async function startBot(): Promise<void> {
 startBot();
 
 // #4 Graceful shutdown — 진행 중 작업 완료 대기 후 종료
-// Phase R7.1: signal source + uptime 진단 로깅 (사후 봇 재시작 사이클 분석용)
+// Phase R7.1 + R11.2: signal source + uptime + parent process 진단 로깅
 const __startupTime = Date.now();
 const shutdown = async (signal: string) => {
   const uptimeSec = Math.round((Date.now() - __startupTime) / 1000);
   const uptimeStr = uptimeSec >= 60 ? `${Math.floor(uptimeSec / 60)}m${uptimeSec % 60}s` : `${uptimeSec}s`;
   console.log(`\nShutting down... (signal=${signal}, uptime=${uptimeStr}, pid=${process.pid})`);
   console.log(`[shutdown] reason: ${signal === "SIGTERM" ? "SIGTERM (외부 신호 — launchd/systemd/manual)" : signal === "SIGINT" ? "SIGINT (Ctrl+C 또는 스크립트)" : signal}`);
+
+  // Phase R11.2 — SIGTERM source 진단 (parent / status / cmdline)
+  if (signal === "SIGTERM") {
+    try {
+      const status = readFileSync(`/proc/${process.pid}/status`, "utf-8");
+      const ppidMatch = status.match(/PPid:\s*(\d+)/);
+      const ppid = ppidMatch ? parseInt(ppidMatch[1]) : 0;
+      let parentInfo = `ppid=${ppid}`;
+      if (ppid > 0) {
+        try {
+          const parentCmd = readFileSync(`/proc/${ppid}/cmdline`, "utf-8").replace(/\0/g, " ").trim();
+          const parentStatus = readFileSync(`/proc/${ppid}/status`, "utf-8");
+          const pNameMatch = parentStatus.match(/Name:\s*(\S+)/);
+          parentInfo += ` parent=${pNameMatch?.[1] || "?"} cmd="${parentCmd.slice(0, 100)}"`;
+        } catch { parentInfo += ` parent=(unable to read)`; }
+      }
+      console.log(`[shutdown] ${parentInfo}`);
+      // 실행 중인 child process 도 (전파된 SIGTERM 인지)
+      const children = readFileSync(`/proc/${process.pid}/task/${process.pid}/children`, "utf-8").trim();
+      if (children) console.log(`[shutdown] children=${children.slice(0, 100)}`);
+    } catch {
+      // /proc 없음 (macOS) — skip
+    }
+  }
   try { unlinkSync(PID_FILE); } catch {}
   stopLemonClaw();
   stopHealthCheck();
