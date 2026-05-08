@@ -20,6 +20,7 @@ export interface EvalResult {
   complete: boolean;
   reason: string;
   remainingWork?: string;
+  nextFocus?: string; // 다음 반복에서 집중할 구체적 작업
 }
 
 export interface EvaluatorContext {
@@ -134,9 +135,9 @@ ${ctx.testResult}
 - "원본 작업 범위 밖"이라는 사유로 미완료 처리하지 말 것 (작업 자체가 명확하지 않으면 complete=true)
 
 JSON 한 개만 응답 (코드블록 없이, 다른 텍스트 없이):
-{"complete": true, "reason": "판정 이유"}
+{"complete": true, "reason": "판정 이유", "nextFocus": null}
 또는
-{"complete": false, "reason": "미완료 이유", "remainingWork": "남은 작업"}`;
+{"complete": false, "reason": "미완료 이유", "remainingWork": "남은 작업", "nextFocus": "다음 반복에서 반드시 해결해야 할 구체적 작업 한 줄"}`;
 }
 
 function extractJson(raw: string): EvalResult | null {
@@ -150,6 +151,7 @@ function extractJson(raw: string): EvalResult | null {
       complete: obj.complete,
       reason: obj.reason,
       remainingWork: typeof obj.remainingWork === "string" ? obj.remainingWork : undefined,
+      nextFocus: typeof obj.nextFocus === "string" ? obj.nextFocus : undefined,
     };
   } catch {
     return null;

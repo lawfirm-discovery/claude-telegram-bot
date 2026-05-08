@@ -13,7 +13,7 @@ import { randomUUID } from "crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, readdirSync, renameSync } from "fs";
 import { join } from "path";
 import { clearSession } from "./claude-engine";
-import { askClaudeLight, runEvaluator } from "./evaluator";
+import { askClaudeLight, runEvaluator, type EvalResult } from "./evaluator";
 import { runRatchet } from "./test-ratchet";
 import { incr, formatOneLineSummary } from "./metrics";
 import { appendMemoryLog } from "./lemonclaw";
@@ -62,7 +62,7 @@ export interface RalphLoopResult {
 // ═══════════════════════════════════════════════════════════════
 
 const TASKS_DIR = join(import.meta.dir, "..", "tasks");
-const MAX_ITERATIONS = parseInt(process.env.RALPH_MAX_ITERATIONS || "10");
+const MAX_ITERATIONS = parseInt(process.env.RALPH_MAX_ITERATIONS || "30");
 const COMPRESS_THRESHOLD = 60;
 
 const REPO_PATHS: Record<string, string> = {
@@ -134,7 +134,7 @@ export function createTask(params: {
   repo: string;
   branch: string;
   files: string[];
-  items: Array<{ description: string }>;
+  items: Array<{ description: string; maxIterations?: number }>;
 }): TaskPRD {
   const taskId = params.taskId || randomUUID().slice(0, 8);
   const prd: TaskPRD = {
@@ -151,13 +151,51 @@ export function createTask(params: {
       description: item.description,
       passes: false,
       iteration: 0,
-      maxIterations: MAX_ITERATIONS,
+      maxIterations: item.maxIterations ?? MAX_ITERATIONS,
     })),
     lastCompressLine: 0,
   };
   savePRD(prd);
   appendProgress(taskId, `TASK CREATED: ${params.originalPrompt.slice(0, 200)}`);
   return prd;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Sub-Goal Planner — 작업을 검증 가능한 서브목표로 분해
+// ═══════════════════════════════════════════════════════════════
+
+export async function planSubGoals(
+  originalPrompt: string,
+  repo: string,
+): Promise<Array<{ description: string; maxIterations: number }>> {
+  const repoInfo = repo && REPO_PATHS[repo]
+    ? `\n대상 레포: ${repo} (${REPO_PATHS[repo]})`
+    : "";
+
+  const prompt = `당신은 소프트웨어 작업 계획자입니다. 주어진 작업을 검증 가능한 서브목표로 분해하세요.
+
+## 작업
+${originalPrompt}${repoInfo}
+
+## 규칙
+- 단순 작업: 1~2개, 중간 작업: 3~5개, 복잡한 작업: 5~7개 서브목표
+- 각 목표는 독립적으로 완료 가능하고 검증 방법이 명확해야 함
+- maxIterations: 단순=10, 보통=20, 복잡=30 (최대 40)
+- JSON 배열만 반환 (다른 텍스트 없이):
+
+[{"description": "구체적 서브목표", "maxIterations": 20}]`;
+
+  const raw = await askClaudeLight(prompt, { timeoutMs: 30_000 });
+  const match = raw.match(/\[[\s\S]*\]/);
+  if (!match) throw new Error("planSubGoals: JSON 배열 파싱 실패");
+
+  const parsed = JSON.parse(match[0]);
+  if (!Array.isArray(parsed) || !parsed.length) throw new Error("planSubGoals: 빈 결과");
+
+  return parsed.map((g: any) => ({
+    description: String(g.description || "").slice(0, 500),
+    maxIterations: Math.min(40, Math.max(5, parseInt(g.maxIterations) || MAX_ITERATIONS)),
+  }));
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -223,6 +261,10 @@ export async function runRalphLoop(
     item.startedAt = item.startedAt || Date.now();
     appendProgress(taskId, `ITEM START: ${item.id} — ${item.description.slice(0, 100)}`);
 
+    let lastEvalFeedback: EvalResult | undefined;
+    let stuckCount = 0;
+    let lastEvalReason = "";
+
     while (!item.passes && item.iteration < item.maxIterations) {
       item.iteration++;
       totalIterations++;
@@ -234,10 +276,10 @@ export async function runRalphLoop(
       // 매 반복마다 세션 초기화 → 깨끗한 컨텍스트
       clearSession(syntheticChatId);
 
-      // 1. 프롬프트 조합
+      // 1. 프롬프트 조합 (이전 평가 피드백 포함)
       const context = readContext(taskId);
       const recentLog = readProgressLines(taskId).slice(-10).join("\n");
-      const prompt = buildIterationPrompt(prd, item, context, recentLog);
+      const prompt = buildIterationPrompt(prd, item, context, recentLog, lastEvalFeedback);
 
       // 2. Claude 실행
       try {
@@ -266,13 +308,50 @@ export async function runRalphLoop(
           recentLogTail: readProgressLines(taskId).slice(-10).join("\n"),
           testResult: testSummary,
         });
-        appendProgress(taskId, `EVALUATOR: complete=${evalResult.complete}, reason=${evalResult.reason}`);
+        appendProgress(taskId, `EVALUATOR: complete=${evalResult.complete}, reason=${evalResult.reason}${evalResult.nextFocus ? `, nextFocus=${evalResult.nextFocus}` : ""}`);
         if (evalResult.reason.startsWith("evaluator: JSON parse failed")) {
           incr("evaluator.parse_failed");
         } else {
           incr(evalResult.complete ? "evaluator.complete" : "evaluator.incomplete");
         }
         incr("ralph.iteration.end");
+
+        // 6. Stuck 감지 — 동일 미완료 사유 3회 연속이면 사용자 에스컬레이트
+        if (!evalResult.complete) {
+          if (evalResult.reason === lastEvalReason) {
+            stuckCount++;
+          } else {
+            stuckCount = 0;
+            lastEvalReason = evalResult.reason;
+          }
+          if (stuckCount >= 3) {
+            const stuckMsg =
+              `⚠️ Ralph #${taskId} — ${item.id} stuck!\n` +
+              `동일 문제 ${stuckCount + 1}회 반복: ${evalResult.reason}\n` +
+              `${evalResult.nextFocus ? `집중 영역: ${evalResult.nextFocus}\n` : ""}` +
+              `수동 확인 후 /ralph status ${taskId}`;
+            await sendTg(prd.requestedBy, stuckMsg);
+            appendProgress(taskId, `STUCK DETECTED: ${evalResult.reason}`);
+            item.error = `stuck: ${evalResult.reason}`;
+            incr("ralph.stuck");
+            break;
+          }
+        } else {
+          stuckCount = 0;
+          lastEvalReason = "";
+        }
+
+        // 7. 다음 반복에 평가 피드백 전달
+        lastEvalFeedback = evalResult;
+
+        // 8. 짝수 반복마다 진행 상황 알림 (1회는 item 시작 알림과 중복 방지)
+        if (item.iteration % 2 === 0 && !evalResult.complete) {
+          const iterMsg =
+            `🔄 Ralph #${taskId} — ${item.id} iter ${item.iteration}/${item.maxIterations}\n` +
+            `테스트: ${testResult.passed ? "✅" : "❌"} | 평가: 미완료\n` +
+            `${evalResult.nextFocus ? `다음 집중: ${evalResult.nextFocus.slice(0, 80)}` : evalResult.reason.slice(0, 80)}`;
+          await sendTg(prd.requestedBy, iterMsg);
+        }
 
         if (evalResult.complete && testResult.passed) {
           item.passes = true;
@@ -284,9 +363,6 @@ export async function runRalphLoop(
           );
         } else if (!testResult.passed) {
           appendProgress(taskId, `TEST FAILED → next iteration will fix`);
-          await sendTg(prd.requestedBy,
-            `🔄 Ralph #${taskId} — ${item.id} iter ${item.iteration}: 테스트 실패, 다음 반복에서 수정`
-          );
         } else {
           appendProgress(taskId, `NOT COMPLETE: ${evalResult.remainingWork || evalResult.reason}`);
         }
@@ -339,7 +415,13 @@ export async function runRalphLoop(
 // Prompt Builder
 // ═══════════════════════════════════════════════════════════════
 
-function buildIterationPrompt(prd: TaskPRD, item: TaskItem, context: string, recentLog: string): string {
+function buildIterationPrompt(
+  prd: TaskPRD,
+  item: TaskItem,
+  context: string,
+  recentLog: string,
+  lastEvalFeedback?: EvalResult,
+): string {
   const parts: string[] = [];
 
   if (context) {
@@ -356,6 +438,21 @@ function buildIterationPrompt(prd: TaskPRD, item: TaskItem, context: string, rec
     parts.push(`## 최근 진행 로그\n${recentLog}`);
   }
 
+  // 이전 평가자 피드백 — 다음 반복에서 집중할 방향 제시
+  if (lastEvalFeedback && !lastEvalFeedback.complete) {
+    const feedbackLines = [
+      `이전 반복에서 평가자가 **미완료**로 판정했습니다.`,
+      `- 판정 이유: ${lastEvalFeedback.reason}`,
+    ];
+    if (lastEvalFeedback.nextFocus) {
+      feedbackLines.push(`- 이번 반복에서 반드시 해결할 것: **${lastEvalFeedback.nextFocus}**`);
+    }
+    if (lastEvalFeedback.remainingWork) {
+      feedbackLines.push(`- 남은 작업: ${lastEvalFeedback.remainingWork}`);
+    }
+    parts.push(`## ⚠️ 이전 평가자 피드백\n${feedbackLines.join("\n")}`);
+  }
+
   if (item.iteration > 1) {
     parts.push(`## 주의사항
 - 이것은 반복 ${item.iteration}/${item.maxIterations}입니다
@@ -370,6 +467,67 @@ function buildIterationPrompt(prd: TaskPRD, item: TaskItem, context: string, rec
   }
 
   return parts.join("\n\n");
+}
+
+// ═══════════════════════════════════════════════════════════════
+// startRalphTask — 사용자 직접 호출용 (bot.ts /ralph 커맨드)
+// ═══════════════════════════════════════════════════════════════
+
+export async function startRalphTask(params: {
+  originalPrompt: string;
+  requestedBy: string;
+  repo?: string;
+  askClaude: AskClaudeFn;
+  sendTg: SendTelegramFn;
+}): Promise<{ taskId: string; planText: string }> {
+  const repo = params.repo || "";
+
+  // 작업을 서브목표로 분해 (실패하면 단일 아이템으로 폴백)
+  let items: Array<{ description: string; maxIterations: number }>;
+  let planText: string;
+  try {
+    const subGoals = await planSubGoals(params.originalPrompt, repo);
+    items = subGoals;
+    planText = subGoals
+      .map((g, i) => `${i + 1}. ${g.description} (최대 ${g.maxIterations}회)`)
+      .join("\n");
+  } catch (e: any) {
+    console.warn(`[Ralph] planSubGoals failed (${e.message}), falling back to single item`);
+    items = [{ description: params.originalPrompt, maxIterations: MAX_ITERATIONS }];
+    planText = `1. ${params.originalPrompt} (최대 ${MAX_ITERATIONS}회)`;
+  }
+
+  const prd = createTask({
+    originalPrompt: params.originalPrompt,
+    requestedBy: params.requestedBy,
+    repo,
+    branch: "",
+    files: [],
+    items,
+  });
+
+  // 백그라운드 실행 — bot에는 즉시 응답, 루프는 별도로 진행
+  (async () => {
+    try {
+      const result = await runRalphLoop(prd.taskId, params.askClaude, params.sendTg);
+      const elapsed = Math.round(((loadPRD(prd.taskId)?.completedAt || Date.now()) - prd.createdAt) / 1000);
+      if (result.completed) {
+        await params.sendTg(
+          params.requestedBy,
+          `🎉 Ralph #${prd.taskId} 전체 완료!\n⏱ ${elapsed}s | ${result.totalIterations} iterations`,
+        );
+      } else {
+        await params.sendTg(
+          params.requestedBy,
+          `❌ Ralph #${prd.taskId} 미완료\n⏱ ${elapsed}s | ${result.totalIterations} iterations\n사유: ${result.error || "일부 아이템 실패"}\n/ralph status ${prd.taskId}`,
+        );
+      }
+    } catch (e: any) {
+      await params.sendTg(params.requestedBy, `❌ Ralph #${prd.taskId} 예외: ${e.message}`).catch(() => {});
+    }
+  })();
+
+  return { taskId: prd.taskId, planText };
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -433,7 +591,7 @@ export function formatRalphStatus(taskId: string): string {
   const elapsedStr = elapsed >= 60 ? `${Math.floor(elapsed / 60)}m${elapsed % 60}s` : `${elapsed}s`;
   const lines = [
     `📋 Ralph #${prd.taskId} — ${prd.status}`,
-    `⏱ ${elapsedStr} | ${prd.repo} | ${prd.branch}`,
+    `⏱ ${elapsedStr} | ${prd.repo || "no-repo"} | ${prd.branch || "no-branch"}`,
     `📝 ${prd.originalPrompt.slice(0, 100)}`,
     "",
   ];

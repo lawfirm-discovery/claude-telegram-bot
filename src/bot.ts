@@ -7,7 +7,7 @@ import {
   executeWorkerTask, getWorkerBots, formatAffinityReport,
   quickDelegate, detectDelegateMessage,
 } from "./orchestrator";
-import { formatRalphStatus, listTasks } from "./ralph-loop";
+import { formatRalphStatus, listTasks, startRalphTask } from "./ralph-loop";
 import {
   detectApprovalRequest,
   getApprovalEmoji,
@@ -299,7 +299,36 @@ bot.command("ralph", async (ctx) => {
     return;
   }
 
-  await ctx.reply("사용법:\n/ralph — 최근 태스크\n/ralph status <taskId>\n/ralph list");
+  // 서브커맨드가 아니면 새 Ralph 태스크 시작
+  const chatId = ctx.chat.id.toString();
+  const sendTg: (targetChatId: string, msg: string) => Promise<void> = async (targetChatId, msg) => {
+    try {
+      for (const chunk of splitMessage(msg)) {
+        await bot.api.sendMessage(parseInt(targetChatId) || ctx.chat.id, chunk, { parse_mode: "HTML" });
+      }
+    } catch (e: any) {
+      console.error(`[Ralph] sendTg error: ${e.message}`);
+    }
+  };
+
+  await ctx.reply("🔍 목표 분해 및 계획 수립 중...");
+  try {
+    const result = await startRalphTask({
+      originalPrompt: arg,
+      requestedBy: chatId,
+      askClaude,
+      sendTg,
+    });
+    await ctx.reply(
+      `✅ <b>Ralph #${result.taskId} 시작!</b>\n\n` +
+      `📋 <b>계획:</b>\n${escapeHtml(result.planText)}\n\n` +
+      `백그라운드에서 실행 중 — 완료 시 자동 알림.\n` +
+      `<code>/ralph status ${result.taskId}</code>`,
+      { parse_mode: "HTML" }
+    );
+  } catch (e: any) {
+    await ctx.reply(`❌ Ralph 시작 실패: ${escapeHtml(e.message)}`, { parse_mode: "HTML" });
+  }
 });
 
 // Pending orchestration approvals
