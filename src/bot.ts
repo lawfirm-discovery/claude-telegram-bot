@@ -287,20 +287,33 @@ bot.command("sync", async (ctx) => {
   }
 
   const RESTART_SECRET = process.env.RESTART_SECRET || "lemonclaw-restart-2024";
-  const syncCmd = `cd /home/angrylawyer/claude-telegram-bot && git fetch origin && git checkout ${branch} && git pull origin ${branch} && pm2 restart lemonclaw-worker 2>&1 || pm2 restart lemonclaw-bot 2>&1 || true`;
+  const syncCmd = `cd /home/angrylawyer/claude-telegram-bot && git fetch origin && git checkout ${branch} && git pull origin ${branch} && bun install --frozen-lockfile 2>/dev/null; echo PULL_OK`;
 
   await ctx.reply(`🔄 ${targets.length}개 워커에 <code>${branch}</code> 동기화 시작...`, { parse_mode: "HTML" });
 
   const results = await Promise.allSettled(
     targets.map(async (w) => {
-      const resp = await fetch(`${w.apiUrl}/exec`, {
+      // Step 1: git pull
+      const pullResp = await fetch(`${w.apiUrl}/exec`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ secret: RESTART_SECRET, command: syncCmd, timeout: 60000 }),
         signal: AbortSignal.timeout(70_000),
       });
-      const data = await resp.json() as any;
-      return { name: w.name, ok: data.ok, stdout: data.stdout?.slice(-500) || "", stderr: data.stderr?.slice(-300) || "", exitCode: data.exitCode };
+      const pullData = await pullResp.json() as any;
+      if (!pullData.stdout?.includes("PULL_OK")) {
+        return { name: w.name, ok: false, msg: pullData.stderr?.slice(-300) || pullData.stdout?.slice(-300) || "git pull failed" };
+      }
+      // Step 2: restart via /restart (responds first, then exits after 1s)
+      try {
+        await fetch(`${w.apiUrl}/restart`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ secret: RESTART_SECRET, reason: `sync: ${branch}` }),
+          signal: AbortSignal.timeout(10_000),
+        });
+      } catch {}
+      return { name: w.name, ok: true, msg: pullData.stdout?.slice(-300) || "synced" };
     })
   );
 
@@ -308,8 +321,7 @@ bot.command("sync", async (ctx) => {
     if (r.status === "rejected") return `❌ ${targets[i]?.name}: ${r.reason?.message || "fetch 실패"}`;
     const d = r.value;
     const icon = d.ok ? "✅" : "❌";
-    const out = d.stdout ? `\n<code>${escapeHtml(d.stdout.slice(-200))}</code>` : "";
-    return `${icon} <b>${d.name}</b>${out}`;
+    return `${icon} <b>${d.name}</b>\n<code>${escapeHtml(d.msg.slice(-200))}</code>`;
   });
 
   await ctx.reply(`📦 동기화 결과 (<code>${branch}</code>):\n\n${lines.join("\n\n")}`, { parse_mode: "HTML" });
