@@ -1,7 +1,7 @@
 # 속기사(Court Reporter) ERP 핵심 기능 검증
 
-> 최종 업데이트: 2026-05-08 (Iteration 4 — 전체 17개 엔드포인트 라이브 테스트 + 응답 본문 수집 완료)
-> 검증 방법: 코드 레벨 정적분석 + Spring API 라이브 테스트 (17개 엔드포인트 전수 검증)
+> 최종 업데이트: 2026-05-08 (Iteration 6 — 이슈 재검증 + 심각도 재평가 완료)
+> 검증 방법: 코드 레벨 정적분석 + Spring API 라이브 테스트 (17개 엔드포인트 전수 검증) + 이슈 코드라인 재검증
 
 ---
 
@@ -344,3 +344,30 @@ trackingCode, title, eventType, eventDate, location, status, hasFinalFile, updat
 | CourtReporterFinalFileEntity.java | 최종 납품 파일 엔티티 |
 | CourtReporterJobRepository.java (73줄) | 네이티브 SQL 필터 쿼리 |
 | CourtReporterJobDto.java | DTO (Create/Update/Response 전체) |
+
+---
+
+## Iteration 6: 이슈 코드라인 재검증 (2026-05-08)
+
+### C1 재검증: priority 백엔드 enum 검증 없음 — **확인됨 (심각도 유지: 중)**
+- `createJob` (Service:195): `req.getPriority()` 그대로 저장, VALID_PRIORITIES 검증 없음
+- `updateJobInfo` (Service:153-155): VALID_PRIORITIES 검증 있음 (createJob과 비대칭)
+- **영향**: 생성 시 임의 문자열 저장 가능, 프론트엔드 드롭다운으로만 제한
+- **수정 제안**: createJob에도 동일한 VALID_PRIORITIES 검증 추가
+
+### C5 재검증: clientEmail null 시 최종파일 발송 — **심각도 하향 (중→낮)**
+- `sendFinalFile` (Service:441-444): null/blank 시 BAD_REQUEST 400 + "의뢰인 이메일이 등록되지 않았습니다." 명시적 에러
+- **이전 평가**: "에러 지연 발생" → **실제**: 즉시 400 반환으로 graceful 처리
+- **결론**: 정상 동작. 프론트엔드에서 발송 전 이메일 입력 안내 UX 추가 권장
+
+### L1 재검증: WorkListPage 날짜 필터 미전송 — **확인됨 (심각도 유지: 중)**
+- `fetchJobs` (WorkListPage:207-214): params에 page/size/status/search만 전송
+- 백엔드 Repository: startDate/endDate 네이티브 쿼리 지원됨
+- SchedulePage/FeePage: 날짜 필터 정상 사용 중
+- **영향**: 작업 목록에서 날짜 범위 필터링 불가 (대량 데이터 시 불편)
+
+### D1 재검증: 작업 삭제 hard delete — **확인됨 (심각도 유지: 중)**
+- `deleteJob` (Service:526-537): `jobRepository.delete(job)` 물리 삭제
+- 자식 엔티티 3종(transcripts/files/finalFiles) 순차 삭제 후 본 엔티티 삭제
+- **영향**: 삭제 후 복구 불가, 감사 이력 없음
+- **수정 제안**: deletedAt soft delete + 30일 후 batch 정리 검토
