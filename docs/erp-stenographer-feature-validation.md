@@ -1,7 +1,7 @@
 # 속기사(Court Reporter) ERP 핵심 기능 검증
 
-> 최종 업데이트: 2026-05-08 (Iteration 2)
-> 검증 방법: 코드 레벨 정적분석 + Spring API 라이브 테스트 (200 OK 복구)
+> 최종 업데이트: 2026-05-08 (Iteration 3 — 전체 엔드포인트 라이브 테스트 완료)
+> 검증 방법: 코드 레벨 정적분석 + Spring API 라이브 테스트 (16개 엔드포인트 전수 검증)
 
 ---
 
@@ -10,21 +10,32 @@
 | 항목 | 상태 |
 |------|------|
 | 프론트엔드 서버 | https://100.108.86.92:3011 — **200 OK** |
-| Spring API | https://100.108.86.92:3011/api — **200 OK** (복구됨) |
-| 인증 보호 | 모든 엔드포인트 401 반환 확인 (공개 추적 제외) |
-| 공개 추적 API | 404 + 정확한 에러 메시지 반환 확인 |
+| Spring API | https://100.108.86.92:3011/api — **200 OK** |
+| 인증 보호 | 15개 엔드포인트 401 반환 확인 |
+| 공개 추적 API | 인증 없이 접근 가능, 404 + 정확한 에러 메시지 |
 | 프론트엔드 라우트 | 5개 모두 200 OK (dashboard/work/schedule/fee/tracking) |
+| 테스트 일시 | 2026-05-08T11:07 KST |
 
-### 라이브 테스트 결과
+### 라이브 테스트 결과 (전체 16개 엔드포인트)
 
 | 엔드포인트 | 메서드 | 인증없이 | 예상 | 실제 |
 |-----------|--------|---------|------|------|
 | `/api/court-reporter/jobs` | GET | 401 | 401 | **PASS** |
-| `/api/court-reporter/jobs/stats` | GET | 401 | 401 | **PASS** |
 | `/api/court-reporter/jobs` | POST | 401 | 401 | **PASS** |
+| `/api/court-reporter/jobs/stats` | GET | 401 | 401 | **PASS** |
+| `/api/court-reporter/jobs/1` | GET | 401 | 401 | **PASS** |
 | `/api/court-reporter/jobs/1` | DELETE | 401 | 401 | **PASS** |
-| `/api/court-reporter/jobs/public/tracking/ABCDEF123456` | GET | 404 | 404 | **PASS** |
-| `/api/court-reporter/jobs/public/tracking/` | GET | 404 | 404 | **PASS** |
+| `/api/court-reporter/jobs/1/info` | PATCH | 401 | 401 | **PASS** |
+| `/api/court-reporter/jobs/1/status` | PATCH | 401 | 401 | **PASS** |
+| `/api/court-reporter/jobs/1/memo` | PATCH | 401 | 401 | **PASS** |
+| `/api/court-reporter/jobs/1/fee` | PATCH | 401 | 401 | **PASS** |
+| `/api/court-reporter/jobs/1/files` | POST | 401 | 401 | **PASS** |
+| `/api/court-reporter/jobs/1/final-files` | POST | 401 | 401 | **PASS** |
+| `/api/court-reporter/jobs/1/contract` | GET | 401 | 401 | **PASS** |
+| `/api/court-reporter/jobs/files/1/stt/trigger` | POST | 401 | 401 | **PASS** |
+| `/api/court-reporter/jobs/files/1/stt` | PATCH | 401 | 401 | **PASS** |
+| `/api/court-reporter/jobs/transcripts/1` | PATCH | 401 | 401 | **PASS** |
+| `/api/court-reporter/jobs/public/tracking/ABC123DEF456` | GET | 404 | 404 | **PASS** |
 
 ---
 
