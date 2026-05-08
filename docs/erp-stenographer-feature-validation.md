@@ -1,6 +1,6 @@
 # 속기사(Court Reporter) ERP 핵심 기능 검증
 
-> 최종 업데이트: 2026-05-08 (Iteration 11 — STT 파이프라인 + 파일 관리 + TranscriptStudio 검증 완료)
+> 최종 업데이트: 2026-05-08 (Iteration 12 — 크로스 모듈 통합 & 워크플로우 완결성 검증 완료)
 > 검증 방법: 코드 레벨 정적분석 + Spring API 라이브 테스트 (17개 엔드포인트 전수 검증) + 이슈 코드라인 재검증
 
 ---
@@ -1049,3 +1049,150 @@ catch → sttStatus=FAILED + 로그
 4. **TranscriptStudio**: V7 스키마 통합, 3개 모드 전환, 세그먼트 삽입 모두 구현 완료. 최종 확정 시 트랜잭션 일관성(TS-4) 개선 권장
 
 **누적 이슈**: Iteration 8~11 총 28건 (상 0, 중 12, 낮 16)
+
+---
+
+## 12. 크로스 모듈 통합 & 워크플로우 완결성 검증 (Iteration 12)
+
+> 검증 일시: 2026-05-08 Iteration 12
+> 검증 대상: 속기사 모듈과 전자계약, 캘린더, 알림, LDrive, 수수료, 상담요청 간 연동 완결성
+
+### 12-A. 전자계약(Contract) 통합
+
+**프론트엔드 (CourtReporterJobDetailDialog.tsx)**
+- `CreateContractModalV7` 임포트 → 작업 상세 대화상자 내에서 계약 생성 가능
+- API: `GET /api/court-reporter/jobs/{id}/contract` → contractId 조회
+- 계약 조회 버튼: `/erp/lemon-contract/{contractId}` 새 탭 열기
+- Fee 탭 접근 시 1회 로드 (재폴링 방지)
+
+**백엔드 (Spring)**
+- `Contract.java:223-227` — FK `court_reporter_job_id` → `erp_court_reporter_jobs.id`
+- `ContractRepository.java:140` — `findByCourtReporterJobIdAndDeletedAtIsNull()`
+- `CourtReporterJobService.java:615-627` — `getLinkedContractId()` 메서드 구현
+- `UnifiedContractService.java:545,1965` — 계약 생성/응답 DTO에 `courtReporterJobId` 포함
+
+**판정: PASS (이슈 2건)**
+
+| # | 이슈 | 심각도 |
+|---|------|--------|
+| INT-1 | 단방향 연동: 속기사→계약 조회만 가능, 계약→속기사 역참조 UI 없음 | 낮 |
+| INT-2 | 계약 상태 변경이 속기사 작업에 자동 반영되지 않음 (수동 확인 필요) | 낮 |
+
+### 12-B. 캘린더/일정 통합
+
+**프론트엔드**
+- `CourtReporterSchedulePage.tsx` (304줄): 자체 캘린더 그리드 구현
+- `CourtReporterDashboardPage.tsx:79-89`: 오늘 일정 필터 표시
+- `eventDate` 필드 기반 날짜 범위 필터링 (startDate/endDate)
+
+**백엔드**
+- `CourtReporterJobEntity`: `eventDate`, `eventType` 필드 보유
+- CalendarService와 **연동 없음** — 속기사 일정이 메인 ERP 캘린더에 미반영
+
+**판정: WARN (이슈 2건)**
+
+| # | 이슈 | 심각도 |
+|---|------|--------|
+| INT-3 | 메인 ERP 캘린더와 미통합 — 속기사 일정이 공유 캘린더에 미표시 | 중 |
+| INT-4 | 일정 알림/리마인더 미구현 — eventDate 임박 시 알림 없음 | 중 |
+
+### 12-C. 알림/통지 통합
+
+**프론트엔드**
+- `handleSendEmail()` (Lines 469-493): 최종파일 발송 시 클라이언트 이메일 전송
+- STT 완료 폴링: 8초 간격 `setInterval` (Lines 189-195)
+- 내부 알림 시스템(`NotificationPointService`) 연동 **없음**
+
+**백엔드**
+- `EmailServiceV2` 주입 (Line 48): 최종파일 발송 이메일만 처리
+- `sendFinalFile()` (Lines 430-480): 이메일 발송 + sentAt 타임스탬프 기록
+- 추적 URL 포함: `https://legalmonster.co.kr/tracking/{trackingCode}`
+
+**판정: WARN (이슈 3건)**
+
+| # | 이슈 | 심각도 |
+|---|------|--------|
+| INT-5 | 상태 변경(PENDING→IN_PROGRESS→COMPLETED→DELIVERED) 시 알림 미발송 | 중 |
+| INT-6 | 수수료 상태 변경(BILLED→PAID) 시 알림 미발송 | 낮 |
+| INT-7 | 이벤트 기반 아키텍처 부재 — 다른 모듈이 속기사 상태 변경 구독 불가 | 낮 |
+
+### 12-D. LDrive 파일 저장소 통합
+
+**프론트엔드**
+- `ldriveApiV3.uploadFile()` → 버킷 `lemon-erp`, 경로 `court-reporter/jobs/{jobId}`
+- 최종 파일: `court-reporter/jobs/{jobId}/final`
+- 다운로드: `/api/ldrive/v3/{ldriveFileId}/download`
+- TranscriptStudio 오디오 재생: 동일 다운로드 URL
+
+**백엔드**
+- `LDriveServiceV3` 주입 (Line 45)
+- STT 처리: `ldriveServiceV3.downloadFileBytes(ldriveFileId)` (Line 570) → FastAPI 전송
+- 파일 메타데이터: `ldriveFileId` (UUID), originalName, fileSize, mimeType 저장
+
+**판정: PASS (이슈 1건)**
+
+| # | 이슈 | 심각도 |
+|---|------|--------|
+| INT-8 | LDrive 폴더 구조 관리 없음 — 파일 정리/만료/폴더 생성 미구현 (FM-2와 동일) | 낮 |
+
+### 12-E. 수수료/청구 통합
+
+**프론트엔드**
+- `CourtReporterFeePage.tsx`: 수수료 관리 전용 페이지
+- 요약 통계: 총액, 미청구, 청구완료, 이번달 (Lines 119-134)
+- CSV 내보내기 (Lines 136-158)
+- HTML 인보이스 생성 → 브라우저 인쇄 (Lines 413-461)
+
+**백엔드**
+- `CourtReporterJobEntity`: `feeAmount` (DECIMAL), `feeStatus`, `feeNote`, `feeBilledAt`, `feePaidAt`
+- 상태 전이: PENDING→BILLED→PAID / CANCELLED
+- 자동 타임스탬프: BILLED 시 `feeBilledAt`, PAID 시 `feePaidAt` 자동 설정
+
+**판정: PASS (이슈 2건)**
+
+| # | 이슈 | 심각도 |
+|---|------|--------|
+| INT-9 | 결제/정산 시스템과 미통합 — 수수료 관리가 속기사 모듈 내 격리 | 낮 |
+| INT-10 | 인보이스 고유번호 체계 없음 — HTML 인보이스에 일련번호 미부여 | 낮 |
+
+### 12-F. 상담요청(Consultation Request) 통합
+
+**프론트엔드**
+- `CourtReporterJob` 인터페이스: `consultationRequestId: number` 필드 존재 (Line 59)
+- 메뉴: "의뢰 관리" 섹션에서 `CounselingRequestListPage` 링크 제공
+- **실제 연동 로직 없음** — consultationRequestId가 UI에서 미사용
+
+**백엔드**
+- `CourtReporterJobEntity`: `consultation_request_id` (nullable FK)
+- `ConsultationRequestLinkService:709`: 속기사 사용자 여부 확인용
+- 상담요청 → 작업 변환 워크플로우 **미구현**
+
+**판정: WARN (이슈 2건)**
+
+| # | 이슈 | 심각도 |
+|---|------|--------|
+| INT-11 | consultationRequestId 저장되지만 UI에서 미참조 — 데드 필드 | 중 |
+| INT-12 | 상담요청 → 속기사 작업 자동 생성 워크플로우 없음 | 낮 |
+
+### 12-G. 통합 강도 매트릭스
+
+| 모듈 | 연결 방식 | 강도 | 양방향 | 판정 |
+|------|----------|------|--------|------|
+| 전자계약 | FK + Modal + API | **강** | 아니오 | PASS |
+| LDrive | UUID + API | **강** | 아니오 | PASS |
+| 캘린더/일정 | 자체 구현 (격리) | **약** | 아니오 | WARN |
+| 알림/통지 | 이메일만 | **약** | 단방향 | WARN |
+| 수수료/청구 | 자체 구현 (격리) | **중** | 아니오 | PASS |
+| 상담요청 | FK만 (미사용) | **없음** | 아니오 | WARN |
+
+### 12-H. Iteration 12 결론
+
+**크로스 모듈 통합 검증 결과: 부분 구현 (핵심 통합 완료, 부가 통합 미흡)**
+
+1. **강한 통합 (전자계약, LDrive)**: FK 기반 연동 + API + UI 모두 구현. 실용 수준 도달
+2. **약한 통합 (캘린더, 알림)**: 메인 ERP 캘린더/알림 시스템과 미연동. 독립 모듈로 동작
+3. **데드 코드 (상담요청)**: consultationRequestId FK 존재하나 UI/비즈니스 로직에서 미활용
+4. **이벤트 아키텍처 부재**: 상태 변경 이벤트를 다른 모듈이 구독할 수 없는 구조
+
+**Iteration 12 이슈**: 12건 (중 4, 낮 8)
+**누적 이슈**: Iteration 8~12 총 40건 (상 0, 중 16, 낮 24)
