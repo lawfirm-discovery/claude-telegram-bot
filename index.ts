@@ -67,6 +67,29 @@ async function checkAndWritePid(): Promise<void> {
 }
 await checkAndWritePid();
 
+// Phase R8.2 — 봇 시작 시 로그 rotation 체크 (100MB 초과 시 archive)
+// launchd 가 stdout.log 를 fd 로 열고 있어 봇 종료 시점만 안전하게 archive 가능.
+// ThrottleInterval=300 backoff 사이에 실행 → safe.
+const __rotateLog = async (logPath: string, maxBytes = 100 * 1024 * 1024) => {
+  try {
+    const f = Bun.file(logPath);
+    if (!(await f.exists())) return;
+    const size = f.size;
+    if (size <= maxBytes) return;
+    const archived = `${logPath}.${new Date().toISOString().slice(0, 10).replace(/-/g, "")}-${process.pid}`;
+    const buf = await f.arrayBuffer();
+    await Bun.write(archived, buf);
+    await Bun.write(logPath, ""); // truncate
+    console.log(`[log-rotate] ${logPath} (${Math.round(size / 1024 / 1024)}MB) → ${archived}`);
+  } catch (e: any) {
+    console.warn(`[log-rotate] ${logPath} rotation 실패 (무시): ${e.message}`);
+  }
+};
+const __logsDir = join(import.meta.dir, "logs");
+await __rotateLog(join(__logsDir, "stdout.log"));
+await __rotateLog(join(__logsDir, "stderr.log"));
+await __rotateLog(join(import.meta.dir, "bot.log"));
+
 // 빌드 정보 캐싱 (프로세스 시작 시 1회)
 await initBuildInfo();
 
