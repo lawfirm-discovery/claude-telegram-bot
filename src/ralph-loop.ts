@@ -37,6 +37,12 @@ export interface TaskItem {
    */
   stuckCount?: number;
   lastEvalReason?: string;
+  /**
+   * Phase R2.2 — state-hash invariant. 객관적 진척 신호 (ratchet + 파일/커밋/diff 토큰).
+   * 같은 hash 가 INVARIANT_STUCK_THRESHOLD 회 연속이면 evaluator 무관하게 stuck.
+   */
+  lastStateHash?: string;
+  invariantStuckCount?: number;
 }
 
 export interface TaskPRD {
@@ -78,6 +84,16 @@ const MAX_ITERATIONS = parseInt(process.env.RALPH_MAX_ITERATIONS || "30");
 const COMPRESS_THRESHOLD = 60;
 /** 벽시계 한도 (Phase R1.2). 정액제 환경에서 비용 계산 무의미 → 시간 기반. */
 const DEFAULT_MAX_WALLCLOCK_SEC = parseInt(process.env.RALPH_MAX_WALLCLOCK_SEC || "7200");
+/** Phase R2.2 — 같은 state-hash N회 연속이면 stuck (default 4 — 평소 의미있는 변화 없는 반복). */
+const INVARIANT_STUCK_THRESHOLD = parseInt(process.env.RALPH_INVARIANT_THRESHOLD || "4");
+/**
+ * Phase R2.5 — resumption-aware iteration cap.
+ * 봇이 재시작되며 같은 task 가 반복 resume → loop → resume 사이클을 탈 때:
+ *   현재 resume 후 RESUMPTION_BURST_SEC 안에 RESUMPTION_BURST_ITERS 회 이상 iter 가
+ *   돌면 무한 resume 으로 간주하고 강제 종료.
+ */
+const RESUMPTION_BURST_SEC = parseInt(process.env.RALPH_RESUMPTION_BURST_SEC || "600");
+const RESUMPTION_BURST_ITERS = parseInt(process.env.RALPH_RESUMPTION_BURST_ITERS || "50");
 
 const REPO_PATHS: Record<string, string> = {
   "lemon-front": "/home/angrylawyer/lemon-front",
@@ -222,12 +238,10 @@ function reasonFingerprint(reason: string): string {
 function looksTruncatedKo(text: string): boolean {
   if (!text) return false;
   const tail = text.slice(-200).trim();
-  // 미완 종결 패턴 (한국어)
-  if (/(?:하|되|되겠|할|진행하|수정하|작성하|확인하|검토하|진행|작성|수정|확인|검토)겠습니다\s*\.?$/.test(tail)) {
-    return true;
-  }
-  // 마침표 없이 -겠습니다/-할게요 로 갑자기 끝
-  if (/(?:겠습니다|할게요|해드릴게요|이어서|계속해서|다음에)\s*$/.test(tail) && !/[.!?]\s*$/.test(tail)) {
+  // 종결 부호 (마침표/물음표/느낌표) 로 끝나면 정상 종결 → truncation 아님.
+  if (/[.!?。？！]\s*$/.test(tail)) return false;
+  // 마침표 없이 미완 종결로 갑자기 끝나는 경우만 truncation 후보:
+  if (/(?:겠습니다|할게요|해드릴게요|진행하겠|수정하겠|작성하겠|확인하겠|검토하겠|이어서|계속해서|다음에)\s*$/.test(tail)) {
     return true;
   }
   return false;
@@ -236,6 +250,59 @@ function looksTruncatedKo(text: string): boolean {
 function writeContext(taskId: string, content: string): void {
   ensureTaskDir(taskId);
   writeFileSync(join(taskDir(taskId), "context.md"), content);
+}
+
+/**
+ * Phase R2.2 — State-hash 기반 progress invariant.
+ *
+ * evaluator 의 reason 텍스트에 의존하지 않고 객관적 진척 신호 (ratchet pass/fail 패턴 +
+ * response 의 git/file 키워드) 를 hash 하여 비교. 같은 hash 가 N iter 동안 유지되면 stuck.
+ *
+ * 호성님 사고에선 응답이 매번 미묘하게 다른 텍스트를 만들어내며 evaluator 가 각기 다른
+ * reason 을 반환했지만, 실제 코드/파일 변경은 0 이었음. fingerprint (R1.3) 로도 일부
+ * 잡히지만, 더 결정적인 신호가 필요함.
+ *
+ * 입력 — 한 iteration 의 결과:
+ *   ratchetPassed (bool), ratchetSummary 첫 줄, response 의 file path/diff 토큰
+ */
+function progressStateHash(args: {
+  ratchetPassed: boolean;
+  ratchetSummary: string;
+  response: string;
+}): string {
+  const ratchetSig = `${args.ratchetPassed ? "P" : "F"}|${args.ratchetSummary.split("\n")[0].slice(0, 120)}`;
+
+  // response 에서 진척의 객관적 흔적만 추출:
+  //   - 파일 경로 (a-zA-Z0-9_/.- 으로 시작 + 확장자)
+  //   - git commit hash (7~40 hex)
+  //   - +N -M lines added/removed 표현
+  // 이런 건 진짜 코드 변경이 있을 때만 응답에 등장.
+  const sigParts: string[] = [];
+  const filePaths = args.response.match(/[\w./-]+\.(ts|tsx|js|jsx|py|java|go|rs|md|json|yaml|yml|sql)\b/gi) || [];
+  if (filePaths.length) sigParts.push("F:" + filePaths.slice(0, 5).sort().join(","));
+  const commitHashes = args.response.match(/\b[0-9a-f]{7,12}\b/g) || [];
+  if (commitHashes.length) sigParts.push("C:" + commitHashes.slice(0, 3).sort().join(","));
+  const diffStats = args.response.match(/[+-]\d+ ?(?:lines?|files?)?/g) || [];
+  if (diffStats.length) sigParts.push("D:" + diffStats.slice(0, 3).join(","));
+
+  return ratchetSig + "||" + sigParts.join("|");
+}
+
+/**
+ * Phase R2.1 — 매 iteration 의 raw response 를 압축과 무관하게 보존.
+ *   tasks/{taskId}/responses/iter-{itemId}-{n}.txt
+ *   compressContext 가 progress.log 를 요약해도 raw 는 그대로 남음 → stuck 사후 진단 가능.
+ *   재실행/resume 에는 영향 없음 (읽기 전용 archive).
+ */
+function saveRawResponse(taskId: string, itemId: string, iter: number, response: string): void {
+  try {
+    const dir = join(taskDir(taskId), "responses");
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    const path = join(dir, `${itemId}-${String(iter).padStart(3, "0")}.txt`);
+    writeFileSync(path, response);
+  } catch {
+    // 진단용 부수 효과 — 실패해도 본 동작 막지 않음
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -369,9 +436,11 @@ ${originalPrompt}${repoInfo}
 - 단순 작업: 1~2개, 중간 작업: 3~5개, 복잡한 작업: 5~7개 서브목표
 - 각 목표는 독립적으로 완료 가능하고 검증 방법이 명확해야 함
 - maxIterations: 단순=10, 보통=20, 복잡=30 (최대 40)
+- **보고서/분석 류 작업**: 결과물을 파일에 저장하는 단계로 명시 (예: "X 분석 결과를 docs/Y.md 에 저장")
+  → 응답 본문에 보고서 본문 출력 금지 (token 한도로 truncated 시 무한 루프)
 - JSON 배열만 반환 (다른 텍스트 없이):
 
-[{"description": "구체적 서브목표", "maxIterations": 20}]`;
+[{"description": "구체적 서브목표 (파일 저장 위치 포함)", "maxIterations": 20}]`;
 
   const raw = await askClaudeLight(prompt, { timeoutMs: 30_000 });
   const match = raw.match(/\[[\s\S]*\]/);
@@ -453,6 +522,10 @@ export async function runRalphLoop(
   savePRD(prd);
   appendProgress(taskId, `RALPH LOOP START (pid=${process.pid} bot=${process.env.BOT_NAME ?? "?"})`);
 
+  // Phase R2.5 — resumption-aware burst counter (in-memory, 본 process 의 진입 시점 baseline)
+  const resumeStartedAt = Date.now();
+  let iterSinceResume = 0;
+
   const syntheticChatId = `ralph-${taskId}`;
   let totalIterations = 0;
 
@@ -500,6 +573,24 @@ export async function runRalphLoop(
         }
       }
 
+      // Phase R2.5 — resumption burst guard. 봇이 자주 재시작되며 같은 task 를 다시 잡고
+      //   처음부터 진행하는 사이클 (50 iter / 10분) 을 차단. 사용자에게 알림 + status='failed'.
+      iterSinceResume++;
+      const sinceResumeSec = Math.round((Date.now() - resumeStartedAt) / 1000);
+      if (iterSinceResume >= RESUMPTION_BURST_ITERS && sinceResumeSec <= RESUMPTION_BURST_SEC) {
+        const msg = `🌀 Ralph #${taskId} resumption burst 감지 — ` +
+          `${iterSinceResume} iter / ${sinceResumeSec}s (한도 ${RESUMPTION_BURST_ITERS}/${RESUMPTION_BURST_SEC}s)\n` +
+          `봇이 자주 재시작되며 같은 작업을 무한 반복 → 강제 종료`;
+        appendProgress(taskId, `RESUMPTION BURST: ${iterSinceResume}/${sinceResumeSec}s → halt`);
+        await sendTg(prd.requestedBy, msg + `\n/ralph status ${taskId}`);
+        item.error = "resumption burst";
+        incr("ralph.resumption_burst");
+        prd.status = "failed";
+        savePRD(prd);
+        releaseTaskLock(taskId);
+        return { taskId, completed: false, totalIterations, error: "resumption burst" };
+      }
+
       item.iteration++;
       totalIterations++;
       const iterStart = Date.now();
@@ -518,6 +609,9 @@ export async function runRalphLoop(
       // 2. Claude 실행
       try {
         const response = await askClaude(syntheticChatId, prompt);
+
+        // Phase R2.1 — raw response 보존 (압축 무관, 사후 진단용)
+        saveRawResponse(taskId, item.id, item.iteration, response);
 
         const elapsed = Math.round((Date.now() - iterStart) / 1000);
         appendProgress(taskId, `ITERATION ${item.iteration} END: ${elapsed}s`);
@@ -587,7 +681,36 @@ export async function runRalphLoop(
         }
         incr("ralph.iteration.end");
 
-        // 6. Stuck 감지 — fingerprint 기반 fuzzy 비교 (Phase R1.3)
+        // 6a. Phase R2.2 — state-hash invariant 체크 (evaluator 와 독립).
+        //     ratchet 결과 + response 의 진척 토큰 (파일/커밋/diff) 의 hash.
+        //     같은 hash 가 INVARIANT_STUCK_THRESHOLD 회 연속이면 진짜 진척 0 → stuck.
+        const stateHash = progressStateHash({
+          ratchetPassed: testResult.passed,
+          ratchetSummary: testSummary,
+          response,
+        });
+        if (stateHash === item.lastStateHash) {
+          item.invariantStuckCount = (item.invariantStuckCount ?? 0) + 1;
+          appendProgress(taskId, `INVARIANT MATCH: ${item.invariantStuckCount}× same state-hash`);
+        } else {
+          item.invariantStuckCount = 0;
+          item.lastStateHash = stateHash;
+        }
+        if ((item.invariantStuckCount ?? 0) >= INVARIANT_STUCK_THRESHOLD) {
+          incr("ralph.invariant_stuck");
+          await sendTg(prd.requestedBy,
+            `🧱 Ralph #${taskId} — ${item.id} 진척 없음 (${item.invariantStuckCount}회 연속 동일 상태)\n` +
+            `iter ${item.iteration}/${item.maxIterations}\n` +
+            `state-hash: ${stateHash.slice(0, 80)}\n` +
+            `대응: 작업 분해 또는 다른 접근 필요\n/ralph status ${taskId}`,
+          );
+          appendProgress(taskId, `INVARIANT STUCK: ${item.invariantStuckCount}× → halting item`);
+          item.error = `invariant stuck (${item.invariantStuckCount}× same state)`;
+          savePRD(prd);
+          break;
+        }
+
+        // 6b. Stuck 감지 — fingerprint 기반 fuzzy 비교 (Phase R1.3)
         //    이전엔 reason 문자열 정확 매칭 → 평가자가 매번 약간 다르게 표현하면 카운트 reset
         //    → 38분 무한 루프 사고. 이제 lowercase + 숫자제거 + 첫 120자 normalize 후 비교.
         if (!evalResult.complete) {
@@ -745,6 +868,17 @@ function buildIterationPrompt(
 - 작업 완료 후 변경 내용을 git commit 하세요
 - 테스트/컴파일이 통과하는지 확인하세요`);
   }
+
+  // Phase R2.4 — 응답 형식 강제 (structured output).
+  //   "보고서/분석/문서" 류 작업이 응답 본문에 직접 출력되면 token 한도로 truncated → 무한 루프.
+  //   파일 저장 + 짧은 요약 패턴을 prompt 에 명시 → truncation 자체 회피.
+  parts.push(`## 응답 형식 (반드시 준수)
+- 긴 결과물(보고서, 분석, 목록 100줄 이상)은 **반드시 파일에 저장**하고 응답에는 다음만 포함:
+  - 저장한 파일의 절대 경로
+  - 핵심 결과 요약 (10줄 이내)
+  - 다음 단계 (1~3줄)
+- 응답 본문에 보고서 전체를 출력하지 마세요. 응답이 잘리면 작업이 무한 루프에 빠집니다.
+- 응답은 마침표(.)로 끝나야 합니다. "...하겠습니다" 같은 미완 종결 금지 — 한 iteration 안에서 완결.`);
 
   return parts.join("\n\n");
 }

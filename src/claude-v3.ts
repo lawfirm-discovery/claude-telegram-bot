@@ -49,6 +49,9 @@ const INACTIVITY_TIMEOUT_MS = parseInt(process.env.INACTIVITY_TIMEOUT_MS || "600
 const DEBOUNCE_MS = parseInt(process.env.DEBOUNCE_MS || "1500");
 const CLAUDE_MAX_TURNS = parseInt(process.env.CLAUDE_MAX_TURNS || process.env.MAX_TURNS || "500");
 const DISABLE_HOOKS = process.env.DISABLE_V3_HOOKS === "true";
+// Phase R2.3 — task_budget (alpha SDK 옵션). 설정 시 모델이 남은 token 인지하고 페이싱.
+//   정액제와 무관하게 작동 (token 사용량 page 권장 — 비용 청구 아님). 0 또는 미설정 시 비활성.
+const CLAUDE_TASK_BUDGET = parseInt(process.env.CLAUDE_TASK_BUDGET || "0");
 // Auto-compact: contextPercent가 이 임계 이상이면 매 턴 끝에 자동으로 transcript 요약 → 새 세션 시드.
 // 0이면 비활성. 기본 70%.
 const AUTO_COMPACT_THRESHOLD = parseInt(process.env.AUTO_COMPACT_THRESHOLD || "70");
@@ -593,6 +596,8 @@ async function runWithSDKInner(
     pathToClaudeCodeExecutable: CLAUDE_PATH,
     allowDangerouslySkipPermissions: true,
     maxTurns: CLAUDE_MAX_TURNS,
+    // Phase R2.3 — task_budget 설정 시 모델이 자체 페이싱 → 응답 truncation 빈도 감소
+    ...(CLAUDE_TASK_BUDGET > 0 ? { taskBudget: { total: CLAUDE_TASK_BUDGET } } : {}),
     hooks: buildHooks(chatId),
     stderr: (data: string) => {
       stderrBuffer += data;
