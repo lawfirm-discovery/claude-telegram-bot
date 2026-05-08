@@ -275,6 +275,39 @@ function reasonFingerprint(reason: string): string {
  *   - "...하겠습니다" / "...진행하겠습니다" / "...수정하겠습니다" 류로 끝
  *   - 마지막 200자 안에 "이어서" / "다음에" 가 있고 마침표/줄바꿈 없이 종료
  */
+/**
+ * Phase R6.1 — Claude Code 정액제 사용량 한도 도달 감지.
+ *
+ * 호성님 사고 (lawbot-mm 9f0326fa): "You're out of extra usage · resets 9:10pm" 응답이
+ * 매 iter 마다 받혀짐. evaluator 도 같은 이유로 exit 1. R1.3 stuck 4회로 자동 종료됐지만
+ * 그 시간동안 4번이나 한도 차감.
+ *
+ * 즉시 감지 + halt + reset 시각까지 사용자에게 알림.
+ *
+ * Returns: { hit: true, resetAt?: string } | { hit: false }
+ */
+function detectUsageLimit(text: string): { hit: boolean; resetAt?: string; raw?: string } {
+  if (!text) return { hit: false };
+  const lower = text.toLowerCase();
+  // Claude Code 응답 패턴 (정액제 + API)
+  const patterns = [
+    /you're\s*out\s*of\s*(extra\s*)?usage/i,
+    /usage\s*limit\s*(reached|exceeded)/i,
+    /rate\s*limit\s*(reached|exceeded)/i,
+    /quota\s*(reached|exceeded|exhausted)/i,
+    /credit\s*(exhausted|out)/i,
+    /too\s*many\s*requests/i,
+  ];
+  for (const p of patterns) {
+    if (p.test(lower)) {
+      // resetAt 추출 시도: "resets 9:10pm" / "resets at HH:MM" 같은 패턴
+      const resetMatch = text.match(/resets?\s*(?:at\s*)?([0-9: ]+(?:am|pm|AM|PM)?(?:\s*\([^)]+\))?)/i);
+      return { hit: true, resetAt: resetMatch?.[1]?.trim(), raw: text.slice(0, 200) };
+    }
+  }
+  return { hit: false };
+}
+
 function looksTruncatedKo(text: string): boolean {
   if (!text) return false;
   const tail = text.slice(-200).trim();
@@ -799,6 +832,27 @@ export async function runRalphLoop(
         // Phase R1.1 — claude-v3 가 stop_reason=max_tokens 감지 시 prepend 한 마커 검사.
         //   truncated 응답을 evaluator 에 보내면 항상 incomplete 라 무한 루프 (호성님 사고 사례).
         //   즉시 stuck 처리 → 사용자 에스컬레이트.
+        // Phase R6.1 — Claude Code 정액제 사용량 한도 도달 자동 halt
+        const usage = detectUsageLimit(response);
+        if (usage.hit) {
+          incr("ralph.usage_limit_hit");
+          appendProgress(taskId, `USAGE LIMIT HIT: ${usage.raw?.slice(0, 100)}`);
+          await sendTg(prd.requestedBy,
+            `⛔ Ralph #${taskId} — Claude 사용량 한도 도달 → 자동 중단\n` +
+            `iter ${item.iteration}/${item.maxIterations}, ${elapsed}s\n` +
+            (usage.resetAt ? `Reset: ${usage.resetAt}\n` : "") +
+            `메시지: ${usage.raw?.slice(0, 100)}\n` +
+            `대응: 한도 reset 후 재시도 또는 다른 봇 사용\n` +
+            `/ralph status ${taskId}`,
+          );
+          item.error = `usage limit hit${usage.resetAt ? ` (resets ${usage.resetAt})` : ""}`;
+          // task 자체도 failed — 더 진행 의미 없음
+          prd.status = "failed";
+          savePRD(prd);
+          releaseTaskLock(taskId);
+          return { taskId, completed: false, totalIterations, error: "usage limit hit" };
+        }
+
         if (response.startsWith("__TRUNCATED_MAX_TOKENS__")) {
           incr("ralph.truncated_halt");
           appendProgress(taskId, `TRUNCATED OUTPUT DETECTED → halting item (max_tokens)`);
@@ -1296,12 +1350,15 @@ function classifyEndReason(prd: TaskPRD | null, resultError?: string): string {
   if (resultError === "stopped") return "⏹ 사용자 중단";
   if (resultError === "wallclock exceeded") return "⏰ 시간 한도 (2h) 초과";
   if (resultError === "resumption burst") return "🌀 봇 재시작 루프";
+  if (resultError === "usage limit hit") return "⛔ Claude 사용량 한도";
   if (resultError === "budget exceeded") return "💰 예산 초과";
+  if (resultError?.startsWith("concurrent task")) return "🔒 다른 task 진행 중";
 
   // item 별 error 패턴 분석
   const errors = prd.items.map((i) => i.error || "").filter(Boolean);
   if (!errors.length) return "❌ 알 수 없음";
 
+  if (errors.some((e) => /usage\s*limit/i.test(e))) return "⛔ Claude 사용량 한도";
   if (errors.some((e) => /truncat|max_tokens/i.test(e))) return "✂️ 응답 잘림 (truncation)";
   if (errors.some((e) => /invariant stuck/i.test(e))) return "🧱 진척 없음 (state-hash invariant)";
   if (errors.some((e) => /stuck:/i.test(e))) return "🔁 동일 사유 반복 stuck";
