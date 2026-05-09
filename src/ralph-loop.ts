@@ -53,6 +53,15 @@ export interface TaskItem {
    * 일시적 에러가 영구 장애로 변한 경우 (예: 5xx 가 계속) 무한 backoff retry 차단.
    */
   stochasticRetryCount?: number;
+  /**
+   * Phase R12 — iteration 별 수행 결과 + commit ID. 텔레그램 메시지에 표시하여
+   * 호성님이 ralph 가 매 iter 무엇을 했는지 추적 가능하도록.
+   * - iter: 반복 차수
+   * - hash: short commit hash (7자) 또는 "no-change" / "fail"
+   * - summary: 이번 iter 의 evaluator nextFocus / reason / description
+   * - testPassed: ratchet 통과 여부
+   */
+  commits?: Array<{ iter: number; hash: string; summary: string; testPassed: boolean }>;
 }
 
 export interface TaskPRD {
@@ -553,19 +562,22 @@ function captureGitDiff(taskId: string, itemId: string, iter: number, repo: stri
  *   - item 완료 (passes=true) 시 자동 push origin dev-hs-rtx6000-new
  *   - ratchet 실패 시 commit 안 함 (깨진 코드 push 차단)
  */
-function autoCommit(repo: string, taskId: string, itemId: string, iter: number, summary: string): boolean {
-  if (!repo || !AUTO_GIT_ENABLED) return false;
+function autoCommit(repo: string, taskId: string, itemId: string, iter: number, summary: string): { ok: boolean; hash?: string } {
+  if (!repo || !AUTO_GIT_ENABLED) return { ok: false };
   const status = runGitInRepo(repo, ["status", "--porcelain"]);
-  if (!status || !status.trim()) return false; // 변경 없음
+  if (!status || !status.trim()) return { ok: false }; // 변경 없음
 
   const botName = process.env.BOT_NAME || process.env.HOSTNAME || "ralph";
   const safeSummary = summary.replace(/['"]/g, "").slice(0, 80) || "iteration progress";
   const msg = `[${botName}] ralph #${taskId} iter ${iter} ${itemId}: ${safeSummary}`;
 
   const addResult = runGitInRepo(repo, ["add", "-A"]);
-  if (addResult === null) return false;
+  if (addResult === null) return { ok: false };
   const commitResult = runGitInRepo(repo, ["commit", "-m", msg]);
-  return commitResult !== null;
+  if (commitResult === null) return { ok: false };
+  // R12 — short hash 추출 (텔레그램 메시지 표시용)
+  const hash = runGitInRepo(repo, ["rev-parse", "--short=7", "HEAD"])?.trim() || "";
+  return { ok: true, hash };
 }
 
 function autoPush(repo: string): boolean {
@@ -1218,15 +1230,6 @@ export async function runRalphLoop(
         // 7. 다음 반복에 평가 피드백 전달
         lastEvalFeedback = evalResult;
 
-        // 8. 짝수 반복마다 진행 상황 알림 (1회는 item 시작 알림과 중복 방지)
-        if (item.iteration % 2 === 0 && !evalResult.complete) {
-          const iterMsg =
-            `🔄 Ralph #${taskId} — ${item.id} iter ${item.iteration}/${item.maxIterations}\n` +
-            `테스트: ${testResult.passed ? "✅" : "❌"} | 평가: 미완료\n` +
-            `${evalResult.nextFocus ? `다음 집중: ${evalResult.nextFocus.slice(0, 80)}` : evalResult.reason.slice(0, 80)}`;
-          await sendTg(prd.requestedBy, iterMsg);
-        }
-
         // Phase R3.3 — git diff --stat 자동 기록 (변경 가시성)
         const diffInfo = captureGitDiff(taskId, item.id, item.iteration, prd.repo);
         if (diffInfo.hasChanges) {
@@ -1234,13 +1237,58 @@ export async function runRalphLoop(
         }
 
         // Phase R3.5 — Option C Hybrid: ratchet 통과 시 자동 commit (매 iter)
+        // Phase R12 — commit hash 캡처해서 RalphItem.commits 에 기록
+        const iterSummary = lastEvalFeedback?.nextFocus || evalResult.reason || item.description.slice(0, 80);
+        let lastCommitHash = "";
         if (testResult.passed && diffInfo.hasChanges) {
-          const commitMsg = lastEvalFeedback?.nextFocus || evalResult.reason || item.description.slice(0, 80);
-          const committed = autoCommit(prd.repo, taskId, item.id, item.iteration, commitMsg);
-          appendProgress(taskId, committed ? `AUTO COMMIT: ${diffInfo.statSummary}` : `AUTO COMMIT 실패`);
-          if (committed) incr("ralph.auto_commit");
+          const result = autoCommit(prd.repo, taskId, item.id, item.iteration, iterSummary);
+          appendProgress(taskId, result.ok ? `AUTO COMMIT ${result.hash}: ${diffInfo.statSummary}` : `AUTO COMMIT 실패`);
+          if (result.ok) {
+            incr("ralph.auto_commit");
+            lastCommitHash = result.hash || "";
+            // R12 — iter 별 commit 기록
+            if (!item.commits) item.commits = [];
+            item.commits.push({
+              iter: item.iteration,
+              hash: lastCommitHash,
+              summary: iterSummary.slice(0, 100),
+              testPassed: true,
+            });
+          }
         } else if (diffInfo.hasChanges && !testResult.passed) {
           appendProgress(taskId, `COMMIT SKIPPED: ratchet 실패 (변경 있지만 커밋 안 함 — 깨진 코드 차단)`);
+          if (!item.commits) item.commits = [];
+          item.commits.push({
+            iter: item.iteration,
+            hash: "skip-fail",
+            summary: iterSummary.slice(0, 100),
+            testPassed: false,
+          });
+        } else if (!diffInfo.hasChanges) {
+          // 변경 없는 iter 도 기록 (호성님이 "이번 iter 에서 뭘 했는지" 추적 가능)
+          if (!item.commits) item.commits = [];
+          item.commits.push({
+            iter: item.iteration,
+            hash: "no-change",
+            summary: iterSummary.slice(0, 100),
+            testPassed: testResult.passed,
+          });
+        }
+
+        // 8. 짝수 반복마다 진행 상황 알림 (1회는 item 시작 알림과 중복 방지)
+        // R12 — commit hash + summary 표시
+        if (item.iteration % 2 === 0 && !evalResult.complete) {
+          const commitLine = lastCommitHash
+            ? `📝 commit \`${lastCommitHash}\`: ${iterSummary.slice(0, 70)}`
+            : !diffInfo.hasChanges
+              ? `📝 변경 없음`
+              : `📝 변경 있지만 ratchet 실패 — commit skip`;
+          const iterMsg =
+            `🔄 Ralph #${taskId} — ${item.id} iter ${item.iteration}/${item.maxIterations}\n` +
+            `테스트: ${testResult.passed ? "✅" : "❌"} | 평가: 미완료\n` +
+            `${commitLine}\n` +
+            `${evalResult.nextFocus ? `➡️ 다음 집중: ${evalResult.nextFocus.slice(0, 80)}` : evalResult.reason.slice(0, 80)}`;
+          await sendTg(prd.requestedBy, iterMsg);
         }
 
         if (evalResult.complete && testResult.passed) {
@@ -1254,9 +1302,19 @@ export async function runRalphLoop(
           appendProgress(taskId, pushed ? `AUTO PUSH: dev-hs-rtx6000-new` : `AUTO PUSH 실패 (또는 변경 없음)`);
           if (pushed) incr("ralph.auto_push");
 
+          // R12 — iteration 별 commit list 표시 (호성님이 매 iter 무엇을 했는지 추적 가능)
+          const commitList = (item.commits || [])
+            .filter(c => c.hash !== "no-change") // 변경 있던 iter 만 표시
+            .slice(-10) // 최근 10개 (메시지 길이 제한)
+            .map(c => `  • iter ${c.iter} \`${c.hash}\`: ${c.summary.slice(0, 60)}`)
+            .join("\n");
+          const skippedCount = (item.commits || []).filter(c => c.hash === "no-change").length;
+          const skippedNote = skippedCount > 0 ? `\n  (변경 없는 iter ${skippedCount}건 생략)` : "";
+
           await sendTg(prd.requestedBy,
             `✅ Ralph #${taskId} — ${item.id} 완료 (iter ${item.iteration}): ${item.description.slice(0, 80)}`
             + (pushed ? `\n📤 ${prd.repo} → dev-hs-rtx6000-new push 완료` : "")
+            + (commitList ? `\n\n📝 iteration 별 commit:\n${commitList}${skippedNote}` : "")
           );
         } else if (!testResult.passed) {
           appendProgress(taskId, `TEST FAILED → next iteration will fix`);
