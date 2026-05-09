@@ -61,19 +61,35 @@ function isBotProcess(pid: number): boolean {
   }
 }
 
+// Phase R11.5 — supervisor 가 띄운 instance 인지 detect (systemd / launchd)
+//   - systemd: INVOCATION_ID 환경변수 자동 설정
+//   - launchd: XPC_SERVICE_NAME 또는 LAUNCH_DAEMON 자동 설정
+//   외부 nohup launcher 등은 둘 다 unset → 외부로 분류
+function isSupervisorManaged(): boolean {
+  return !!(process.env.INVOCATION_ID || process.env.XPC_SERVICE_NAME || process.env.LAUNCHD_SOCKET);
+}
+
 async function checkAndWritePid(): Promise<void> {
+  const selfIsSupervisor = isSupervisorManaged();
   if (existsSync(PID_FILE)) {
     const oldPid = parseInt(readFileSync(PID_FILE, "utf-8").trim());
     if (oldPid && !isNaN(oldPid) && oldPid !== process.pid) {
       try {
         process.kill(oldPid, 0); // exists check
         if (isBotProcess(oldPid)) {
-          // Phase R11.4 — 양보 (yield) 패턴: 기존 봇이 살아있으면 새 instance 가 종료
-          // 기존: 새 봇이 기존 봇 SIGTERM → race / bot.log truncate / 사고 재발
-          // 신규: supervisor 가 띄운 instance 가 단일 진실 — 새 launcher 봇은 그냥 종료
-          // 강제 takeover 가 필요하면 supervisor 통해 (systemctl restart / launchctl kickstart -k)
-          console.log(`[Bot] Existing bot instance found (PID ${oldPid}) — yielding (this instance exits with code 0)`);
-          process.exit(0);
+          // Phase R11.5 — supervisor 우선 양보 패턴
+          if (selfIsSupervisor) {
+            // 자기 자신이 supervisor 가 띄운 봇 → 기존 (외부 launcher 일 가능성 큼) 죽이기
+            console.log(`[Bot] Self is supervisor-managed (INVOCATION_ID set). Killing previous bot instance (PID ${oldPid})...`);
+            try { process.kill(oldPid, "SIGTERM"); } catch {}
+            Bun.sleepSync(3000);
+            try { process.kill(oldPid, "SIGKILL"); } catch {}
+            Bun.sleepSync(1000);
+          } else {
+            // 자기 자신이 외부 launcher → 기존 (supervisor 일 가능성) 에 양보
+            console.log(`[Bot] Self is external launcher (no INVOCATION_ID). Existing bot (PID ${oldPid}) wins — exiting (code 0)`);
+            process.exit(0);
+          }
         } else {
           console.log(`[Bot] PID ${oldPid} exists but not a bot process — skipping`);
         }
