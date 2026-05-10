@@ -282,11 +282,21 @@ bot.command("sync", async (ctx) => {
   }
   const arg = ctx.match?.trim() || "";
   const parts = arg.split(/\s+/).filter(Boolean);
-  // /sync [branch] [workerName]  — branch 생략 시 feat/orchestrator
-  const branch = parts[0] || "feat/orchestrator";
-  const targetWorker = parts[1] || "";
-
   const workers = getWorkerBots();
+  const workerNames = new Set(workers.map(w => w.name));
+
+  // 2026-05-10: 인자 파싱 — 등록된 워커 이름이면 워커, 아니면 branch.
+  //   호성님 사고 (`/sync a4500` → branch="a4500" 으로 17개 워커에 잘못된 checkout 시도) 차단.
+  let branch = "feat/orchestrator";
+  let targetWorker = "";
+  for (const p of parts) {
+    if (workerNames.has(p)) {
+      targetWorker = p;
+    } else {
+      branch = p;
+    }
+  }
+
   const targets = targetWorker
     ? workers.filter(w => w.name === targetWorker)
     : workers;
