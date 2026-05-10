@@ -29,6 +29,9 @@ const CRON_PATH = join(LEMONCLAW_DIR, "CRON.md");
 const HOOKS_PATH = join(LEMONCLAW_DIR, "HOOKS.md");
 const MEMORY_PATH = join(LEMONCLAW_DIR, "MEMORY.md");
 const SHARED_MEMORY_PATH = join(LEMONCLAW_DIR, "SHARED_MEMORY.md");
+// 2026-05-10: 봇 루트의 CLAUDE.md (리걸몬스터 작업 규칙 + 절대 규칙 + 워커봇 관리 규칙) — system prompt 에 inject.
+//   호성님 명시: ralph 가 lawfirm-discovery 레포 / dev-hs-rtx6000-new 브랜치 작업 룰 지키도록.
+const CLAUDE_MD_PATH = join(LEMONCLAW_DIR, "..", "CLAUDE.md");
 const MEMORY_DIR = join(LEMONCLAW_DIR, "memory");
 // 채팅별 사용자 명시 메모 (/note, /checkpoint) — 매 턴 system prompt에 주입
 const NOTES_DIR = join(LEMONCLAW_DIR, "notes");
@@ -79,12 +82,17 @@ export function loadSystemPrompt(): string {
   const agents = readMd(AGENTS_PATH);
   const expertTypes = readMd(EXPERT_TYPES_PATH);
   const memory = readMd(MEMORY_PATH);
+  // 2026-05-10: 봇 루트의 CLAUDE.md 를 매 호출 system prompt 에 주입.
+  //   호성님 명시: ralph 가 리걸몬스터 작업 규칙 + 다른 서버 절차 + 절대 규칙 (포트 3000 금지, dev-hs-rtx6000-new 브랜치만 등) 지키도록.
+  //   특히 lawfirm-discovery 레포 (lemon-front, lemon_flutter, lemon-api-server-spring, lemon-ai-server-FastAPI) 작업 절차 강제.
+  const claudeMd = readMd(CLAUDE_MD_PATH);
 
   const parts: string[] = [];
   if (soul) parts.push(`# 🧠 SOUL\n${soul}`);
   if (agents) parts.push(`# 📋 AGENTS\n${agents}`);
   if (expertTypes) parts.push(`# 👥 EXPERT TYPES\n${expertTypes}`);
   if (memory) parts.push(`# 📝 MEMORY\n${memory}`);
+  if (claudeMd) parts.push(`# 📜 CLAUDE.md (작업 규칙 — 절대 준수)\n${claudeMd}`);
 
   // 커밋 프리픽스 규칙 주입
   const commitPrefix = getCommitPrefix();

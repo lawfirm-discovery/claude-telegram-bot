@@ -1613,6 +1613,22 @@ async function verifyClaudeAuth(): Promise<{ ok: true } | { ok: false; reason: s
  * autoStart=true (legacy 호환, default) → 기존처럼 즉시 백그라운드 실행
  * autoStart=false                       → status='pending' 으로 저장 후 사용자 /ralph go <taskId> 대기
  */
+/**
+ * 2026-05-10: task prompt 에서 lawfirm-discovery 레포 자동 추출.
+ *   호성님 명시: 모든 작업이 lawfirm-discovery 레포 / dev-hs-rtx6000-new 브랜치 작업.
+ *   prompt 키워드 → repo 매핑.
+ *   추출 실패 시 빈 문자열 — 봇 dir 작업으로 sync reset cycle 발생하므로 caller 가 거부 권장.
+ */
+function detectRepoFromPrompt(prompt: string): string {
+  const p = prompt.toLowerCase();
+  // Flutter 우선 (Flutter ↔ Web 동기화 task 도 Flutter 측 변경 위주)
+  if (/플러터|flutter|lemon_flutter|모바일\s*앱/.test(p)) return "lemon_flutter";
+  if (/spring|gradle|java|api[\s-_]?server|spring[\s-_]?boot|bootrun/.test(p)) return "lemon-api-server-spring";
+  if (/fastapi|python|ai[\s-_]?server|fast\s*api/.test(p)) return "lemon-ai-server-FastAPI";
+  if (/lemon[\s-_]?front|frontend|react|tsx|모바일\s*웹|nginx|3011|리걸몬스터(?!.*플러터)/.test(p)) return "lemon-front";
+  return "";
+}
+
 export async function startRalphTask(params: {
   originalPrompt: string;
   requestedBy: string;
@@ -1622,7 +1638,8 @@ export async function startRalphTask(params: {
   autoStart?: boolean; // default true (기존 동작 유지)
   maxWallclockSec?: number;
 }): Promise<{ taskId: string; planText: string; autoStart: boolean; authError?: string }> {
-  const repo = params.repo || "";
+  // 2026-05-10: repo 미지정 시 prompt 에서 자동 추출. 봇 dir 작업으로 인한 sync reset cycle 방지.
+  const repo = params.repo || detectRepoFromPrompt(params.originalPrompt);
   const autoStart = params.autoStart !== false;
 
   // Phase R4.1 (W1) — Claude CLI 인증 사전 검증
@@ -1655,7 +1672,8 @@ export async function startRalphTask(params: {
     originalPrompt: params.originalPrompt,
     requestedBy: params.requestedBy,
     repo,
-    branch: "",
+    // 2026-05-10: 호성님 절대 규칙 — 모든 lawfirm-discovery 레포는 dev-hs-rtx6000-new 브랜치만.
+    branch: "dev-hs-rtx6000-new",
     files: [],
     items,
     maxWallclockSec: params.maxWallclockSec,
