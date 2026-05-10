@@ -69,23 +69,22 @@ function readMd(path: string): string {
   }
 }
 
-/** Load SOUL.md + AGENTS.md + EXPERT_TYPES.md + MEMORY.md + SHARED_MEMORY.md as combined system prompt */
+/** Load SOUL.md + AGENTS.md + EXPERT_TYPES.md + MEMORY.md as combined system prompt
+ *  2026-05-10: SHARED_MEMORY 비활성화 — push 충돌 시 local commit 잔존 →
+ *  sync-telegram-bots.sh 가 reset --hard 로 봇 죽임 → 무한 재시작 cycle.
+ *  cross-bot 메모리 효용도 미미 (4월 stale). 봇별 MEMORY.md 만 사용.
+ */
 export function loadSystemPrompt(): string {
   const soul = readMd(SOUL_PATH);
   const agents = readMd(AGENTS_PATH);
   const expertTypes = readMd(EXPERT_TYPES_PATH);
   const memory = readMd(MEMORY_PATH);
-  const sharedRaw = readMd(SHARED_MEMORY_PATH);
-  const shared = sharedRaw && SHARED_MEMORY_EXCLUDE_RE
-    ? filterSharedMemoryLines(sharedRaw.split("\n")).join("\n")
-    : sharedRaw;
 
   const parts: string[] = [];
   if (soul) parts.push(`# 🧠 SOUL\n${soul}`);
   if (agents) parts.push(`# 📋 AGENTS\n${agents}`);
   if (expertTypes) parts.push(`# 👥 EXPERT TYPES\n${expertTypes}`);
   if (memory) parts.push(`# 📝 MEMORY\n${memory}`);
-  if (shared) parts.push(`# 🔗 SHARED MEMORY (다른 봇들의 최근 작업)\n${shared}`);
 
   // 커밋 프리픽스 규칙 주입
   const commitPrefix = getCommitPrefix();
@@ -139,29 +138,14 @@ function getCommitPrefix(): string {
   return hostname.split(".")[0].replace(/server$/i, "").replace(/winserver$/i, "").replace(/ui-macmini$/i, "") || "unknown";
 }
 
-/** Append a work summary to shared memory (for cross-bot knowledge sharing) */
-export function appendSharedMemory(botName: string, summary: string): void {
-  try {
-    const now = new Date().toLocaleString("ko-KR", { timeZone: "Asia/Seoul" });
-    const line = `- [${now}] **${botName}**: ${summary}\n`;
-
-    if (!existsSync(SHARED_MEMORY_PATH)) {
-      writeFileSync(SHARED_MEMORY_PATH, `# Shared Memory — 봇 간 작업 공유\n\n최근 작업 내역 (최신순):\n\n${line}`);
-    } else {
-      // 파일이 너무 커지지 않도록 최근 50줄만 유지
-      const existing = readFileSync(SHARED_MEMORY_PATH, "utf-8");
-      const lines = existing.split("\n");
-      const header = lines.slice(0, 4).join("\n"); // 헤더 보존
-      let entries = lines.slice(4).filter(l => l.trim());
-      // 외부 프로젝트(pylon 등) 항목 제거 — pull로 들어온 다른 환경 라인은 누적하지 않음
-      entries = filterSharedMemoryLines(entries);
-      entries.push(line.trim());
-      const recent = entries.slice(-50); // 최근 50개만
-      writeFileSync(SHARED_MEMORY_PATH, `${header}\n${recent.join("\n")}\n`);
-    }
-  } catch (e: any) {
-    console.error(`[LemonClaw] Shared memory write failed: ${e.message}`);
-  }
+/** Append a work summary to shared memory — 비활성화 (2026-05-10).
+ *  사유: SHARED_MEMORY.md 변경 → push 충돌 → local commit 잔존 →
+ *  sync-telegram-bots.sh reset --hard cycle → 봇 무한 재시작 사고.
+ *  봇별 MEMORY.md 가 이미 별도로 동작하며 cross-bot 효용 미미했음.
+ */
+export function appendSharedMemory(_botName: string, _summary: string): void {
+  // noop — SHARED_MEMORY 비활성화. parameters 보존하여 caller signature 호환.
+  return;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -649,16 +633,11 @@ async function syncSharedMemory(): Promise<void> {
 }
 
 export function startSharedMemorySync(): void {
-  // 외부 프로젝트 봇(pylon 등)이 lawfirm-discovery 레포에 잘못 push하는 사고를 막기 위한 kill-switch.
-  // pylon 측 .env에 DISABLE_SHARED_MEMORY_SYNC=true 두면 git pull/push 자체를 안 함.
-  if (process.env.DISABLE_SHARED_MEMORY_SYNC === "true") {
-    console.log("[LemonClaw] Shared memory sync DISABLED (DISABLE_SHARED_MEMORY_SYNC=true)");
-    return;
-  }
-  // 시작 시 즉시 pull
-  syncSharedMemory().catch(() => {});
-  syncTimer = setInterval(() => syncSharedMemory().catch(() => {}), SYNC_INTERVAL_MS);
-  console.log(`[LemonClaw] Shared memory sync started (every ${SYNC_INTERVAL_MS / 1000}s)`);
+  // 2026-05-10: 영구 비활성화. push 충돌 시 local commit 잔존 →
+  // sync-telegram-bots.sh 가 reset --hard 로 봇 죽임 → 무한 재시작 cycle.
+  // cross-bot 메모리 효용 미미 (4월 stale). 봇별 MEMORY.md 만 사용.
+  console.log("[LemonClaw] Shared memory sync DISABLED (영구 — sync-telegram-bots.sh reset cycle 차단)");
+  return;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -669,9 +648,6 @@ export function stopLemonClaw(): void {
   if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
   if (cronTimer) { clearInterval(cronTimer); cronTimer = null; }
   if (syncTimer) { clearInterval(syncTimer); syncTimer = null; }
-  // 종료 전 마지막 sync (kill-switch 활성 시 skip)
-  if (process.env.DISABLE_SHARED_MEMORY_SYNC !== "true") {
-    syncSharedMemory().catch(() => {});
-  }
+  // 2026-05-10: SHARED_MEMORY 비활성화 — 종료 시 sync 호출 안 함.
   console.log("[LemonClaw] Stopped");
 }
