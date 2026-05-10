@@ -1619,7 +1619,7 @@ async function verifyClaudeAuth(): Promise<{ ok: true } | { ok: false; reason: s
  *   prompt 키워드 → repo 매핑.
  *   추출 실패 시 빈 문자열 — 봇 dir 작업으로 sync reset cycle 발생하므로 caller 가 거부 권장.
  */
-function detectRepoFromPrompt(prompt: string): string {
+export function detectRepoFromPrompt(prompt: string): string {
   const p = prompt.toLowerCase();
   // Flutter 우선 (Flutter ↔ Web 동기화 task 도 Flutter 측 변경 위주)
   if (/플러터|flutter|lemon_flutter|모바일\s*앱/.test(p)) return "lemon_flutter";
@@ -1627,6 +1627,27 @@ function detectRepoFromPrompt(prompt: string): string {
   if (/fastapi|python|ai[\s-_]?server|fast\s*api/.test(p)) return "lemon-ai-server-FastAPI";
   if (/lemon[\s-_]?front|frontend|react|tsx|모바일\s*웹|nginx|3011|리걸몬스터(?!.*플러터)/.test(p)) return "lemon-front";
   return "";
+}
+
+/**
+ * 2026-05-10: 진행 중 task (resume) 의 prd.repo / prd.branch 가 비어있으면 자동 채움.
+ *   기존 cycle: prd.repo='' → autoCommit/Push 무동작 → Claude 가 봇 dir 에 commit → sync reset → 봇 재시작.
+ *   호성님 fix 적용 전 시작된 task 도 resume 시점부터 정상화.
+ */
+function backfillPrdRepo(prd: TaskPRD): boolean {
+  let changed = false;
+  if (!prd.repo) {
+    const detected = detectRepoFromPrompt(prd.originalPrompt);
+    if (detected) {
+      prd.repo = detected;
+      changed = true;
+    }
+  }
+  if (!prd.branch) {
+    prd.branch = "dev-hs-rtx6000-new";
+    changed = true;
+  }
+  return changed;
 }
 
 export async function startRalphTask(params: {
@@ -1889,6 +1910,13 @@ export async function resumeInProgressTasks(
 
   for (const prd of tasks) {
     try {
+      // 2026-05-10: 호성님 fix 적용 전 시작된 task 의 빈 repo/branch 자동 채움.
+      //   sync-telegram-bots.sh reset cycle 차단 + Claude 가 올바른 repo dir 작업.
+      if (backfillPrdRepo(prd)) {
+        savePRD(prd, true);
+        appendProgress(prd.taskId, `BACKFILL: repo=${prd.repo} branch=${prd.branch}`);
+      }
+
       await sendTg(prd.requestedBy,
         `🔄 Ralph Loop 재개: #${prd.taskId} — ${prd.originalPrompt.slice(0, 80)}`
       );
