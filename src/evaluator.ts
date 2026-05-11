@@ -28,6 +28,12 @@ export interface EvaluatorContext {
   contextSummary: string;
   recentLogTail: string;
   testResult: string;
+  /**
+   * 현재 워커가 빌드 권한을 가진 중앙 서버(rtx6000)인지 여부.
+   * false (비-빌드 워커) 면 evaluator 가 빌드/타입체크/테스트 미실행을 미완료 사유로 삼지 않음.
+   * 호성님 멀티서버 규칙: rtx6000 만 빌드 담당, 나머지는 코드 수정 + git push 가 끝.
+   */
+  isBuildWorker?: boolean;
 }
 
 const DEFAULT_MODEL = process.env.RALPH_EVALUATOR_MODEL || "claude-haiku-4-5";
@@ -114,6 +120,17 @@ export async function runEvaluator(ctx: EvaluatorContext): Promise<EvalResult> {
 }
 
 function buildEvaluatorPrompt(ctx: EvaluatorContext): string {
+  // 호성님 멀티서버 규칙: rtx6000 만 빌드 담당. 다른 워커(3060/A4500/맥미니/win 등)는
+  // 코드 수정 + git push 만 수행하고, rtx6000 auto-pull 이 1분 내 빌드를 자동 검증함.
+  // 이 evaluator 가 비-rtx6000 워커에서 빌드 결과를 요구하면 무한 미완료 루프 발생 → 사고 (2026-05-11 f45e1760).
+  const buildRule = ctx.isBuildWorker
+    ? `- 빌드/타입체크/테스트가 **실행되었고 실패**했다면 미완료`
+    : `- **이 워커는 빌드 권한 없음** (rtx6000 만 빌드 담당). 다음 원칙 준수:
+  - "빌드/타입체크/테스트 미실행" 을 미완료 사유로 삼지 말 것
+  - 코드 수정 + git push 완료 시 → \`complete=true\` 판정 가능
+  - rtx6000 auto-pull 이 1분 내 빌드를 자동 검증함 (에러 시 텔레그램 알림)
+  - 에이전트가 빌드 명령(flutter/gradle/npm/vite build 등) 시도했다면 규칙 위반이지만, 그래도 코드 수정 + push 가 완료되었으면 complete=true`;
+
   return `당신은 작업 완료 여부를 판정하는 독립 평가자입니다. 이전 작업 에이전트와 별도의 세션입니다.
 
 ## 원본 작업
@@ -128,10 +145,13 @@ ${ctx.recentLogTail || "(없음)"}
 ## 빌드/테스트 결과
 ${ctx.testResult}
 
+## 현재 워커 권한
+${ctx.isBuildWorker ? "빌드 가능 (rtx6000 중앙 서버)" : "코드 수정 전용 (비-rtx6000 워커) — 빌드 검증 불가"}
+
 위 정보를 바탕으로 이 작업이 **완전히 완료**되었는지 평가하세요.
-- 코드 수정이 있었고 모든 테스트가 통과했으면 높은 확률로 완료
+- 코드 수정이 있고 git push 가 완료되었으면 높은 확률로 완료
 - 로그에 에러, 미구현, TODO, "다음에 수정"이 남아있으면 미완료
-- 빌드/타입체크/테스트 실패면 무조건 미완료
+${buildRule}
 - "원본 작업 범위 밖"이라는 사유로 미완료 처리하지 말 것 (작업 자체가 명확하지 않으면 complete=true)
 
 JSON 한 개만 응답 (코드블록 없이, 다른 텍스트 없이):

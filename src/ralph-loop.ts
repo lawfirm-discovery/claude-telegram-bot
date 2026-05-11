@@ -12,11 +12,29 @@
 import { randomUUID } from "crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, readdirSync, renameSync } from "fs";
 import { join } from "path";
+import { hostname } from "os";
 import { clearSession, getHudInfo } from "./claude-engine";
 import { askClaudeLight, runEvaluator, type EvalResult } from "./evaluator";
 import { runRatchet } from "./test-ratchet";
 import { incr, formatOneLineSummary } from "./metrics";
 import { appendMemoryLog } from "./lemonclaw";
+
+// ═══════════════════════════════════════════════════════════════
+// 빌드 워커 식별 (호성님 멀티서버 규칙)
+// ═══════════════════════════════════════════════════════════════
+// rtx6000 만 빌드 담당. 나머지 워커는 코드 수정 + git push 만 수행.
+// 우선순위: env override → hostname 매칭.
+//   - RALPH_BUILD_WORKER=true/false 로 강제 지정 가능
+//   - 미설정 시 hostname 이 BUILD_WORKER_HOSTNAMES 에 포함되면 빌드 워커
+// rtx6000 hostname 은 "legalmonster" (확인일 2026-05-11).
+const BUILD_WORKER_HOSTNAMES = ["legalmonster"];
+
+function isBuildWorker(): boolean {
+  const env = process.env.RALPH_BUILD_WORKER;
+  if (env === "true") return true;
+  if (env === "false") return false;
+  return BUILD_WORKER_HOSTNAMES.includes(hostname());
+}
 
 // ═══════════════════════════════════════════════════════════════
 // Types
@@ -1111,6 +1129,7 @@ export async function runRalphLoop(
           contextSummary: readContext(taskId),
           recentLogTail: readProgressLines(taskId).slice(-10).join("\n"),
           testResult: testSummary,
+          isBuildWorker: isBuildWorker(),
         });
         appendProgress(taskId, `EVALUATOR: complete=${evalResult.complete}, reason=${evalResult.reason}${evalResult.nextFocus ? `, nextFocus=${evalResult.nextFocus}` : ""}`);
 
@@ -1431,6 +1450,22 @@ function buildIterationPrompt(
 3. 기존 패턴 따르기 — 새 추상화/의존성 도입 전 grep 으로 기존 코드 검색
 4. 'as any' TypeScript 사용 지양 — 정확한 타입 작성
 5. 최소 변경 원칙 — 인접 코드 리팩토링 금지`);
+
+  // 호성님 멀티서버 규칙 — 비-rtx6000 워커는 빌드 금지, 코드 수정 + git push 만 수행.
+  // 이걸 매 iter 시작 시 박지 않으면 에이전트가 종교적으로 빌드를 시도하다가 SDK 부재로 실패 →
+  // evaluator 가 미완료로 차서 무한 루프 (2026-05-11 f45e1760 사고).
+  if (!isBuildWorker()) {
+    parts.push(`## 🚨 멀티서버 규칙 (이 워커는 코드 수정 전용 — 빌드 금지)
+- **이 워커는 rtx6000 이 아님** — 빌드/서비스 실행 권한 없음
+- **다음 명령 실행 절대 금지** (실행해도 SDK 없어 실패하며, 시도 자체가 규칙 위반):
+  - Flutter: \`flutter build\`, \`flutter analyze\`, \`flutter test\`, \`flutter pub get\`
+  - Spring: \`./gradlew build\`, \`./gradlew bootRun\`, \`./gradlew compileJava\`, \`./gradlew test\`
+  - Frontend: \`npm run build\`, \`npx vite build\`, \`npx craco build\`, \`yarn build\`
+  - 서비스: \`pm2 start\`, \`systemctl start\`, \`sudo systemctl restart\`
+- **작업 절차**: git pull → 코드 수정 (정적 검토만, grep/read 로 검증) → git commit → git push
+- 빌드 검증은 rtx6000 의 auto-pull 이 1분 내 자동 수행 → 에러 시 텔레그램 알림 발송
+- **완료 조건**: 의도한 코드 변경이 commit + push 되었으면 그 자체로 완료. 빌드 결과 확인하려 하지 말 것.`);
+  }
 
   if (context) {
     parts.push(`## 이전 작업 진행 상황\n${context}`);
