@@ -7,7 +7,7 @@ import {
   executeWorkerTask, getWorkerBots, formatAffinityReport,
   quickDelegate, detectDelegateMessage,
 } from "./orchestrator";
-import { formatRalphStatus, listTasks, startRalphTask, stopTask, approveAndStart, cancelPendingTask } from "./ralph-loop";
+import { formatRalphStatus, formatRalphDetail, formatRalphFiles, formatRalphLive, listTasks, startRalphTask, stopTask, approveAndStart, cancelPendingTask } from "./ralph-loop";
 import {
   detectApprovalRequest,
   getApprovalEmoji,
@@ -381,6 +381,9 @@ bot.command("ralph", async (ctx) => {
         "  /ralph stop <id>         — 실행 중단\n" +
         "  /ralph cancel <id>       — pending plan 폐기\n" +
         "  /ralph status <id>       — 상세 상태\n" +
+        "  /ralph detail <id>       — 최근 iter 전체 detail (R12.1)\n" +
+        "  /ralph files <id>        — 누적 변경 파일 목록 (R12.1)\n" +
+        "  /ralph live <id> [N]     — progress.log 마지막 N줄 (R12.1)\n" +
         "  /ralph list              — 최근 태스크"
       );
       return;
@@ -393,6 +396,29 @@ bot.command("ralph", async (ctx) => {
   if (arg.startsWith("status ")) {
     const taskId = arg.slice(7).trim();
     await ctx.reply(formatRalphStatus(taskId));
+    return;
+  }
+
+  // Phase R12.1 — B1/B2/B3: 호성님이 정확히 무슨 코드 개선이 이뤄지고 있는지 추적 가능.
+  if (arg.startsWith("detail ")) {
+    const taskId = arg.slice(7).trim();
+    const text = formatRalphDetail(taskId);
+    for (const chunk of splitMessage(text)) await ctx.reply(chunk);
+    return;
+  }
+  if (arg.startsWith("files ")) {
+    const taskId = arg.slice(6).trim();
+    const text = formatRalphFiles(taskId);
+    for (const chunk of splitMessage(text)) await ctx.reply(chunk);
+    return;
+  }
+  if (arg.startsWith("live ")) {
+    const rest = arg.slice(5).trim().split(/\s+/);
+    const taskId = rest[0];
+    const tail = rest[1] ? Math.min(parseInt(rest[1]) || 50, 200) : 50;
+    if (!taskId) { await ctx.reply("사용법: /ralph live <id> [N]"); return; }
+    const text = formatRalphLive(taskId, tail);
+    for (const chunk of splitMessage(text)) await ctx.reply(chunk);
     return;
   }
 

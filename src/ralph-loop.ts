@@ -549,12 +549,12 @@ function runGitInRepo(repo: string, args: string[]): string | null {
 }
 
 /** Phase R3.3 — git diff --stat 을 progress 에 기록 + responses/{itemId}-{N}.diff 에 full diff 저장. */
-function captureGitDiff(taskId: string, itemId: string, iter: number, repo: string): { hasChanges: boolean; statSummary: string } {
-  if (!repo || !AUTO_GIT_ENABLED) return { hasChanges: false, statSummary: "" };
+function captureGitDiff(taskId: string, itemId: string, iter: number, repo: string): { hasChanges: boolean; statSummary: string; fileLines: string[] } {
+  if (!repo || !AUTO_GIT_ENABLED) return { hasChanges: false, statSummary: "", fileLines: [] };
   const stat = runGitInRepo(repo, ["diff", "--stat"]) ?? "";
   const status = runGitInRepo(repo, ["status", "--porcelain"]) ?? "";
   const hasChanges = !!status.trim() || !!stat.trim();
-  if (!hasChanges) return { hasChanges: false, statSummary: "" };
+  if (!hasChanges) return { hasChanges: false, statSummary: "", fileLines: [] };
 
   // full diff 도 별도 파일로 저장 (사후 진단 용도)
   try {
@@ -571,7 +571,9 @@ function captureGitDiff(taskId: string, itemId: string, iter: number, repo: stri
   const statSummary = statLines.length > 0
     ? statLines[statLines.length - 1] + (statLines.length > 1 ? ` (${statLines.length - 1} files)` : "")
     : "";
-  return { hasChanges: true, statSummary };
+  // Phase R12.1 — 파일별 stat 라인 (마지막 summary 라인 제외) — 호성님이 어떤 파일 수정 중인지 보이게.
+  const fileLines = statLines.length > 1 ? statLines.slice(0, -1).map(l => l.trim()) : [];
+  return { hasChanges: true, statSummary, fileLines };
 }
 
 /**
@@ -1294,19 +1296,27 @@ export async function runRalphLoop(
           });
         }
 
-        // 8. 짝수 반복마다 진행 상황 알림 (1회는 item 시작 알림과 중복 방지)
-        // R12 — commit hash + summary 표시
-        if (item.iteration % 2 === 0 && !evalResult.complete) {
+        // 8. 매 반복마다 진행 상황 알림 (R12.1: A1+A2 — 홀수 iter 도 표시, 변경 파일 + wallclock 진척)
+        if (!evalResult.complete) {
           const commitLine = lastCommitHash
             ? `📝 commit \`${lastCommitHash}\`: ${iterSummary.slice(0, 70)}`
             : !diffInfo.hasChanges
-              ? `📝 변경 없음`
+              ? `📖 분석/조사 iter (코드 변경 없음)`
               : `📝 변경 있지만 ratchet 실패 — commit skip`;
+          // 변경 파일 목록 (최대 5개) — 호성님이 정확히 무슨 파일을 수정 중인지 즉시 인지.
+          const filesLine = diffInfo.fileLines.length > 0
+            ? `📂 변경 파일:\n` + diffInfo.fileLines.slice(0, 5).map(l => `  ${l}`).join("\n")
+              + (diffInfo.fileLines.length > 5 ? `\n  ... +${diffInfo.fileLines.length - 5} files` : "")
+            : "";
+          // wallclock 진척률 (R12.1 C3)
+          const elapsedSecForMsg = Math.round((Date.now() - (prd.createdAt || Date.now())) / 1000);
+          const wallProgress = `⏱ ${Math.floor(elapsedSecForMsg/60)}m / ${Math.floor(prd.maxWallclockSec/60)}m 한도`;
           const iterMsg =
             `🔄 Ralph #${taskId} — ${item.id} iter ${item.iteration}/${item.maxIterations}\n` +
-            `테스트: ${testResult.passed ? "✅" : "❌"} | 평가: 미완료\n` +
-            `${commitLine}\n` +
-            `${evalResult.nextFocus ? `➡️ 다음 집중: ${evalResult.nextFocus.slice(0, 80)}` : evalResult.reason.slice(0, 80)}`;
+            `테스트: ${testResult.passed ? "✅" : "❌"} | 평가: 미완료 · ${wallProgress}\n` +
+            `${commitLine}` +
+            (filesLine ? `\n${filesLine}` : "") +
+            `\n${evalResult.nextFocus ? `➡️ 다음: ${evalResult.nextFocus.slice(0, 100)}` : evalResult.reason.slice(0, 100)}`;
           await sendTg(prd.requestedBy, iterMsg);
         }
 
@@ -2031,4 +2041,134 @@ export function listTasks(limit = 10): TaskPRD[] {
     }
   } catch {}
   return results.sort((a, b) => b.createdAt - a.createdAt).slice(0, limit);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Phase R12.1 — 가시성 강화 (B1/B2/B3): 호성님이 실제 코드 개선을 추적 가능하도록.
+// ═══════════════════════════════════════════════════════════════
+
+/** B1 — 최근 iter 의 전체 detail (RESPONSE / EVALUATOR / USAGE / 변경 파일 / 다음 계획). */
+export function formatRalphDetail(taskId: string): string {
+  const prd = loadPRD(taskId);
+  if (!prd) return `❌ 태스크 ${taskId} 없음`;
+
+  const logPath = join(taskDir(taskId), "progress.log");
+  if (!existsSync(logPath)) return `❌ progress.log 없음 (${taskId})`;
+  const log = readFileSync(logPath, "utf-8");
+  const lines = log.trim().split("\n");
+
+  // 마지막 ITERATION N START 이후 라인들만 추출
+  let lastStart = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (/ITERATION \d+\/\d+ START/.test(lines[i] || "")) { lastStart = i; break; }
+  }
+  const recent = lastStart >= 0 ? lines.slice(lastStart) : lines.slice(-30);
+
+  // 핵심 라인만 추출
+  const get = (re: RegExp): string => {
+    for (const l of recent) {
+      const m = l.match(re);
+      if (m) return m[1] || l;
+    }
+    return "";
+  };
+  const iterLine = get(/ITERATION (\d+)\/\d+ START: (.+)/);
+  const response = get(/RESPONSE: (.+)/);
+  const usage = get(/USAGE: (.+)/);
+  const evalReason = get(/EVALUATOR: complete=\w+, reason=(.+?), nextFocus=/);
+  const nextFocus = get(/nextFocus=(.+)/);
+  const notComplete = get(/NOT COMPLETE: (.+)/);
+
+  // 현재 item 의 commits (최근 5개)
+  const currentItem = prd.items.find(it => !it.passes) || prd.items[prd.items.length - 1];
+  const commitsBlock = currentItem?.commits
+    ?.slice(-5)
+    .map(c => `  • iter ${c.iter} \`${c.hash}\`: ${c.summary.slice(0, 80)}`)
+    .join("\n") || "";
+
+  const out: string[] = [
+    `📋 Ralph #${taskId} — detail`,
+    ``,
+    `Item: ${currentItem?.id || "?"} (${currentItem?.iteration || 0}/${currentItem?.maxIterations || 0})`,
+    `최근 iter: ${iterLine || "(시작 전)"}`,
+    ``,
+  ];
+  if (response) out.push(`🤖 RESPONSE (preview):\n${response.slice(0, 400)}`, "");
+  if (usage) out.push(`📊 USAGE: ${usage}`, "");
+  if (evalReason) out.push(`🔍 EVALUATOR: ${evalReason.slice(0, 250)}`, "");
+  if (nextFocus) out.push(`➡️ NEXT FOCUS: ${nextFocus.slice(0, 250)}`, "");
+  if (notComplete) out.push(`📝 NOT COMPLETE: ${notComplete.slice(0, 250)}`, "");
+  if (commitsBlock) out.push(`📦 최근 commits:\n${commitsBlock}`, "");
+
+  return out.join("\n");
+}
+
+/** B2 — task 누적 변경 파일 (responses/*.diff 분석 + 모든 commits 통합). */
+export function formatRalphFiles(taskId: string): string {
+  const prd = loadPRD(taskId);
+  if (!prd) return `❌ 태스크 ${taskId} 없음`;
+
+  const responsesDir = join(taskDir(taskId), "responses");
+  const fileSet = new Map<string, { iters: number[]; addedLines: number; removedLines: number }>();
+
+  if (existsSync(responsesDir)) {
+    for (const diffFile of readdirSync(responsesDir)) {
+      if (!diffFile.endsWith(".diff")) continue;
+      const iterMatch = diffFile.match(/-(\d+)\.diff$/);
+      const iter = iterMatch ? parseInt(iterMatch[1]) : 0;
+      try {
+        const content = readFileSync(join(responsesDir, diffFile), "utf-8");
+        // diff --git a/path b/path 패턴에서 파일 경로 추출
+        const pathRegex = /^diff --git a\/(.+) b\/.+$/gm;
+        let m: RegExpExecArray | null;
+        const filesInThisDiff = new Set<string>();
+        while ((m = pathRegex.exec(content)) !== null) filesInThisDiff.add(m[1]);
+        // 각 파일의 +/- 카운트 (대략)
+        for (const file of filesInThisDiff) {
+          const fileSection = content.split(`diff --git a/${file}`)[1]?.split(/^diff --git/m)[0] || "";
+          const added = (fileSection.match(/^\+(?!\+\+)/gm) || []).length;
+          const removed = (fileSection.match(/^-(?!--)/gm) || []).length;
+          const cur = fileSet.get(file) || { iters: [], addedLines: 0, removedLines: 0 };
+          cur.iters.push(iter);
+          cur.addedLines += added;
+          cur.removedLines += removed;
+          fileSet.set(file, cur);
+        }
+      } catch {}
+    }
+  }
+
+  // 전체 commits 카운트
+  const commitCount = prd.items.flatMap(it => it.commits || []).filter(c => c.hash && c.hash !== "no-change" && c.hash !== "skip-fail").length;
+  const noChangeCount = prd.items.flatMap(it => it.commits || []).filter(c => c.hash === "no-change").length;
+
+  if (fileSet.size === 0) {
+    return `📂 Ralph #${taskId} — 변경 파일\n\n(아직 코드 변경 없음)\ncommits: ${commitCount} 실변경 / ${noChangeCount} 분석-only`;
+  }
+
+  const sortedFiles = [...fileSet.entries()]
+    .sort((a, b) => (b[1].addedLines + b[1].removedLines) - (a[1].addedLines + a[1].removedLines))
+    .slice(0, 30);
+
+  const lines: string[] = [
+    `📂 Ralph #${taskId} — 변경 파일 (top ${sortedFiles.length})`,
+    `commits: ${commitCount} 실변경 / ${noChangeCount} 분석-only`,
+    ``,
+  ];
+  for (const [file, info] of sortedFiles) {
+    lines.push(`  ${file}  +${info.addedLines}/-${info.removedLines}  (iter ${info.iters.join(",")})`);
+  }
+  return lines.join("\n");
+}
+
+/** B3 — progress.log 마지막 N줄 tail. */
+export function formatRalphLive(taskId: string, tailLines = 50): string {
+  const prd = loadPRD(taskId);
+  if (!prd) return `❌ 태스크 ${taskId} 없음`;
+  const logPath = join(taskDir(taskId), "progress.log");
+  if (!existsSync(logPath)) return `❌ progress.log 없음 (${taskId})`;
+  const log = readFileSync(logPath, "utf-8");
+  const lines = log.trim().split("\n");
+  const tail = lines.slice(-tailLines).join("\n");
+  return `📡 Ralph #${taskId} — live tail (마지막 ${Math.min(tailLines, lines.length)}줄)\n\n${tail}`;
 }
