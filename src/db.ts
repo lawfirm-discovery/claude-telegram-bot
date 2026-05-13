@@ -168,17 +168,22 @@ export interface DbStats {
 
 export async function getStats(): Promise<DbStats> {
   try {
-    const msgCount = await sql`SELECT COUNT(*)::int AS total FROM bot_messages`;
-    const sessionCount = await sql`SELECT COUNT(*)::int AS total FROM bot_sessions`;
-    const costSum = await sql`SELECT COALESCE(SUM(total_cost), 0)::float AS total FROM bot_sessions`;
-    const botStats = await sql`
-      SELECT bot_name, COUNT(*)::int AS message_count, MAX(created_at) AS last_active
-      FROM bot_messages GROUP BY bot_name ORDER BY last_active DESC
-    `;
+    const [summary, botStats] = await Promise.all([
+      sql`
+        SELECT
+          (SELECT COUNT(*)::int FROM bot_messages) AS total_messages,
+          (SELECT COUNT(*)::int FROM bot_sessions) AS total_sessions,
+          (SELECT COALESCE(SUM(total_cost), 0)::float FROM bot_sessions) AS total_cost
+      `,
+      sql`
+        SELECT bot_name, COUNT(*)::int AS message_count, MAX(created_at) AS last_active
+        FROM bot_messages GROUP BY bot_name ORDER BY last_active DESC
+      `,
+    ]);
     return {
-      totalMessages: msgCount[0]?.total || 0,
-      totalSessions: sessionCount[0]?.total || 0,
-      totalCost: costSum[0]?.total || 0,
+      totalMessages: summary[0]?.total_messages || 0,
+      totalSessions: summary[0]?.total_sessions || 0,
+      totalCost: summary[0]?.total_cost || 0,
       botStats: Array.from(botStats) as BotStatsEntry[],
     };
   } catch (e) {

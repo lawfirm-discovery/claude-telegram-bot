@@ -72,19 +72,32 @@ function readMd(path: string): string {
   }
 }
 
+// mtime 기반 캐시 — 파일이 변경되지 않으면 디스크 I/O 스킵
+const _promptCache: { result: string; mtimes: Record<string, number> } = { result: "", mtimes: {} };
+const PROMPT_SOURCE_PATHS = [SOUL_PATH, AGENTS_PATH, EXPERT_TYPES_PATH, MEMORY_PATH, CLAUDE_MD_PATH];
+
+function getFileMtime(path: string): number {
+  try { return statSync(path).mtimeMs; } catch { return 0; }
+}
+
+function promptCacheValid(): boolean {
+  if (!_promptCache.result) return false;
+  for (const p of PROMPT_SOURCE_PATHS) {
+    if (getFileMtime(p) !== (_promptCache.mtimes[p] || 0)) return false;
+  }
+  return true;
+}
+
 /** Load SOUL.md + AGENTS.md + EXPERT_TYPES.md + MEMORY.md as combined system prompt
- *  2026-05-10: SHARED_MEMORY 비활성화 — push 충돌 시 local commit 잔존 →
- *  sync-telegram-bots.sh 가 reset --hard 로 봇 죽임 → 무한 재시작 cycle.
- *  cross-bot 메모리 효용도 미미 (4월 stale). 봇별 MEMORY.md 만 사용.
+ *  mtime 캐싱: 파일 변경 없으면 이전 결과 재사용 (resume마다 5파일 읽기 제거)
  */
 export function loadSystemPrompt(): string {
+  if (promptCacheValid()) return _promptCache.result;
+
   const soul = readMd(SOUL_PATH);
   const agents = readMd(AGENTS_PATH);
   const expertTypes = readMd(EXPERT_TYPES_PATH);
   const memory = readMd(MEMORY_PATH);
-  // 2026-05-10: 봇 루트의 CLAUDE.md 를 매 호출 system prompt 에 주입.
-  //   호성님 명시: ralph 가 리걸몬스터 작업 규칙 + 다른 서버 절차 + 절대 규칙 (포트 3000 금지, dev-hs-rtx6000-new 브랜치만 등) 지키도록.
-  //   특히 lawfirm-discovery 레포 (lemon-front, lemon_flutter, lemon-api-server-spring, lemon-ai-server-FastAPI) 작업 절차 강제.
   const claudeMd = readMd(CLAUDE_MD_PATH);
 
   const parts: string[] = [];
@@ -94,13 +107,17 @@ export function loadSystemPrompt(): string {
   if (memory) parts.push(`# 📝 MEMORY\n${memory}`);
   if (claudeMd) parts.push(`# 📜 CLAUDE.md (작업 규칙 — 절대 준수)\n${claudeMd}`);
 
-  // 커밋 프리픽스 규칙 주입
   const commitPrefix = getCommitPrefix();
   if (commitPrefix) {
     parts.push(`# 🏷️ GIT COMMIT RULE\n모든 git commit 메시지 앞에 반드시 "[${commitPrefix}]" 프리픽스를 붙여라. 예: "[${commitPrefix}] fix: 버그 수정". Co-Authored-By 라인에는 붙이지 않는다.`);
   }
 
-  return parts.join("\n\n---\n\n");
+  const result = parts.join("\n\n---\n\n");
+
+  for (const p of PROMPT_SOURCE_PATHS) _promptCache.mtimes[p] = getFileMtime(p);
+  _promptCache.result = result;
+
+  return result;
 }
 
 /** 봇 식별용 커밋 프리픽스 결정 */

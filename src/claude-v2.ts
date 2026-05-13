@@ -97,17 +97,38 @@ function loadSessions(): void {
   } catch { /* first run */ }
 }
 
+let _saveTimer: ReturnType<typeof setTimeout> | null = null;
+const SAVE_DEBOUNCE_MS = 2000;
+
 function saveSessions(): void {
+  if (_saveTimer) return;
+  _saveTimer = setTimeout(() => {
+    _saveTimer = null;
+    try {
+      const obj: Record<string, Session> = {};
+      for (const [key, s] of sessions) obj[key] = s;
+      const tmp = SESSION_FILE + ".tmp";
+      writeFileSync(tmp, JSON.stringify(obj));
+      renameSync(tmp, SESSION_FILE);
+    } catch (e: unknown) { console.error(`[V2 Sessions] Save failed: ${e instanceof Error ? e.message : e}`); }
+  }, SAVE_DEBOUNCE_MS);
+}
+
+function saveSessionsSync(): void {
+  if (_saveTimer) { clearTimeout(_saveTimer); _saveTimer = null; }
   try {
     const obj: Record<string, Session> = {};
     for (const [key, s] of sessions) obj[key] = s;
     const tmp = SESSION_FILE + ".tmp";
     writeFileSync(tmp, JSON.stringify(obj));
     renameSync(tmp, SESSION_FILE);
-  } catch (e: any) { console.error(`[V2 Sessions] Save failed: ${e.message}`); }
+  } catch (e: unknown) { console.error(`[V2 Sessions] Save failed: ${e instanceof Error ? e.message : e}`); }
 }
 
 loadSessions();
+
+process.on("SIGTERM", saveSessionsSync);
+process.on("SIGINT", saveSessionsSync);
 
 setInterval(() => {
   const now = Date.now();
