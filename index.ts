@@ -46,15 +46,19 @@ async function waitForPollingSlot(token: string, maxWaitMs = 60_000): Promise<bo
 const PID_FILE = join(import.meta.dir, process.env.BOT_PID_FILE || "bot.pid");
 
 function isBotProcess(pid: number): boolean {
+  // Phase R11.6 (2026-05-14): cmdline 매치에 src/bot.ts 도 포함.
+  //   기존엔 index.ts 만 매치 → `bun run src/bot.ts` 로 띄운 디버그 좀비를
+  //   "봇 아님" 으로 분류 → polling slot 점유한 채 무시됨 → sustained 409 conflict.
+  const isBotCmd = (s: string) => /bun/.test(s) && (/index\.ts/.test(s) || /src\/bot\.ts/.test(s));
   // Linux: /proc/<pid>/cmdline 가 가장 정확
   try {
     const cmdline = readFileSync(`/proc/${pid}/cmdline`, "utf-8").replace(/\0/g, " ");
-    return /bun/.test(cmdline) && /index\.ts/.test(cmdline);
+    return isBotCmd(cmdline);
   } catch {
     // /proc 없음 (macOS) — ps fallback. 보수적: ps 도 실패하면 false (다른 unrelated process 죽이지 않게)
     try {
       const out = execSync(`ps -p ${pid} -o command=`, { encoding: "utf-8", timeout: 2000, stdio: ["ignore", "pipe", "ignore"] });
-      return /bun/.test(out) && /index\.ts/.test(out);
+      return isBotCmd(out);
     } catch {
       return false;
     }
@@ -104,7 +108,14 @@ async function checkAndWritePid(): Promise<void> {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   if (token) {
     console.log("[Bot] Waiting for Telegram polling slot to clear...");
-    await waitForPollingSlot(token, 60_000);
+    const slotOk = await waitForPollingSlot(token, 60_000);
+    // Phase R11.6 (2026-05-14): 60s 후에도 slot 안 비면 다른 인스턴스가 polling 잡고 있는 것 →
+    //   fall-through 로 polling 시작하면 무한 409 conflict 루프 (2026-05-13 macmini 사고).
+    //   supervisor (ThrottleInterval=300) 에 양보 후 재시도하게 exit 75.
+    if (!slotOk) {
+      console.error("[Bot] Polling slot 60s 대기 후에도 점유됨 — 다른 인스턴스 의심. supervisor 재시작 양보 (exit 75).");
+      process.exit(75);
+    }
   }
 }
 await checkAndWritePid();
