@@ -15,8 +15,8 @@ export async function testConnection(): Promise<boolean> {
   try {
     const result = await sql`SELECT 1 AS ok`;
     return result[0]?.ok === 1;
-  } catch (e: any) {
-    console.error(`[DB] Connection failed: ${e.message}`);
+  } catch (e) {
+    console.error(`[DB] Connection failed: ${e instanceof Error ? e.message : "unknown"}`);
     return false;
   }
 }
@@ -43,8 +43,8 @@ export async function saveMessage(params: SaveMessageParams): Promise<void> {
       INSERT INTO bot_messages (bot_name, bot_username, chat_id, user_name, direction, message_text, attachments, telegram_message_id, reply_to_message_id)
       VALUES (${params.botName}, ${params.botUsername || null}, ${params.chatId}, ${params.userName || null}, ${params.direction}, ${params.messageText}, ${JSON.stringify(params.attachments || [])}, ${params.telegramMessageId || null}, ${params.replyToMessageId || null})
     `;
-  } catch (e: any) {
-    console.error(`[DB] saveMessage failed: ${e.message}`);
+  } catch (e) {
+    console.error(`[DB] saveMessage failed: ${e instanceof Error ? e.message : "unknown"}`);
   }
 }
 
@@ -56,9 +56,23 @@ export interface MessageQuery {
   offset?: number;
 }
 
-export async function getMessages(query: MessageQuery): Promise<{ messages: any[]; total: number }> {
+export interface BotMessage {
+  id: number;
+  bot_name: string;
+  bot_username: string | null;
+  chat_id: string;
+  user_name: string | null;
+  direction: "inbound" | "outbound";
+  message_text: string;
+  attachments: string;
+  telegram_message_id: number | null;
+  reply_to_message_id: number | null;
+  created_at: Date;
+}
+
+export async function getMessages(query: MessageQuery): Promise<{ messages: BotMessage[]; total: number }> {
   const limit = Math.min(query.limit || 50, 200);
-  const offset = query.offset || 0;
+  const offset = Math.max(query.offset || 0, 0);
 
   try {
     const messages = query.search
@@ -73,9 +87,9 @@ export async function getMessages(query: MessageQuery): Promise<{ messages: any[
         ? await sql`SELECT COUNT(*)::int AS total FROM bot_messages WHERE bot_name = ${query.botName}`
         : await sql`SELECT COUNT(*)::int AS total FROM bot_messages`;
 
-    return { messages: Array.from(messages), total: countResult[0]?.total || 0 };
-  } catch (e: any) {
-    console.error(`[DB] getMessages failed: ${e.message}`);
+    return { messages: Array.from(messages) as BotMessage[], total: countResult[0]?.total || 0 };
+  } catch (e) {
+    console.error(`[DB] getMessages failed: ${e instanceof Error ? e.message : "unknown"}`);
     return { messages: [], total: 0 };
   }
 }
@@ -102,19 +116,35 @@ export async function saveSession(params: SaveSessionParams): Promise<void> {
       INSERT INTO bot_sessions (bot_name, chat_id, session_id, turns, input_tokens, output_tokens, cache_read, total_cost, duration_sec, status, ended_at)
       VALUES (${params.botName}, ${params.chatId}, ${params.sessionId || null}, ${params.turns}, ${params.inputTokens}, ${params.outputTokens}, ${params.cacheRead}, ${params.totalCost}, ${params.durationSec}, 'completed', NOW())
     `;
-  } catch (e: any) {
-    console.error(`[DB] saveSession failed: ${e.message}`);
+  } catch (e) {
+    console.error(`[DB] saveSession failed: ${e instanceof Error ? e.message : "unknown"}`);
   }
 }
 
-export async function getSessions(botName?: string, limit = 50): Promise<any[]> {
+export interface BotSession {
+  id: number;
+  bot_name: string;
+  chat_id: string;
+  session_id: string | null;
+  turns: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read: number;
+  total_cost: number;
+  duration_sec: number;
+  status: string;
+  started_at: Date;
+  ended_at: Date | null;
+}
+
+export async function getSessions(botName?: string, limit = 50): Promise<BotSession[]> {
   try {
     const rows = botName
       ? await sql`SELECT * FROM bot_sessions WHERE bot_name = ${botName} ORDER BY started_at DESC LIMIT ${limit}`
       : await sql`SELECT * FROM bot_sessions ORDER BY started_at DESC LIMIT ${limit}`;
-    return Array.from(rows);
-  } catch (e: any) {
-    console.error(`[DB] getSessions failed: ${e.message}`);
+    return Array.from(rows) as BotSession[];
+  } catch (e) {
+    console.error(`[DB] getSessions failed: ${e instanceof Error ? e.message : "unknown"}`);
     return [];
   }
 }
@@ -123,7 +153,20 @@ export async function getSessions(botName?: string, limit = 50): Promise<any[]> 
 // Stats
 // ═══════════════════════════════════════════════════════════════
 
-export async function getStats(): Promise<any> {
+export interface BotStatsEntry {
+  bot_name: string;
+  message_count: number;
+  last_active: Date;
+}
+
+export interface DbStats {
+  totalMessages: number;
+  totalSessions: number;
+  totalCost: number;
+  botStats: BotStatsEntry[];
+}
+
+export async function getStats(): Promise<DbStats> {
   try {
     const msgCount = await sql`SELECT COUNT(*)::int AS total FROM bot_messages`;
     const sessionCount = await sql`SELECT COUNT(*)::int AS total FROM bot_sessions`;
@@ -136,10 +179,10 @@ export async function getStats(): Promise<any> {
       totalMessages: msgCount[0]?.total || 0,
       totalSessions: sessionCount[0]?.total || 0,
       totalCost: costSum[0]?.total || 0,
-      botStats: Array.from(botStats),
+      botStats: Array.from(botStats) as BotStatsEntry[],
     };
-  } catch (e: any) {
-    console.error(`[DB] getStats failed: ${e.message}`);
+  } catch (e) {
+    console.error(`[DB] getStats failed: ${e instanceof Error ? e.message : "unknown"}`);
     return { totalMessages: 0, totalSessions: 0, totalCost: 0, botStats: [] };
   }
 }

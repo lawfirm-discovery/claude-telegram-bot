@@ -53,6 +53,41 @@ interface DelegateResponse {
   error?: string;
 }
 
+interface RestartRequest {
+  secret: string;
+  reason?: string;
+}
+
+interface ResetSessionRequest {
+  secret: string;
+  chatId?: string;
+}
+
+interface ExecRequest {
+  secret: string;
+  command: string;
+  timeout?: number;
+}
+
+interface ReportMessageData {
+  botName: string;
+  botUsername?: string;
+  chatId: string;
+  direction: "inbound" | "outbound";
+  messageText: string;
+}
+
+interface SessionReportData {
+  botName?: string;
+  chatId: string;
+  turns: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheRead: number;
+  totalCost: number;
+  durationSec: number;
+}
+
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
@@ -73,7 +108,7 @@ export function startWorkerApi(bot: Bot): void {
 
       const url = new URL(req.url);
 
-      const jsonRes = (data: any, status = 200) => Response.json(data, { status, headers: CORS_HEADERS });
+      const jsonRes = (data: Record<string, unknown>, status = 200) => Response.json(data, { status, headers: CORS_HEADERS });
 
       // Health check (with optional deep CLI auth check)
       if (url.pathname === "/health") {
@@ -91,7 +126,7 @@ export function startWorkerApi(bot: Bot): void {
       // Restart: 세션 초기화 + 프로세스 재시작
       if (url.pathname === "/restart" && req.method === "POST") {
         try {
-          const body = await req.json() as any;
+          const body = await req.json() as RestartRequest;
           if (body.secret !== RESTART_SECRET) {
             return Response.json({ ok: false, error: "unauthorized" }, { status: 403 });
           }
@@ -105,15 +140,15 @@ export function startWorkerApi(bot: Bot): void {
           }, 1000);
 
           return Response.json({ ok: true, message: "restarting in 1s", reason });
-        } catch (e: any) {
-          return Response.json({ ok: false, error: e.message }, { status: 500 });
+        } catch (e) {
+          return Response.json({ ok: false, error: e instanceof Error ? e.message : "unknown" }, { status: 500 });
         }
       }
 
       // Session reset: 세션만 초기화 (재시작 없이)
       if (url.pathname === "/reset-session" && req.method === "POST") {
         try {
-          const body = await req.json() as any;
+          const body = await req.json() as ResetSessionRequest;
           if (body.secret !== RESTART_SECRET) {
             return Response.json({ ok: false, error: "unauthorized" }, { status: 403 });
           }
@@ -121,8 +156,8 @@ export function startWorkerApi(bot: Bot): void {
           if (chatId) clearSession(chatId);
           console.log(`[WorkerAPI] Session reset for chat=${chatId}`);
           return Response.json({ ok: true, message: "session reset", chatId });
-        } catch (e: any) {
-          return Response.json({ ok: false, error: e.message }, { status: 500 });
+        } catch (e) {
+          return Response.json({ ok: false, error: e instanceof Error ? e.message : "unknown" }, { status: 500 });
         }
       }
 
@@ -162,8 +197,8 @@ export function startWorkerApi(bot: Bot): void {
             memoryRssMB: memoryRss,
             timestamp: Date.now(),
           });
-        } catch (e: any) {
-          return jsonRes({ ok: false, error: e.message }, 500);
+        } catch (e) {
+          return jsonRes({ ok: false, error: e instanceof Error ? e.message : "unknown" }, 500);
         }
       }
 
@@ -180,15 +215,15 @@ export function startWorkerApi(bot: Bot): void {
             return jsonRes({ ok: true, lines: tail, total: allLines.length });
           }
           return jsonRes({ ok: false, error: "bot.log not found" }, 404);
-        } catch (e: any) {
-          return jsonRes({ ok: false, error: e.message }, 500);
+        } catch (e) {
+          return jsonRes({ ok: false, error: e instanceof Error ? e.message : "unknown" }, 500);
         }
       }
 
       // 명령 실행: POST /exec { secret, command, timeout? }
       if (url.pathname === "/exec" && req.method === "POST") {
         try {
-          const body = await req.json() as any;
+          const body = await req.json() as ExecRequest;
           if (body.secret !== RESTART_SECRET) return jsonRes({ ok: false, error: "unauthorized" }, 403);
           if (!body.command) return jsonRes({ ok: false, error: "command required" }, 400);
 
@@ -207,8 +242,8 @@ export function startWorkerApi(bot: Bot): void {
 
           console.log(`[WorkerAPI] Exec: "${body.command.slice(0, 60)}" exit=${code}`);
           return jsonRes({ ok: code === 0, stdout: stdout.slice(0, 10000), stderr: stderr.slice(0, 5000), exitCode: code });
-        } catch (e: any) {
-          return jsonRes({ ok: false, error: e.message }, 500);
+        } catch (e) {
+          return jsonRes({ ok: false, error: e instanceof Error ? e.message : "unknown" }, 500);
         }
       }
 
@@ -222,35 +257,36 @@ export function startWorkerApi(bot: Bot): void {
 
           const text = await file.text();
           const lines = text.split("\n");
-          const activities: any[] = [];
+          interface ActivityLogEntry { chatId?: string; turns?: number; inputTokens?: number; outputTokens?: number; cost?: number; duration?: string; type?: string; message?: string; }
+          const activities: ActivityLogEntry[] = [];
 
           // Claude 세션 완료 로그 파싱: [Claude]/[V2] chat=X turns=Y in=Z out=W cost=$C duration=Ds
           for (const line of lines) {
             const match = line.match(/\[(?:Claude|V2)\] chat=(\S+) turns=(\d+) in=(\d+) out=(\d+).*cost=\$([0-9.]+).*duration=(\S+)/);
             if (match) {
               activities.push({
-                chatId: match[1], turns: parseInt(match[2]),
-                inputTokens: parseInt(match[3]), outputTokens: parseInt(match[4]),
-                cost: parseFloat(match[5]), duration: match[6],
+                chatId: match[1]!, turns: parseInt(match[2]!),
+                inputTokens: parseInt(match[3]!), outputTokens: parseInt(match[4]!),
+                cost: parseFloat(match[5]!), duration: match[6]!,
               });
             }
             // 위임 수신 로그
             const delegateMatch = line.match(/\[WorkerAPI\] Received delegate: "(.+?)"/);
             if (delegateMatch) {
-              activities.push({ type: "delegate", message: delegateMatch[1] });
+              activities.push({ type: "delegate", message: delegateMatch[1]! });
             }
           }
 
           return jsonRes({ ok: true, activities: activities.slice(-count) });
-        } catch (e: any) {
-          return jsonRes({ ok: false, error: e.message }, 500);
+        } catch (e) {
+          return jsonRes({ ok: false, error: e instanceof Error ? e.message : "unknown" }, 500);
         }
       }
 
       // Delegate endpoint
       if (url.pathname === "/delegate" && req.method === "POST") {
         try {
-          const body: DelegateRequest = await req.json();
+          const body = await req.json() as DelegateRequest;
           if (!body.message || !body.requestedBy) {
             return Response.json({ ok: false, error: "message and requestedBy required" }, { status: 400 });
           }
@@ -263,8 +299,8 @@ export function startWorkerApi(bot: Bot): void {
           );
 
           return Response.json({ ok: true, taskId: body.taskId || "quick" });
-        } catch (e: any) {
-          return Response.json({ ok: false, error: e.message }, { status: 500 });
+        } catch (e) {
+          return Response.json({ ok: false, error: e instanceof Error ? e.message : "unknown" }, { status: 500 });
         }
       }
 
@@ -306,9 +342,10 @@ async function processDelegate(bot: Bot, req: DelegateRequest): Promise<void> {
           await writeFile(tmpPath, buf);
           localFiles.push(tmpPath);
         }
-      } catch (e: any) {
-        console.error(`[WorkerAPI] Failed to process attachment ${att.file_id}: ${e.message}`);
-        await bot.api.sendMessage(parseInt(chatId), `⚠️ 첨부파일 다운로드 실패: ${e.message}`).catch(() => {});
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : "unknown";
+        console.error(`[WorkerAPI] Failed to process attachment ${att.file_id}: ${msg}`);
+        await bot.api.sendMessage(parseInt(chatId), `⚠️ 첨부파일 다운로드 실패: ${msg}`).catch(() => {});
       }
     }
   }
@@ -349,9 +386,10 @@ async function processDelegate(bot: Bot, req: DelegateRequest): Promise<void> {
     sendHudAndSession(bot, chatId, leadUrl, botName);
 
     console.log(`[WorkerAPI] Completed delegate for ${chatId}`);
-  } catch (e: any) {
-    console.error(`[WorkerAPI] Failed: ${e.message}`);
-    try { await bot.api.sendMessage(parseInt(chatId), `⚠️ @${botUsername} 작업 실패: ${e.message}`); } catch {}
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "unknown";
+    console.error(`[WorkerAPI] Failed: ${msg}`);
+    try { await bot.api.sendMessage(parseInt(chatId), `⚠️ @${botUsername} 작업 실패: ${msg}`); } catch {}
   } finally {
     // 임시 첨부파일 정리
     for (const f of localFiles) { unlink(f).catch(() => {}); }
@@ -360,7 +398,7 @@ async function processDelegate(bot: Bot, req: DelegateRequest): Promise<void> {
 }
 
 /** Lead API에 메시지 보고 (비동기, 실패 무시) */
-function reportMessage(leadUrl: string | undefined, data: any): void {
+function reportMessage(leadUrl: string | undefined, data: ReportMessageData): void {
   const url = leadUrl || process.env.LEAD_API_URL;
   if (!url) return;
   fetch(`${url}/report-message`, {
@@ -370,7 +408,7 @@ function reportMessage(leadUrl: string | undefined, data: any): void {
 }
 
 /** Lead API에 세션 완료 보고 (비동기, 실패 무시) */
-function reportSession(leadUrl: string | undefined, data: any): void {
+function reportSession(leadUrl: string | undefined, data: SessionReportData): void {
   const url = leadUrl || process.env.LEAD_API_URL;
   if (!url) return;
   fetch(`${url}/report-session`, {
@@ -401,7 +439,7 @@ async function checkCliAuth(): Promise<boolean> {
 }
 
 /** Claude CLI 인증 상세 정보 */
-async function getAuthInfo(): Promise<any> {
+async function getAuthInfo(): Promise<Record<string, unknown> | null> {
   return new Promise((resolve) => {
     const proc = spawn(process.env.CLAUDE_PATH || "claude", ["auth", "status"], {
       env: { ...process.env, NO_COLOR: "1" },
@@ -492,7 +530,7 @@ async function sendDelegateApprovalRequest(
 }
 
 /** 위임 작업 승인/거절 콜백 처리 — bot.ts에서 호출 */
-export async function handleDelegateApprovalCallback(data: string, ctx: any): Promise<boolean> {
+export async function handleDelegateApprovalCallback(data: string, ctx: { answerCallbackQuery: (opts: { text: string }) => Promise<unknown>; editMessageText: (text: string, opts?: Record<string, unknown>) => Promise<unknown> }): Promise<boolean> {
   const isApprove = data.startsWith("delegate_approve:");
   const isReject = data.startsWith("delegate_reject:");
   if (!isApprove && !isReject) return false;
@@ -543,8 +581,8 @@ export async function handleDelegateApprovalCallback(data: string, ctx: any): Pr
         sendHudAndSession(bot, chatId, leadUrl, botName);
         notifyLeadIdle(botUsername, leadUrl, chatId).catch(() => {});
       }
-    } catch (e: any) {
-      await bot.api.sendMessage(parseInt(chatId), `⚠️ @${botUsername} 작업 실패: ${e.message}`).catch(() => {});
+    } catch (e) {
+      await bot.api.sendMessage(parseInt(chatId), `⚠️ @${botUsername} 작업 실패: ${e instanceof Error ? e.message : "unknown"}`).catch(() => {});
       notifyLeadIdle(botUsername, leadUrl, chatId).catch(() => {});
     }
   } else {

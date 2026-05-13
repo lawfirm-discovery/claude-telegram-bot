@@ -57,6 +57,58 @@ function parseWorkerBots(): WorkerBot[] {
 const workerBots: WorkerBot[] = parseWorkerBots();
 function getLeadApiUrl(): string { return process.env.LEAD_API_URL || `http://100.108.86.92:${LEAD_API_PORT}`; }
 
+// API 응답/요청 타입 정의
+interface HealthCheckResponse {
+  ok: boolean;
+  cliAuth?: boolean;
+  authInfo?: Record<string, unknown> | null;
+  pid?: number;
+  botUsername?: string;
+}
+
+interface WorkerActionRequest {
+  worker: string;
+  action: "restart" | "reset-session";
+  reason?: string;
+}
+
+interface WorkerProxyRequest {
+  worker: string;
+  lines?: number;
+  command?: string;
+  timeout?: number;
+  count?: number;
+}
+
+interface WorkerIdleRequest {
+  workerName: string;
+  requestedBy?: string;
+}
+
+interface MessageQueryRequest {
+  botName?: string;
+  chatId?: string;
+  search?: string;
+  limit?: number;
+  offset?: number;
+}
+
+interface SessionQueryRequest {
+  botName?: string;
+  limit?: number;
+}
+
+interface ActivityEntry {
+  chatId?: string;
+  turns?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  cost?: number;
+  duration?: string;
+  type?: string;
+  message?: string;
+}
+
 // Health Check + Auto Recovery
 const RESTART_SECRET = process.env.RESTART_SECRET || "lemonclaw-restart-2024";
 const workerFailCount = new Map<string, number>(); // 연속 실패 횟수 추적
@@ -70,7 +122,7 @@ async function checkWorkerHealth(): Promise<void> {
     try {
       const url = isDeepCheck ? `${w.apiUrl}/health?deep=1` : `${w.apiUrl}/health`;
       const resp = await fetch(url, { signal: AbortSignal.timeout(isDeepCheck ? 20_000 : 5_000) });
-      const data = await resp.json() as any;
+      const data = await resp.json() as HealthCheckResponse;
       if (data.ok) {
         if (w.status === "offline") { w.status = "idle"; console.log(`[HealthCheck] ${w.name} back online`); }
         workerFailCount.set(w.name, 0);
@@ -85,7 +137,9 @@ async function checkWorkerHealth(): Promise<void> {
               body: JSON.stringify({ secret: RESTART_SECRET }),
               signal: AbortSignal.timeout(5_000),
             });
-          } catch {}
+          } catch (e) {
+            console.warn(`[HealthCheck] ${w.name}: session reset failed — ${e instanceof Error ? e.message : "unknown"}`);
+          }
         }
       } else {
         await handleWorkerDown(w, "unhealthy response");
@@ -141,7 +195,7 @@ interface AffinityEntry { botName: string; domain: string; taskCount: number; la
 const AFFINITY_FILE = join(import.meta.dir, "..", ".lemonclaw", "affinity.json");
 let affinityMap: AffinityEntry[] = [];
 function loadAffinity(): void { try { if (existsSync(AFFINITY_FILE)) affinityMap = JSON.parse(readFileSync(AFFINITY_FILE, "utf-8")); } catch { affinityMap = []; } }
-function saveAffinity(): void { try { writeFileSync(AFFINITY_FILE, JSON.stringify(affinityMap, null, 2)); } catch (e: any) { console.error(`[Affinity] ${e.message}`); } }
+function saveAffinity(): void { try { writeFileSync(AFFINITY_FILE, JSON.stringify(affinityMap, null, 2)); } catch (e) { console.error(`[Affinity] ${e instanceof Error ? e.message : "unknown"}`); } }
 loadAffinity();
 
 function extractDomain(fp: string): string { const p = fp.replace(/^(lib|src)\/(pages|components|features|widgets)\//, "").split("/"); return p.slice(0, Math.min(2, p.length - 1)).join("/") || "general"; }
@@ -203,9 +257,10 @@ export async function planTask(prompt: string, requestedBy: string): Promise<Orc
   const online = workerBots.filter(w => w.status !== "offline");
   const ah = affinityMap.length > 0 ? `\n어피니티:\n${affinityMap.slice(-20).map(a => `- ${a.botName}: ${a.domain} (${a.taskCount}건)`).join("\n")}` : "";
   const resp = await askClaudeLight(`멀티에이전트 오케스트레이터. 서브태스크 분해.\n워커: ${online.map(w => `${w.name}: ${w.repos.join(",")}`).join("; ")}${ah}\n작업: ${prompt}\nJSON만: [{"description":"..","repo":"..","files":[".."],"assignTo":".."}]`);
-  let defs: any[] = []; try { const m = resp.match(/\[[\s\S]*\]/); if (m) defs = JSON.parse(m[0]); } catch { throw new Error(`JSON 에러`); }
+  interface SubTaskDef { description?: string; repo?: string; files?: string[]; assignTo?: string; }
+  let defs: SubTaskDef[] = []; try { const m = resp.match(/\[[\s\S]*\]/); if (m) defs = JSON.parse(m[0]); } catch { throw new Error(`JSON 에러`); }
   if (!defs.length) throw new Error("빈 결과");
-  const subtasks: SubTask[] = defs.map((d: any) => { const id = randomUUID().slice(0, 6), files = d.files || [], repo = d.repo || "", a = selectBestWorker(files, repo) || d.assignTo; return { id, description: d.description || "", repo, files, assignedTo: a, branch: `agent/${a || "x"}/${taskId}-${id}`, status: "pending" as const, createdAt: Date.now() }; });
+  const subtasks: SubTask[] = defs.map((d) => { const id = randomUUID().slice(0, 6), files = d.files || [], repo = d.repo || "", a = selectBestWorker(files, repo) || d.assignTo; return { id, description: d.description || "", repo, files, assignedTo: a, branch: `agent/${a || "x"}/${taskId}-${id}`, status: "pending" as const, createdAt: Date.now() }; });
   const task: OrchestratedTask = { id: taskId, originalPrompt: prompt, subtasks, status: "planning", createdAt: Date.now(), requestedBy };
   activeTasks.set(taskId, task); for (const s of subtasks) subtaskIndex.set(s.id, { taskId, subtaskId: s.id });
   return task;
@@ -220,9 +275,9 @@ export async function dispatchTask(task: OrchestratedTask): Promise<void> {
     if (!worker) { sub.status = "failed"; sub.error = "워커 없음"; continue; }
     try {
       const r = await fetch(`${worker.apiUrl}/delegate`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: formatTaskMessage(task.id, sub), requestedBy: task.requestedBy, taskId: `${task.id}:${sub.id}`, leadApiUrl }), signal: AbortSignal.timeout(10_000) });
-      const j = await r.json() as any; if (!j.ok) throw new Error(j.error || "failed");
+      const j = await r.json() as { ok: boolean; error?: string }; if (!j.ok) throw new Error(j.error || "failed");
       sub.status = "dispatched"; worker.status = "busy"; console.log(`[Orchestrator] ${sub.id} → ${worker.name}`);
-    } catch (e: any) { sub.status = "failed"; sub.error = e.message; }
+    } catch (e) { sub.status = "failed"; sub.error = e instanceof Error ? e.message : "unknown"; }
   }
   task.status = "in_progress";
 }
@@ -289,7 +344,7 @@ export async function quickDelegate(message: string, requestedBy: string, attach
       body: JSON.stringify({ message, requestedBy, taskId, leadApiUrl: getLeadApiUrl(), attachments }),
       signal: AbortSignal.timeout(10_000),
     });
-    const j = await r.json() as any;
+    const j = await r.json() as { ok: boolean; error?: string };
     if (!j.ok) throw new Error(j.error || "failed");
 
     // 세션 어피니티 기록
@@ -298,7 +353,8 @@ export async function quickDelegate(message: string, requestedBy: string, attach
     console.log(`[Orchestrator] → ${bw.name}: ${message.slice(0, 50)}`);
     setTimeout(() => { if (bw.status === "busy") bw.status = "idle"; }, 600_000);
     return { workerName: bw.name, taskId };
-  } catch (e: any) {
+  } catch (e) {
+    console.warn(`[Orchestrator] ${bw.name} delegate failed: ${e instanceof Error ? e.message : "unknown"}`);
     bw.status = "offline";
     const rem = workerBots.filter(w => w.status === "idle");
     if (rem.length) return quickDelegate(message, requestedBy, attachments);
@@ -390,7 +446,7 @@ export async function executeWorkerTask(task: DetectedTask, askClaude: AskClaude
         await sendTg(LEAD_BOT_CHAT_ID, `[FAIL:${task.taskId}:${task.subtaskId}] push fail (ralph disabled)`);
       }
     }
-  } catch (e: any) { await runGit(rp, ["checkout", DEV_BRANCH]).catch(() => {}); await sendTg(LEAD_BOT_CHAT_ID, `[FAIL:${task.taskId}:${task.subtaskId}] ${e.message}`); }
+  } catch (e) { await runGit(rp, ["checkout", DEV_BRANCH]).catch(() => {}); await sendTg(LEAD_BOT_CHAT_ID, `[FAIL:${task.taskId}:${task.subtaskId}] ${e instanceof Error ? e.message : "unknown"}`); }
 }
 
 // Formatting
@@ -410,7 +466,7 @@ const LEAD_CORS = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Me
 export function startLeadApi(): void {
   leadServer = Bun.serve({ port: LEAD_API_PORT, idleTimeout: 120, reusePort: true, async fetch(req) {
     if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: LEAD_CORS });
-    const json = (data: any, status = 200) => Response.json(data, { status, headers: LEAD_CORS });
+    const json = (data: Record<string, unknown>, status = 200) => Response.json(data, { status, headers: LEAD_CORS });
     const url = new URL(req.url);
 
     // 전체 상태 (프론트엔드 대시보드용)
@@ -423,7 +479,7 @@ export function startLeadApi(): void {
       const results = await Promise.allSettled(workerBots.map(async (w) => {
         try {
           const resp = await fetch(`${w.apiUrl}/health`, { signal: AbortSignal.timeout(5_000) });
-          const data = await resp.json() as any;
+          const data = await resp.json() as HealthCheckResponse;
           return { name: w.name, username: w.username, apiUrl: w.apiUrl, repos: w.repos, orchestratorStatus: w.status, health: data.ok ? "online" : "error", pid: data.pid, botUsername: data.botUsername };
         } catch {
           return { name: w.name, username: w.username, apiUrl: w.apiUrl, repos: w.repos, orchestratorStatus: w.status, health: "offline" };
@@ -436,7 +492,7 @@ export function startLeadApi(): void {
     // 개별 워커 제어: POST /worker-action { worker: "3060", action: "restart" | "reset-session" }
     if (url.pathname === "/worker-action" && req.method === "POST") {
       try {
-        const body = await req.json() as any;
+        const body = await req.json() as WorkerActionRequest;
         const w = workerBots.find(w => w.name === body.worker);
         if (!w) return json({ ok: false, error: "worker not found" }, 404);
 
@@ -451,8 +507,8 @@ export function startLeadApi(): void {
         });
         const result = await resp.json();
         return json({ ok: true, worker: w.name, action: body.action, result });
-      } catch (e: any) {
-        return json({ ok: false, error: e.message }, 500);
+      } catch (e) {
+        return json({ ok: false, error: e instanceof Error ? e.message : "unknown" }, 500);
       }
     }
 
@@ -461,19 +517,21 @@ export function startLeadApi(): void {
       const results = await Promise.allSettled(workerBots.map(async (w) => {
         try {
           const resp = await fetch(`${w.apiUrl}/health?deep=1`, { signal: AbortSignal.timeout(15_000) });
-          const data = await resp.json() as any;
+          const data = await resp.json() as HealthCheckResponse;
           // recent-activity에서 비용 합산
           let totalCost = 0;
           let totalSessions = 0;
           try {
             const actResp = await fetch(`${w.apiUrl}/recent-activity?count=100`, { signal: AbortSignal.timeout(5_000) });
-            const actData = await actResp.json() as any;
+            const actData = await actResp.json() as { ok: boolean; activities?: ActivityEntry[] };
             if (actData.ok && actData.activities) {
               for (const a of actData.activities) {
                 if (a.cost) { totalCost += a.cost; totalSessions++; }
               }
             }
-          } catch {}
+          } catch (e) {
+            console.warn(`[LeadAPI] ${w.name}: activity fetch failed — ${e instanceof Error ? e.message : "unknown"}`);
+          }
           return {
             name: w.name, username: w.username, apiUrl: w.apiUrl, repos: w.repos,
             orchestratorStatus: w.status, health: data.ok ? "online" : "error",
@@ -494,18 +552,18 @@ export function startLeadApi(): void {
     // 워커 로그 프록시: POST /worker-logs { worker, lines? }
     if (url.pathname === "/worker-logs" && req.method === "POST") {
       try {
-        const body = await req.json() as any;
+        const body = await req.json() as WorkerProxyRequest;
         const w = workerBots.find(w => w.name === body.worker);
         if (!w) return json({ ok: false, error: "worker not found" }, 404);
         const resp = await fetch(`${w.apiUrl}/logs?lines=${body.lines || 100}`, { signal: AbortSignal.timeout(10_000) });
-        return json(await resp.json());
-      } catch (e: any) { return json({ ok: false, error: e.message }, 500); }
+        return json(await resp.json() as Record<string, unknown>);
+      } catch (e) { return json({ ok: false, error: e instanceof Error ? e.message : "unknown" }, 500); }
     }
 
     // 워커 명령 실행 프록시: POST /worker-exec { worker, command }
     if (url.pathname === "/worker-exec" && req.method === "POST") {
       try {
-        const body = await req.json() as any;
+        const body = await req.json() as WorkerProxyRequest;
         const w = workerBots.find(w => w.name === body.worker);
         if (!w) return json({ ok: false, error: "worker not found" }, 404);
         const resp = await fetch(`${w.apiUrl}/exec`, {
@@ -514,19 +572,19 @@ export function startLeadApi(): void {
           body: JSON.stringify({ secret: RESTART_SECRET, command: body.command, timeout: body.timeout }),
           signal: AbortSignal.timeout(65_000),
         });
-        return json(await resp.json());
-      } catch (e: any) { return json({ ok: false, error: e.message }, 500); }
+        return json(await resp.json() as Record<string, unknown>);
+      } catch (e) { return json({ ok: false, error: e instanceof Error ? e.message : "unknown" }, 500); }
     }
 
     // 워커 최근 작업 프록시: POST /worker-recent { worker, count? }
     if (url.pathname === "/worker-recent" && req.method === "POST") {
       try {
-        const body = await req.json() as any;
+        const body = await req.json() as WorkerProxyRequest;
         const w = workerBots.find(w => w.name === body.worker);
         if (!w) return json({ ok: false, error: "worker not found" }, 404);
         const resp = await fetch(`${w.apiUrl}/recent-activity?count=${body.count || 10}`, { signal: AbortSignal.timeout(10_000) });
-        return json(await resp.json());
-      } catch (e: any) { return json({ ok: false, error: e.message }, 500); }
+        return json(await resp.json() as Record<string, unknown>);
+      } catch (e) { return json({ ok: false, error: e instanceof Error ? e.message : "unknown" }, 500); }
     }
 
     // ═══ DB API — 대화 기록 저장/조회 ═══
@@ -537,7 +595,7 @@ export function startLeadApi(): void {
         const body = await req.json() as SaveMessageParams;
         await saveMessage(body);
         return json({ ok: true });
-      } catch (e: any) { return json({ ok: false, error: e.message }, 500); }
+      } catch (e) { return json({ ok: false, error: e instanceof Error ? e.message : "unknown" }, 500); }
     }
 
     // 워커가 세션 완료를 보고: POST /report-session
@@ -546,25 +604,25 @@ export function startLeadApi(): void {
         const body = await req.json() as SaveSessionParams;
         await saveSession(body);
         return json({ ok: true });
-      } catch (e: any) { return json({ ok: false, error: e.message }, 500); }
+      } catch (e) { return json({ ok: false, error: e instanceof Error ? e.message : "unknown" }, 500); }
     }
 
     // 대화 조회: POST /messages { botName?, chatId?, search?, limit?, offset? }
     if (url.pathname === "/messages" && req.method === "POST") {
       try {
-        const body = await req.json() as any;
+        const body = await req.json() as MessageQueryRequest;
         const result = await getMessages(body);
         return json({ ok: true, ...result });
-      } catch (e: any) { return json({ ok: false, error: e.message }, 500); }
+      } catch (e) { return json({ ok: false, error: e instanceof Error ? e.message : "unknown" }, 500); }
     }
 
     // 세션 조회: POST /sessions { botName?, limit? }
     if (url.pathname === "/sessions" && req.method === "POST") {
       try {
-        const body = await req.json() as any;
+        const body = await req.json() as SessionQueryRequest;
         const sessions = await getSessions(body.botName, body.limit);
         return json({ ok: true, sessions });
-      } catch (e: any) { return json({ ok: false, error: e.message }, 500); }
+      } catch (e) { return json({ ok: false, error: e instanceof Error ? e.message : "unknown" }, 500); }
     }
 
     // 통계: GET /stats
@@ -572,7 +630,7 @@ export function startLeadApi(): void {
       try {
         const stats = await getStats();
         return json({ ok: true, ...stats });
-      } catch (e: any) { return json({ ok: false, error: e.message }, 500); }
+      } catch (e) { return json({ ok: false, error: e instanceof Error ? e.message : "unknown" }, 500); }
     }
 
     // DB 상태: GET /db-health
@@ -584,7 +642,7 @@ export function startLeadApi(): void {
     // 워커 idle 보고
     if (url.pathname === "/worker-idle" && req.method === "POST") {
       try {
-        const b = await req.json() as any;
+        const b = await req.json() as WorkerIdleRequest;
         const w = workerBots.find(w => w.name === b.workerName || w.username === b.workerName);
         if (w) { w.status = "idle"; console.log(`[LeadAPI] ${w.name} idle`); }
         if (b.requestedBy && w) { userLastWorker.set(b.requestedBy, { workerName: w.name, timestamp: Date.now() }); }
