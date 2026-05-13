@@ -46,24 +46,30 @@ export function markdownToTelegramHtml(markdown: string): string {
   // 3. Escape remaining HTML entities
   html = html.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
-  // 4. Bold: **text** or __text__
+  // 4. Headings: # text → bold (Telegram has no heading tag)
+  html = html.replace(/^#{1,3} (.+)$/gm, "\n<b>$1</b>");
+
+  // 5. Horizontal rule: --- or *** or ___ → visual separator
+  html = html.replace(/^(-{3,}|\*{3,}|_{3,})$/gm, "──────────");
+
+  // 6. Bold: **text** or __text__
   html = html.replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
   html = html.replace(/__(.+?)__/g, "<b>$1</b>");
 
-  // 5. Italic: *text* or _text_ (not inside words with underscores)
+  // 7. Italic: *text* or _text_ (not inside words with underscores)
   html = html.replace(/(?<!\w)\*([^*\n]+?)\*(?!\w)/g, "<i>$1</i>");
   html = html.replace(/(?<!\w)_([^_\n]+?)_(?!\w)/g, "<i>$1</i>");
 
-  // 6. Strikethrough: ~~text~~
+  // 8. Strikethrough: ~~text~~
   html = html.replace(/~~(.+?)~~/g, "<s>$1</s>");
 
-  // 7. Links: [text](url)
+  // 9. Links: [text](url)
   html = html.replace(
     /\[([^\]]+)\]\(([^)]+)\)/g,
     '<a href="$2">$1</a>'
   );
 
-  // 8. Blockquotes: > text (at line start)
+  // 10. Blockquotes: > text (at line start)
   html = html.replace(/^&gt; (.+)$/gm, "<blockquote>$1</blockquote>");
   // Merge adjacent blockquotes
   html = html.replace(/<\/blockquote>\n<blockquote>/g, "\n");

@@ -658,25 +658,22 @@ function formatHud(chatId: string): string | null {
   if (!hud || hud.inputTokens === 0) return null;
 
   const pct = hud.contextPercent;
-  const filled = Math.round(pct / 10);
-  const bar = "█".repeat(filled) + "░".repeat(10 - filled);
+  const filled = Math.round(pct / 5);
+  const bar = "▓".repeat(filled) + "░".repeat(20 - filled);
   const color = pct < 50 ? "🟢" : pct < 80 ? "🟡" : "🔴";
 
-  const tokensK = (n: number) => n >= 1000 ? `${(n / 1000).toFixed(0)}K` : `${n}`;
+  const tokensK = (n: number) => n >= 1000 ? `${(n / 1000).toFixed(1)}K` : `${n}`;
   const duration = hud.durationSec > 0
     ? (hud.durationSec >= 60 ? `${Math.floor(hud.durationSec / 60)}m${hud.durationSec % 60}s` : `${hud.durationSec}s`)
     : "";
 
-  const parts = [
-    `${color} Context: ${bar} ${pct}% (${tokensK(hud.inputTokens)}/200K)`,
-  ];
-  const meta: string[] = [];
-  if (hud.turnNumber > 0) meta.push(`🔄 Turn ${hud.turnNumber}`);
-  if (duration) meta.push(`⏱ ${duration}`);
-  if (hud.cacheRead > 0) meta.push(`📦 Cache ${tokensK(hud.cacheRead)}`);
-  if (meta.length > 0) parts.push(meta.join(" | "));
+  const line1 = `${color} ${bar} ${pct}%`;
+  const meta: string[] = [`${tokensK(hud.inputTokens)}/200K`];
+  if (hud.turnNumber > 0) meta.push(`T${hud.turnNumber}`);
+  if (duration) meta.push(duration);
+  if (hud.cacheRead > 0) meta.push(`cache ${tokensK(hud.cacheRead)}`);
 
-  return parts.join("\n");
+  return `${line1}\n${meta.join(" · ")}`;
 }
 
 // LemonClaw style: send response as HTML with auto-chunking, fallback to plain text
@@ -827,10 +824,11 @@ async function handleMessage(
 
     if (!shouldUpdate) return;
 
-    const recent = toolHistory.slice(-8);
+    const recent = toolHistory.slice(-6);
     const elapsed = Math.round((Date.now() - startTime) / 1000);
     const elapsedStr = elapsed >= 60 ? `${Math.floor(elapsed / 60)}m${elapsed % 60}s` : `${elapsed}s`;
-    const progressText = `⏳ Turn ${info.turnNumber} 진행 중 (${elapsedStr})\n${recent.join("\n")}`;
+    const toolCount = toolHistory.filter(t => !t.startsWith("  →") && !t.startsWith("💬")).length;
+    const progressText = `⏳ T${info.turnNumber} · ${elapsedStr} · ${toolCount} tools\n──────────\n${recent.join("\n")}`;
 
     if (!progressThrottleTimer) {
       progressThrottleTimer = setTimeout(() => {
@@ -912,11 +910,20 @@ async function sendApprovalRequest(
 
   // Send approval card with buttons
   const keyboard = new InlineKeyboard()
-    .text("✅ 승인 (Approve)", `approve:${approvalId}`)
-    .text("❌ 거절 (Reject)", `reject:${approvalId}`);
+    .text("✅ 승인", `approve:${approvalId}`)
+    .text("❌ 거절", `reject:${approvalId}`);
+
+  const typeHint: Record<string, string> = {
+    plan: "아래 계획을 검토 후 승인/거절하세요.",
+    db: "다음 DB 쿼리를 실행합니다.",
+    danger: "⚠️ 되돌릴 수 없는 작업입니다!",
+    ssh: "원격 서버 명령을 실행합니다.",
+  };
+  const hint = typeHint[approval.type] || "";
 
   const approvalMsg =
-    `${emoji} <b>${label} - 승인 필요</b>\n\n` +
+    `${emoji} <b>${label}</b>\n` +
+    `<i>${hint}</i>\n\n` +
     `<pre><code>${escapeHtmlForApproval(approval.content)}</code></pre>`;
 
   try {
@@ -926,7 +933,7 @@ async function sendApprovalRequest(
     });
   } catch {
     await ctx.reply(
-      `${emoji} ${label} - 승인 필요\n\n${approval.content}`,
+      `${emoji} ${label}\n${hint}\n\n${approval.content}`,
       { reply_markup: keyboard }
     );
   }
