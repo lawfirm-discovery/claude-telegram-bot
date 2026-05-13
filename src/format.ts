@@ -46,11 +46,21 @@ export function markdownToTelegramHtml(markdown: string): string {
   // 3. Escape remaining HTML entities
   html = html.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
-  // 4. Headings: # text → bold (Telegram has no heading tag)
-  html = html.replace(/^#{1,3} (.+)$/gm, "\n<b>$1</b>");
+  // 4. Headings: # text → bold with separator (Telegram has no heading tag)
+  html = html.replace(/^#{1,3} (.+)$/gm, "\n<b>▸ $1</b>");
 
   // 5. Horizontal rule: --- or *** or ___ → visual separator
   html = html.replace(/^(-{3,}|\*{3,}|_{3,})$/gm, "──────────");
+
+  // 5.5. Task lists: - [x] done → ✅, - [ ] todo → ⬜
+  html = html.replace(/^[\t ]*[-*]\s+\[x\]\s+(.+)$/gim, "  ✅ $1");
+  html = html.replace(/^[\t ]*[-*]\s+\[ \]\s+(.+)$/gm, "  ⬜ $1");
+
+  // 5.6. Unordered lists: - item or * item → • item
+  html = html.replace(/^[\t ]*[-*]\s+(.+)$/gm, "  • $1");
+
+  // 5.7. Ordered lists: 1. item → 1. item (clean indent)
+  html = html.replace(/^[\t ]*(\d+)\.\s+(.+)$/gm, "  $1. $2");
 
   // 6. Bold: **text** or __text__
   html = html.replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");

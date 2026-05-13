@@ -664,7 +664,7 @@ function formatHud(chatId: string): string | null {
 
   const tokensK = (n: number) => n >= 1000 ? `${(n / 1000).toFixed(1)}K` : `${n}`;
   const duration = hud.durationSec > 0
-    ? (hud.durationSec >= 60 ? `${Math.floor(hud.durationSec / 60)}m${hud.durationSec % 60}s` : `${hud.durationSec}s`)
+    ? (hud.durationSec >= 60 ? `${Math.floor(hud.durationSec / 60)}m${Math.round(hud.durationSec % 60).toString().padStart(2, "0")}s` : `${hud.durationSec}s`)
     : "";
 
   const line1 = `${color} ${bar} ${pct}%`;
@@ -824,11 +824,11 @@ async function handleMessage(
 
     if (!shouldUpdate) return;
 
-    const recent = toolHistory.slice(-6);
+    const recent = toolHistory.slice(-5);
     const elapsed = Math.round((Date.now() - startTime) / 1000);
-    const elapsedStr = elapsed >= 60 ? `${Math.floor(elapsed / 60)}m${elapsed % 60}s` : `${elapsed}s`;
+    const elapsedStr = elapsed >= 60 ? `${Math.floor(elapsed / 60)}m${Math.round(elapsed % 60).toString().padStart(2, "0")}s` : `${elapsed}s`;
     const toolCount = toolHistory.filter(t => !t.startsWith("  →") && !t.startsWith("💬")).length;
-    const progressText = `⏳ T${info.turnNumber} · ${elapsedStr} · ${toolCount} tools\n──────────\n${recent.join("\n")}`;
+    const progressText = `⏳ ${elapsedStr} · ${toolCount} tools · T${info.turnNumber}\n${"─".repeat(18)}\n${recent.join("\n")}`;
 
     if (!progressThrottleTimer) {
       progressThrottleTimer = setTimeout(() => {
