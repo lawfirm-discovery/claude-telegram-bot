@@ -323,3 +323,79 @@ bun --hot ./index.ts
 ```
 
 For more information, read the Bun API docs in `node_modules/bun-types/docs/**.mdx`.
+
+
+---
+
+## 🗄️ DB 접속 규칙 (RDS 직접 접속, Flyway 없음)
+
+리걸몬스터는 Flyway를 사용하지 않으므로, DB 스키마 변경 / 데이터 패치 시 아래 규칙을 따르면 **매 작업마다 사용자에게 묻지 않고 안전하게 진행 가능**.
+
+### 접속 정보 (Lemon RDS — 15.165.123.6)
+
+| DB | DATABASE | USER | PW |
+|---|---|---|---|
+| **lemon** (사용자/조직/i18n 데이터) | `lemon` | `lemon` | `081908` |
+| **lawdocs** (법령/판례/EFiling 트리) | `lawdocs` | `postgres` | `vhtpdlehs2025!!` |
+
+```bash
+# lemon DB
+PGPASSWORD='081908' psql -h 15.165.123.6 -p 5432 -U lemon -d lemon
+
+# lawdocs DB
+PGPASSWORD='vhtpdlehs2025!!' psql -h 15.165.123.6 -p 5432 -U postgres -d lawdocs
+```
+
+### 🚨 절대 규칙
+
+**1. 모든 DB 접속은 rtx6000 (개발 서버) 에서만 실행**
+- 다른 워커는 RDS에 직접 connection 만들지 말고 `ssh` 로 rtx6000 거쳐서 psql 실행
+- 예시:
+  ```bash
+  ssh angrylawyer@100.108.86.92 "PGPASSWORD='081908' psql -h 15.165.123.6 -U lemon -d lemon -c 'SELECT COUNT(*) FROM lemon.users;'"
+  ```
+- rtx6000 본인 작업이면 직접 psql 실행 OK.
+
+**2. 모든 변경은 트랜잭션 + 검증 SELECT 필수**
+```sql
+BEGIN;
+UPDATE lemon.users SET status = 'inactive' WHERE last_login_at < '2025-01-01';
+SELECT status, COUNT(*) FROM lemon.users GROUP BY status;  -- 검증
+COMMIT;  -- 의도 부합 시 / 아니면 ROLLBACK;
+```
+
+**3. 사용자 명시 승인 필수 작업** (대규모 변경 / 손실 가능)
+- `DROP TABLE`, `TRUNCATE`, `ALTER TABLE` (스키마 변경)
+- 영향 행 ≥ 1000건의 `UPDATE` / `DELETE`
+- production 환경 데이터 손실 가능 작업
+
+**4. 사용자 승인 없이 진행 가능** ← 이 규칙으로 매번 묻지 않음
+- 모든 `SELECT` (read-only)
+- `INSERT` (새 row, 기존 데이터 보존)
+- `WHERE pk = X` 같은 단일/소량 (< 100 rows) `UPDATE` / `DELETE`
+- 단 **트랜잭션 + 검증 SELECT** 필수 (규칙 2)
+
+**5. dry-run 패턴 (large change 권장)**
+```sql
+-- 1) 영향 행 수 사전 확인
+SELECT COUNT(*) FROM lemon.users WHERE last_login_at < '2025-01-01';
+-- 2) 트랜잭션 안에서 변경
+BEGIN;
+UPDATE lemon.users SET status = 'inactive' WHERE last_login_at < '2025-01-01';
+-- 3) 변경 결과 검증
+SELECT status, COUNT(*) FROM lemon.users GROUP BY status;
+-- 4) 의도 부합 시 COMMIT, 아니면 ROLLBACK
+COMMIT;
+```
+
+**6. 비밀번호 / 접속 정보 외부 노출 금지**
+- 텔레그램 채팅 / 외부 로그 / GitHub public 노출 금지
+- 단 본 CLAUDE.md (private repo) 안의 명시는 작업 효율 위해 허용
+
+### 글로벌 규칙 연결
+
+- Spring `ddl-auto = validate` 사용 중 — 절대 `update` 로 변경 금지
+- 스키마 변경은 수동 SQL로 진행 (`lemon-api-server-spring/src/main/resources/sql/` 에 마이그레이션 SQL 보관)
+- Flyway 도입 검토 중이나 현재는 본 규칙으로 안전성 대체
+
+---
