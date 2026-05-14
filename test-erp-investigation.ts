@@ -2,7 +2,7 @@ import { chromium, type Page } from "playwright";
 
 const BASE_URL = "http://100.108.86.92:3011";
 const EMAIL = "qusghtk@test.com";
-const PASSWORD = "081908!!";
+const PASSWORD = process.env.LEMON_PW ?? (() => { throw new Error("LEMON_PW env required"); })();
 const SCREENSHOT_DIR = "./screenshots";
 const ROOM_URL = `${BASE_URL}/erp/lemon-guardian/ai-investigation/room?roomId=83`;
 

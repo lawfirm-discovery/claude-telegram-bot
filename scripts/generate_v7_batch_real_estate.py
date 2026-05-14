@@ -1,3 +1,4 @@
+import os
 #!/usr/bin/env python3
 """
 V7 부동산 관련 계약서 배치 생성
@@ -10,7 +11,7 @@ FASTAPI_URL = "http://100.108.86.92:8001"
 DB_HOST = "15.165.123.6"
 DB_NAME = "lemon"
 DB_USER = "lemon"
-DB_PASS = "081908"
+DB_PASS = os.environ["DB_PASSWORD"]
 CREATED_BY = 72
 MODEL = "gpt-4o"
 SIDEBAR_TITLE = "mainMenuContractData_v7"

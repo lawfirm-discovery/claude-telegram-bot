@@ -1,3 +1,4 @@
+import os
 #!/usr/bin/env python3
 """
 V7 sidebar idx 백필 마이그레이션
@@ -11,7 +12,7 @@ import psycopg2
 DB_HOST = "15.165.123.6"
 DB_NAME = "lemon"
 DB_USER = "lemon"
-DB_PASS = "081908"
+DB_PASS = os.environ["DB_PASSWORD"]
 
 
 def collect_leaves(node, result=None):

@@ -87,7 +87,7 @@ yt-dlp --cookies-from-browser chrome --no-part \
 - 매일 04:00 crontab으로 DB 메모 백업 (`backup_memos.sh`)
 
 #### a4500 (GPU 서버 — 강의 STT 워커)
-- SSH: `ssh -p 2223 angrylawyer@182.227.106.243` / PW: `vhtpdlehs2024!!`
+- SSH: `ssh -p 2223 angrylawyer@182.227.106.243` / PW: `$SSH_COMMON_PW` (1Password 참조)
 - Tailscale IP: `100.117.168.53` (angrylawbot@ 네트워크 — 우리 네트워크와 별개)
 - **GPU**: NVIDIA RTX A4500 20GB / CUDA 12.8 (`/usr/local/cuda-12.8`)
 - **Python**: 3.12.3 / faster-whisper 1.2.1 설치됨
@@ -333,17 +333,21 @@ For more information, read the Bun API docs in `node_modules/bun-types/docs/**.m
 
 ### 접속 정보 (Lemon RDS — 15.165.123.6)
 
-| DB | DATABASE | USER | PW |
+> ⚠️ **Secret 정책 (2026-05-14 GitGuardian 사고 이후)**: 비밀번호는 git/메모리/채팅에 평문 기록 금지.
+> 실제 값은 워커별 `.env` 파일 (`~/claude-telegram-bot/.env`) 또는 `~/.lemon-secrets/db.env` 에만 보관.
+> 새 워커 setup 시 호성님이 1Password / Config Vault 에서 값 확보 후 `.env` 에 주입.
+
+| DB | DATABASE | USER | PW env |
 |---|---|---|---|
-| **lemon** (사용자/조직/i18n 데이터) | `lemon` | `lemon` | `081908` |
-| **lawdocs** (법령/판례/EFiling 트리) | `lawdocs` | `postgres` | `vhtpdlehs2025!!` |
+| **lemon** (사용자/조직/i18n 데이터) | `lemon` | `lemon` | `$LEMON_DB_PW` |
+| **lawdocs** (법령/판례/EFiling 트리) | `lawdocs` | `postgres` | `$LAWDOCS_DB_PW` |
 
 ```bash
 # lemon DB
-PGPASSWORD='081908' psql -h 15.165.123.6 -p 5432 -U lemon -d lemon
+PGPASSWORD="$LEMON_DB_PW" psql -h 15.165.123.6 -p 5432 -U lemon -d lemon
 
 # lawdocs DB
-PGPASSWORD='vhtpdlehs2025!!' psql -h 15.165.123.6 -p 5432 -U postgres -d lawdocs
+PGPASSWORD="$LAWDOCS_DB_PW" psql -h 15.165.123.6 -p 5432 -U postgres -d lawdocs
 ```
 
 ### 🚨 절대 규칙
@@ -352,7 +356,7 @@ PGPASSWORD='vhtpdlehs2025!!' psql -h 15.165.123.6 -p 5432 -U postgres -d lawdocs
 - 다른 워커는 RDS에 직접 connection 만들지 말고 `ssh` 로 rtx6000 거쳐서 psql 실행
 - 예시:
   ```bash
-  ssh angrylawyer@100.108.86.92 "PGPASSWORD='081908' psql -h 15.165.123.6 -U lemon -d lemon -c 'SELECT COUNT(*) FROM lemon.users;'"
+  ssh angrylawyer@100.108.86.92 'source ~/.lemon-secrets/db.env && PGPASSWORD="$LEMON_DB_PW" psql -h 15.165.123.6 -U lemon -d lemon -c "SELECT COUNT(*) FROM lemon.users;"'
   ```
 - rtx6000 본인 작업이면 직접 psql 실행 OK.
 
