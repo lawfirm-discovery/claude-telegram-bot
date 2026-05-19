@@ -307,7 +307,10 @@ bot.command("sync", async (ctx) => {
   }
 
   const RESTART_SECRET = process.env.RESTART_SECRET || "lemonclaw-restart-2024";
-  const syncCmd = `cd /home/angrylawyer/claude-telegram-bot && git fetch origin && git checkout ${branch} && git pull origin ${branch} && bun install --frozen-lockfile 2>/dev/null; echo PULL_OK`;
+  // 2026-05-19: CLAUDE.md 는 gitignore 라 git pull 로 갱신 안 됨 (정본은 추적되는
+  // CLAUDE.md.template, 복사는 신규 setup 시 1회뿐). → 기존 봇은 규칙이 영원히 stale.
+  // syncCmd 에 "template → CLAUDE.md 재복사" 단계 추가 (이전 로컬본은 .prev 로 1회 백업).
+  const syncCmd = `cd /home/angrylawyer/claude-telegram-bot && git fetch origin && git checkout ${branch} && git pull origin ${branch} && { [ -f CLAUDE.md ] && cp -f CLAUDE.md CLAUDE.md.prev 2>/dev/null; true; } && cp -f CLAUDE.md.template CLAUDE.md && bun install --frozen-lockfile 2>/dev/null; echo PULL_OK`;
 
   await ctx.reply(`🔄 ${targets.length}개 워커에 <code>${branch}</code> 동기화 시작...`, { parse_mode: "HTML" });
 
