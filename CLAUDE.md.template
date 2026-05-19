@@ -327,40 +327,36 @@ For more information, read the Bun API docs in `node_modules/bun-types/docs/**.m
 
 ---
 
-## 🗄️ DB 접속 규칙 (RDS 직접 접속, Flyway 없음)
+## 🗄️ DB 작업 규칙 (Flyway 없음 — 런타임 환경변수로만 접속)
 
-리걸몬스터는 Flyway를 사용하지 않으므로, DB 스키마 변경 / 데이터 패치 시 아래 규칙을 따르면 **매 작업마다 사용자에게 묻지 않고 안전하게 진행 가능**.
+리걸몬스터는 Flyway를 사용하지 않는다. DB 스키마 변경 / 데이터 패치는 아래 규칙을 따른다.
 
-### 접속 정보 (Lemon RDS — 15.165.123.6)
+🔐 **자격증명(host/user/password/db)은 본 문서·텔레그램·로그·git 어디에도 절대 기재하지 않는다.**
+접속값은 항상 **rtx6000 개발서버 환경변수에서 런타임에만** 읽는다.
+이유: 자격증명은 주기적으로 회전된다(2026-05-14 회전 사례 — 정적 값은 즉시 stale). 런타임 env 로드만이 회전에 자동 추종하며, 평문 시크릿이 git/system-prompt/로그에 남지 않는다(2026-05 GitGuardian 사고 재발 방지).
 
-> ⚠️ **Secret 정책 (2026-05-14 GitGuardian 사고 이후)**: 비밀번호는 git/메모리/채팅에 평문 기록 금지.
-> 실제 값은 워커별 `.env` 파일 (`~/claude-telegram-bot/.env`) 또는 `~/.lemon-secrets/db.env` 에만 보관.
-> 새 워커 setup 시 호성님이 1Password / Config Vault 에서 값 확보 후 `.env` 에 주입.
+### 1. 접속 방법 — rtx6000 개발서버 환경변수 경유 (하드코딩 절대 금지)
 
-| DB | DATABASE | USER | PW env |
-|---|---|---|---|
-| **lemon** (사용자/조직/i18n 데이터) | `lemon` | `lemon` | `$LEMON_DB_PW` |
-| **lawdocs** (법령/판례/EFiling 트리) | `lawdocs` | `postgres` | `$LAWDOCS_DB_PW` |
-
+**다른 워커봇**: Tailscale로 rtx6000에 SSH → 개발서버 env 로드 후 psql 실행.
 ```bash
-# lemon DB
-PGPASSWORD="$LEMON_DB_PW" psql -h 15.165.123.6 -p 5432 -U lemon -d lemon
-
-# lawdocs DB
-PGPASSWORD="$LAWDOCS_DB_PW" psql -h 15.165.123.6 -p 5432 -U postgres -d lawdocs
+ssh angrylawyer@100.108.86.92 'set -a; . /home/angrylawyer/lemon-api-server-spring/.env.development; set +a; \
+  PGPASSWORD="$DB_PASSWORD" psql -h "$DB_HOST" -p "${DB_PORT:-5432}" -U "$DB_USER" -d "$DATABASE" \
+  -c "SELECT COUNT(*) FROM lemon.users;"'
 ```
 
-### 🚨 절대 규칙
+**rtx6000 본인 작업**: SSH 생략, 동일하게 dev env 소스 후 psql.
+```bash
+set -a; . /home/angrylawyer/lemon-api-server-spring/.env.development; set +a
+PGPASSWORD="$DB_PASSWORD" psql -h "$DB_HOST" -p "${DB_PORT:-5432}" -U "$DB_USER" -d "$DATABASE"
+```
 
-**1. 모든 DB 접속은 rtx6000 (개발 서버) 에서만 실행**
-- 다른 워커는 RDS에 직접 connection 만들지 말고 `ssh` 로 rtx6000 거쳐서 psql 실행
-- 예시:
-  ```bash
-  ssh angrylawyer@100.108.86.92 'source ~/.lemon-secrets/db.env && PGPASSWORD="$LEMON_DB_PW" psql -h 15.165.123.6 -U lemon -d lemon -c "SELECT COUNT(*) FROM lemon.users;"'
-  ```
-- rtx6000 본인 작업이면 직접 psql 실행 OK.
+- `DB_HOST/DB_PORT/DB_USER/DB_PASSWORD/DATABASE` 키는 `SPRING_PROFILES_ACTIVE=development` 기준 `lemon-api-server-spring/.env.development`에 존재.
+- 다른 DB(lawdocs 등)도 동일 원칙 — 해당 서비스의 dev env에서 키를 읽는다. 정적 값을 절대 추측·기재하지 않는다.
+- env 값을 `echo`/로그/텔레그램으로 출력 금지. psql에 변수로만 전달.
 
-**2. 모든 변경은 트랜잭션 + 검증 SELECT 필수**
+### 2. 🚨 절대 규칙
+
+**2-1. 모든 변경은 트랜잭션 + 검증 SELECT 필수**
 ```sql
 BEGIN;
 UPDATE lemon.users SET status = 'inactive' WHERE last_login_at < '2025-01-01';
@@ -368,18 +364,30 @@ SELECT status, COUNT(*) FROM lemon.users GROUP BY status;  -- 검증
 COMMIT;  -- 의도 부합 시 / 아니면 ROLLBACK;
 ```
 
-**3. 사용자 명시 승인 필수 작업** (대규모 변경 / 손실 가능)
+**2-2. 🚨 새 테이블 생성 — prefix 호환성 검증 + 호성님 보고 필수 (예외 없음)**
+`CREATE TABLE` 실행 전 반드시 아래 3단계를 거친다. 자동 진행 금지.
+1. **기존 테이블 목록 조회**:
+   `\dt lemon.*` 또는 `SELECT table_name FROM information_schema.tables WHERE table_schema='lemon' ORDER BY 1;`
+2. **prefix 호환성 검증** — 신규 테이블명이 기존 컨벤션을 따르는지 확인:
+   - 도메인/기능별 기존 prefix를 재사용한다. 임의의 새 prefix 생성 금지.
+   - provider별 테이블은 `payment_<provider>_*` 형태. **단독 provider prefix 금지** (예: `paypal_subscription` ✗ → `payment_paypal_subscription` ✓).
+   - 애매하면 가장 가까운 기존 테이블군의 prefix를 따른다.
+3. **호성님(@legalmonster, Telegram) 보고 후 진행**: 테이블명 / prefix 선정 근거(어떤 기존 테이블군을 따랐는지) / 컬럼 스키마 / 생성 사유·영향을 보고한다. 이는 규칙 2-4(승인 없이 진행)의 **명시적 예외**다.
+
+**2-3. 사용자 명시 승인 필수 작업** (대규모 변경 / 손실 가능)
 - `DROP TABLE`, `TRUNCATE`, `ALTER TABLE` (스키마 변경)
+- `CREATE TABLE` (신규 테이블 — 규칙 2-2 prefix 검증 + 호성님 보고 포함)
 - 영향 행 ≥ 1000건의 `UPDATE` / `DELETE`
 - production 환경 데이터 손실 가능 작업
 
-**4. 사용자 승인 없이 진행 가능** ← 이 규칙으로 매번 묻지 않음
+**2-4. 사용자 승인 없이 진행 가능** ← 이 규칙으로 매번 묻지 않음
 - 모든 `SELECT` (read-only)
-- `INSERT` (새 row, 기존 데이터 보존)
+- **기존** 테이블에 `INSERT` (새 row, 기존 데이터 보존)
 - `WHERE pk = X` 같은 단일/소량 (< 100 rows) `UPDATE` / `DELETE`
-- 단 **트랜잭션 + 검증 SELECT** 필수 (규칙 2)
+- 단 **트랜잭션 + 검증 SELECT** 필수 (규칙 2-1)
+- ⚠️ **신규 테이블 생성은 여기 해당 없음** — 규칙 2-2·2-3 적용.
 
-**5. dry-run 패턴 (large change 권장)**
+**2-5. dry-run 패턴 (large change 권장)**
 ```sql
 -- 1) 영향 행 수 사전 확인
 SELECT COUNT(*) FROM lemon.users WHERE last_login_at < '2025-01-01';
@@ -392,14 +400,10 @@ SELECT status, COUNT(*) FROM lemon.users GROUP BY status;
 COMMIT;
 ```
 
-**6. 비밀번호 / 접속 정보 외부 노출 금지**
-- 텔레그램 채팅 / 외부 로그 / GitHub public 노출 금지
-- 단 본 CLAUDE.md (private repo) 안의 명시는 작업 효율 위해 허용
-
 ### 글로벌 규칙 연결
 
 - Spring `ddl-auto = validate` 사용 중 — 절대 `update` 로 변경 금지
 - 스키마 변경은 수동 SQL로 진행 (`lemon-api-server-spring/src/main/resources/sql/` 에 마이그레이션 SQL 보관)
-- Flyway 도입 검토 중이나 현재는 본 규칙으로 안전성 대체
+- 🔐 자격증명 평문 기재 금지 — 문서/채팅/git 어디에도 안 됨. 항상 rtx6000 dev env 런타임 로드 (2026-05 GitGuardian 사고 후 절대 규칙)
 
 ---
