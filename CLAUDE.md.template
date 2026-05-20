@@ -418,3 +418,98 @@ COMMIT;
   - v1 을 건드리는 설계는 잘못된 설계 — 작업 전 해당 메뉴가 v1인지 v2인지 먼저 확인.
 
 ---
+
+## 🌍 i18n (국제화) 작업 절대 규칙 — 모든 워커봇 공통
+
+### 시스템 개요
+
+리걸몬스터는 **11개 언어** 지원: `ko, en, ja, zh-CN, zh-TW, vi, id, es, th, fr, de`.
+
+| 컴포넌트 | 위치 | 역할 |
+|---------|------|------|
+| **웹 번역 파일** | `lemon-front/src/i18n/locales/{lang}/{ns}.json` | 런타임 source of truth (앱이 직접 읽음) |
+| **Flutter ARB** | `lemon_flutter/lib/l10n/arb/app_{lang}.arb` | 빌드 시 Dart 코드로 컴파일 |
+| **Tolgee CMS** | http://100.108.86.92:3013 (rtx6000 docker) | 번역가 편집 UI / 백업 미러 (**런타임 무관**) |
+| **B2 백업** | `s3://lemon-b2-system/admin-system/tolgee-backup/` | Tolgee DB 일일 백업 |
+
+**핵심**: **코드 파일이 source of truth, Tolgee는 staging tool**. 워커봇은 코드 파일만 수정하고 push. Tolgee 동기화는 rtx6000 cron이 자동 처리.
+
+### 자동화 (rtx6000 cron, 봇 관여 불필요)
+
+| 시간 | 작업 |
+|------|------|
+| 매시간 X:05 | `tolgee-import.sh --all` (웹 24 NS → Tolgee) |
+| 매시간 X:15 | `tolgee-import-flutter.sh --all` (Flutter ARB → Tolgee) |
+| 매일 03:00 | `tolgee-backup.sh` (Tolgee DB → 로컬 + B2) |
+| 매주 월 09:00 | `tolgee-export.sh` (Tolgee → 코드 export, 검토 후 PR) |
+
+→ 워커봇은 **JSON/ARB 파일 + 소스 코드만 수정 → push** 하면 끝. Tolgee 반영은 최대 1시간 내 자동.
+
+### 워커봇 절대 규칙
+
+**1. 신규 UI 텍스트 추가 시 — 11언어 동시 작성 (위반 시 CI 차단)**
+- `src/i18n/locales/{lang}/{ns}.json` 11개 (또는 ARB 11개) 모두 채울 것
+- ko만 또는 일부 lang만 채운 부분 커밋 금지
+- 번역 품질: Claude 자가 번역 OK, 단 법률 용어는 `src/i18n/termbase/legal-terms.json` 참조
+
+**2. 한 글자도 하드코딩 금지**
+- 웹: `t('namespace.feature.key')` 또는 `useTranslation('ns').t(...)` 사용
+- Flutter: `AppLocalizations.of(context).keyName`
+- 예외: 주석/JSDoc/테스트 데이터/PII 마스킹 placeholder (사용자가 절대 안 봄)
+
+**3. 🚨 i18next plural magic suffix 사용 금지 (2026-05-20 사고)**
+
+i18next는 다음 suffix를 자동으로 plural form으로 인식 → Tolgee export 충돌·실패:
+- `_zero`, `_one`, `_two`, `_few`, `_many`, `_other`
+
+| 의도 | ❌ 금지 | ✅ 권장 |
+|------|--------|--------|
+| 단순 분기 (isMyMessage ? self : other) | `completed_other` | `completedOther` (camelCase) |
+| 단순 enum 옵션 ("기타") | `category_other` | `categoryOther` |
+| 진짜 plural ("1개 / N개") | `unread_one` + `unread_other` | `unread = "{count, plural, one {1 message} other {# messages}}"` (ICU 구문) |
+
+**사고 사례**: `chat_v3.firebase.payment_message.payment_completed.titles.completed_other` 키가
+`_other` 자동 plural 해석으로 Tolgee가 가상 base 키 `completed` 생성 → export collision → en export 12시간+ 차단.
+
+**4. 키 작명 컨벤션**
+- 웹 NS 키: `{namespace}.{feature}.{element}` (예: `erp.dashboard.exportBtn`)
+- Flutter ARB 키: `{prefix}_{camelCase}` (예: `erpDashboard_exportBtn`)
+- namespace는 `lemon-front/src/i18n/config.ts`의 `namespaces` 배열 중 택1 (24개)
+
+**5. ko 단독 수정 금지**
+한국어 원본 변경 시 나머지 10언어도 함께 갱신. ko만 바꾸면 다른 lang stale.
+
+**6. Tolgee UI 직접 조작 금지 (워커봇 한정)**
+- 워커봇은 Tolgee에 절대 직접 접속하지 않음
+- 번역가/운영팀만 Tolgee UI에서 작업 (매주 월 cron으로 코드 반영)
+
+### 자가 점검 명령 (i18n 작업 후 필수 실행)
+
+```bash
+cd /home/angrylawyer/lemon-front
+
+# 1. 하드코딩 한국어 (변경한 파일에서)
+grep -P '[가-힣]' src/components/<변경경로>/*.tsx
+# (0건이어야 함)
+
+# 2. 11언어 모두 채워졌는지
+bash scripts/i18n/missing-keys.sh
+
+# 3. plural magic suffix 검출
+bash scripts/i18n/plural-suffix-scan.sh
+# base 충돌 0건이어야 함
+
+# 4. 전체 i18n 검증 (verify + plural strict)
+bash scripts/i18n/verify-all.sh
+
+# 5. Flutter일 경우 ARB 무결성
+bash scripts/i18n/flutter-arb-verify.sh
+```
+
+### 다른 봇 작업 분리 (멀티서버 환경)
+
+- **모든 i18n 작업**: 어느 서버 봇이든 코드 수정 + git push만. Tolgee 동기화는 rtx6000 cron 단일 source.
+- **빌드 검증**: rtx6000만. 다른 서버 봇은 push만 (Frontend `npx vite build`, Flutter `flutter build web` 금지 — CPU 200%+ 서버 장애).
+- **Tolgee 직접 호출 (curl/API)**: 워커봇 금지. 운영/디버깅용 호성님 작업 전용.
+
+---
