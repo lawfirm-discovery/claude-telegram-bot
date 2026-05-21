@@ -323,6 +323,12 @@ bot.command("sync", async (ctx) => {
     `git pull origin ${branch}`,
     `{ [ -f CLAUDE.md ] && cp -f CLAUDE.md CLAUDE.md.prev 2>/dev/null; true; }`,
     `cp -f CLAUDE.md.template CLAUDE.md`,
+    // 2026-05-21: 워커 CLI 가 사용하는 글로벌 규칙 (~/.claude/CLAUDE.md) 도 같이 동기화.
+    // 정본은 레포의 WORKER_GLOBAL_CLAUDE.md — Playwright MCP / 테스트 계정 / Vault auth 룰 포함.
+    // 기존 파일은 .prev 로 1회 백업.
+    `mkdir -p "$HOME/.claude"`,
+    `{ [ -f "$HOME/.claude/CLAUDE.md" ] && cp -f "$HOME/.claude/CLAUDE.md" "$HOME/.claude/CLAUDE.md.prev" 2>/dev/null; true; }`,
+    `[ -f WORKER_GLOBAL_CLAUDE.md ] && cp -f WORKER_GLOBAL_CLAUDE.md "$HOME/.claude/CLAUDE.md"`,
     `bun install --frozen-lockfile 2>/dev/null`,
     // Playwright MCP — user-scope 등록 (이미 있으면 add 가 멱등적이지 않아서 list 로 사전 체크)
     `{ command -v claude >/dev/null && (claude mcp list 2>/dev/null | grep -q '^playwright' || claude mcp add --scope user playwright -- npx -y @playwright/mcp@latest) || true; }`,
