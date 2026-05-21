@@ -1,3 +1,18 @@
+// ~/.claude/*.env (mode 600) 자동 로드 — systemd 서비스가 .bashrc 를 안 읽으므로
+// process 시작 직후 직접 주입. 평문 git 노출 회피 + 회전 시 /sync 로 갱신.
+(function loadClaudeEnvFiles() {
+  const fs = require("fs") as typeof import("fs");
+  const os = require("os") as typeof import("os");
+  for (const name of ["config-vault.env", "test-accounts.env"]) {
+    const path = `${os.homedir()}/.claude/${name}`;
+    if (!fs.existsSync(path)) continue;
+    for (const line of fs.readFileSync(path, "utf-8").split("\n")) {
+      const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*)\s*$/);
+      if (m && !process.env[m[1]]) process.env[m[1]] = m[2];
+    }
+  }
+})();
+
 import { bot } from "./src/bot";
 import { askClaude, killActiveProcesses } from "./src/claude-engine";
 import { startHeartbeat, startCron, fireHook, stopLemonClaw, appendMemoryLog, startSharedMemorySync } from "./src/lemonclaw";

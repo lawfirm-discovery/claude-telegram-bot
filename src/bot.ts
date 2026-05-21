@@ -310,7 +310,33 @@ bot.command("sync", async (ctx) => {
   // 2026-05-19: CLAUDE.md 는 gitignore 라 git pull 로 갱신 안 됨 (정본은 추적되는
   // CLAUDE.md.template, 복사는 신규 setup 시 1회뿐). → 기존 봇은 규칙이 영원히 stale.
   // syncCmd 에 "template → CLAUDE.md 재복사" 단계 추가 (이전 로컬본은 .prev 로 1회 백업).
-  const syncCmd = `cd /home/angrylawyer/claude-telegram-bot && git fetch origin && git checkout ${branch} && git pull origin ${branch} && { [ -f CLAUDE.md ] && cp -f CLAUDE.md CLAUDE.md.prev 2>/dev/null; true; } && cp -f CLAUDE.md.template CLAUDE.md && bun install --frozen-lockfile 2>/dev/null; echo PULL_OK`;
+  // 2026-05-21: Playwright MCP 자동 등록 + Vault 에서 TEST_ACCOUNT_* fetch 추가.
+  //   - 환경변수 CONFIG_VAULT_AUTH 가 워커에 미리 설정되어 있어야 fetch 동작
+  //     (형식: "bot:비밀번호". 누락 시 그 단계만 silent skip — 평문 노출 방지).
+  //   - 결과: ~/.claude/test-accounts.env (mode 600) 생성/갱신 + ~/.bashrc 자동 로드.
+  const syncCmd = [
+    `cd /home/angrylawyer/claude-telegram-bot`,
+    `git fetch origin`,
+    `git checkout ${branch}`,
+    `git pull origin ${branch}`,
+    `{ [ -f CLAUDE.md ] && cp -f CLAUDE.md CLAUDE.md.prev 2>/dev/null; true; }`,
+    `cp -f CLAUDE.md.template CLAUDE.md`,
+    `bun install --frozen-lockfile 2>/dev/null`,
+    // Playwright MCP — user-scope 등록 (이미 있으면 add 가 멱등적이지 않아서 list 로 사전 체크)
+    `{ command -v claude >/dev/null && (claude mcp list 2>/dev/null | grep -q '^playwright' || claude mcp add --scope user playwright -- npx -y @playwright/mcp@latest) || true; }`,
+    // Vault → ~/.claude/test-accounts.env (CONFIG_VAULT_AUTH 가 있을 때만)
+    `if [ -n "$CONFIG_VAULT_AUTH" ]; then \
+       TE=$(curl -fsS -u "$CONFIG_VAULT_AUTH" http://100.117.168.53:8070/api/value/TEST_ACCOUNT_EMAIL | sed -n 's/.*"value":"\\([^"]*\\)".*/\\1/p'); \
+       TP=$(curl -fsS -u "$CONFIG_VAULT_AUTH" http://100.117.168.53:8070/api/value/TEST_ACCOUNT_PASSWORD | sed -n 's/.*"value":"\\([^"]*\\)".*/\\1/p'); \
+       if [ -n "$TE" ] && [ -n "$TP" ]; then \
+         install -m 600 /dev/null "$HOME/.claude/test-accounts.env"; \
+         printf '# Auto-fetched by /sync from Config Vault\\nTEST_ACCOUNT_EMAIL=%s\\nTEST_ACCOUNT_PASSWORD=%s\\n' "$TE" "$TP" > "$HOME/.claude/test-accounts.env"; \
+         chmod 600 "$HOME/.claude/test-accounts.env"; \
+         grep -q test-accounts.env "$HOME/.bashrc" || printf '\\n[ -f "$HOME/.claude/test-accounts.env" ] && set -a && . "$HOME/.claude/test-accounts.env" && set +a\\n' >> "$HOME/.bashrc"; \
+       fi; \
+     fi`,
+    `echo PULL_OK`,
+  ].join(" && ");
 
   await ctx.reply(`🔄 ${targets.length}개 워커에 <code>${branch}</code> 동기화 시작...`, { parse_mode: "HTML" });
 
