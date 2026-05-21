@@ -533,6 +533,22 @@ bash scripts/i18n/flutter-arb-verify.sh
    - 테스트 시 절대 실제 사용자 계정으로 로그인하지 말 것. `$TEST_ACCOUNT_EMAIL` 만 허용.
    - 실서버(`legalmonster.ai` 등) 에서도 동일 — 운영 데이터에 사이드 이펙트 금지.
 
+4. **🚨 모바일 UX·모바일 전용 기능도 반드시 함께 테스트 (2026-05-22)**
+   - 데스크탑 뷰포트만 검증 금지 — **데스크탑(1920×1080) + 모바일(375×667) 양쪽 동일 시나리오 반복**.
+   - 모바일 뷰포트 전환: `mcp__playwright__browser_resize({ width: 375, height: 667 })`. 시나리오 전후로 양쪽 viewport 모두 거쳐야 완료.
+   - **모바일 체크 항목** (변경한 화면이 모바일에서도 정상 동작):
+     - 반응형 레이아웃 깨짐 없음 (잘림·overlap·가로 스크롤)
+     - 터치 타겟 ≥ 44px (버튼·링크·탭). MUI 기본 size가 44px 미달이면 보고
+     - 모바일 모달은 풀스크린 (`fullScreen={isMobile}`) 또는 시트 형태
+     - 본문 폰트 ≥ 13px, 텍스트 truncate/wrap 정상
+     - 가상 키보드 위로 입력창 가려지지 않음
+   - **모바일 전용 기능도 함께 테스트**:
+     - 드로어/햄버거 메뉴 열림·닫힘
+     - FAB(floating action button) 클릭·풀스크린 패널 동작
+     - swipe·long-press·pull-to-refresh 등 모바일 제스처
+     - `addEventListener('orientationchange')` 같은 기기 회전 처리
+   - **보고 형식**: 데스크탑·모바일 스크린샷 **각 1장씩** + 각 viewport에서의 시나리오 결과를 명시. "데스크탑만 확인됨 / 모바일 미확인"으로 보고하지 말 것 — 미확인이면 작업 미완료.
+
 ### 사용 패턴
 
 ```typescript
