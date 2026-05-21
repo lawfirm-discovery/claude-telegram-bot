@@ -228,7 +228,16 @@ export function startWorkerApi(bot: Bot): void {
           if (!body.command) return jsonRes({ ok: false, error: "command required" }, 400);
 
           const timeoutMs = Math.min(body.timeout || 30000, 60000);
-          const proc = Bun.spawn(["bash", "-c", body.command], {
+          // Windows 워커봇은 system bash 가 PATH 에 없으므로 Git Bash 의 절대경로를 fallback 으로 사용.
+          // (2026-05-21: /sync 시 win-pc1/2 에서 "Executable not found in $PATH: bash" 사고)
+          const isWin = process.platform === "win32";
+          const winBashCandidates = [
+            "C:/Program Files/Git/bin/bash.exe",
+            "C:/Program Files (x86)/Git/bin/bash.exe",
+          ];
+          const winBash = isWin ? winBashCandidates.find(p => { try { return require("fs").existsSync(p); } catch { return false; } }) : null;
+          const bashCmd = winBash || "bash";
+          const proc = Bun.spawn([bashCmd, "-c", body.command], {
             cwd: join(import.meta.dir, ".."),
             env: { ...process.env, NO_COLOR: "1", PATH: `${process.env.HOME}/.bun/bin:${process.env.HOME}/.local/bin:${process.env.HOME}/.nvm/versions/node/v22.22.0/bin:/usr/local/bin:/usr/bin:/bin:${process.env.PATH}` },
             stdout: "pipe",
