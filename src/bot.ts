@@ -311,9 +311,11 @@ bot.command("sync", async (ctx) => {
   // CLAUDE.md.template, 복사는 신규 setup 시 1회뿐). → 기존 봇은 규칙이 영원히 stale.
   // syncCmd 에 "template → CLAUDE.md 재복사" 단계 추가 (이전 로컬본은 .prev 로 1회 백업).
   // 2026-05-21: Playwright MCP 자동 등록 + Vault 에서 TEST_ACCOUNT_* fetch 추가.
-  //   - 환경변수 CONFIG_VAULT_AUTH 가 워커에 미리 설정되어 있어야 fetch 동작
-  //     (형식: "bot:비밀번호". 누락 시 그 단계만 silent skip — 평문 노출 방지).
-  //   - 결과: ~/.claude/test-accounts.env (mode 600) 생성/갱신 + ~/.bashrc 자동 로드.
+  //   리드봇(rtx6000) 의 process.env.CONFIG_VAULT_AUTH 를 base64 로 인라인해서
+  //   워커들에 1회 전달 → 워커가 자체적으로 ~/.claude/config-vault.env 작성.
+  //   → 워커별 SSH 사전 배포 불필요. /sync 한 번이면 끝.
+  //   누락 시 silent skip (평문 노출 방지). 회전은 리드봇 env 갱신 + /sync 재실행.
+  const vaultAuthB64 = Buffer.from(process.env.CONFIG_VAULT_AUTH || "", "utf-8").toString("base64");
   const syncCmd = [
     `cd /home/angrylawyer/claude-telegram-bot`,
     `git fetch origin`,
@@ -324,7 +326,19 @@ bot.command("sync", async (ctx) => {
     `bun install --frozen-lockfile 2>/dev/null`,
     // Playwright MCP — user-scope 등록 (이미 있으면 add 가 멱등적이지 않아서 list 로 사전 체크)
     `{ command -v claude >/dev/null && (claude mcp list 2>/dev/null | grep -q '^playwright' || claude mcp add --scope user playwright -- npx -y @playwright/mcp@latest) || true; }`,
-    // Vault → ~/.claude/test-accounts.env (CONFIG_VAULT_AUTH 가 있을 때만)
+    // 리드봇 CONFIG_VAULT_AUTH 를 워커 디스크 (mode 600) 로 전파 + ~/.bashrc loader 등록
+    `mkdir -p "$HOME/.claude"`,
+    `VAULT_B64='${vaultAuthB64}'; if [ -n "$VAULT_B64" ]; then \
+       AUTH=$(echo "$VAULT_B64" | base64 -d 2>/dev/null); \
+       if [ -n "$AUTH" ]; then \
+         install -m 600 /dev/null "$HOME/.claude/config-vault.env"; \
+         printf 'CONFIG_VAULT_AUTH=%s\\n' "$AUTH" > "$HOME/.claude/config-vault.env"; \
+         chmod 600 "$HOME/.claude/config-vault.env"; \
+         export CONFIG_VAULT_AUTH="$AUTH"; \
+         grep -q config-vault.env "$HOME/.bashrc" || printf '\\n[ -f "$HOME/.claude/config-vault.env" ] && set -a && . "$HOME/.claude/config-vault.env" && set +a\\n' >> "$HOME/.bashrc"; \
+       fi; \
+     fi`,
+    // Vault → ~/.claude/test-accounts.env (위 단계에서 CONFIG_VAULT_AUTH 가 export 됨)
     `if [ -n "$CONFIG_VAULT_AUTH" ]; then \
        TE=$(curl -fsS -u "$CONFIG_VAULT_AUTH" http://100.117.168.53:8070/api/value/TEST_ACCOUNT_EMAIL | sed -n 's/.*"value":"\\([^"]*\\)".*/\\1/p'); \
        TP=$(curl -fsS -u "$CONFIG_VAULT_AUTH" http://100.117.168.53:8070/api/value/TEST_ACCOUNT_PASSWORD | sed -n 's/.*"value":"\\([^"]*\\)".*/\\1/p'); \
