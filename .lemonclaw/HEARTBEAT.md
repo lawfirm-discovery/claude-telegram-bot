@@ -3,12 +3,10 @@
 하트비트 시 아래 항목을 Bash 도구로 실제 확인하세요.
 문제가 있으면 즉시 텔레그램으로 알려주세요.
 
-## 1. 개발서버 (rtx6000) 서비스 상태 — 모든 봇 공통
+## 1. 맥미니 서비스 상태 — 모든 봇 공통
 외부에서 접근 가능한 URL로 확인:
-- 3011은 **HTTPS 전용** (자체서명 인증서) — 반드시 `https://` + `-k` (인증서 검증 무시) 사용
-- [ ] 테스트 서버 접속: `curl -ksf -o /dev/null -w '%{http_code}' https://100.108.86.92:3011` → 200 또는 30x
-- [ ] Spring API: `curl -ksf -o /dev/null -w '%{http_code}' https://100.108.86.92:3011/api/health` → 200 (실패 시 `http://100.108.86.92:8080` 직접 시도)
-- [ ] FastAPI: `curl -ksf -o /dev/null -w '%{http_code}' https://100.108.86.92:3011/ai/docs` → 200 (포트 8001은 방화벽 차단, nginx 경유 확인)
+- [ ] 백엔드 API: `curl -sf -o /dev/null -w '%{http_code}' http://100.88.75.47:8888/` → 200 또는 30x
+- [ ] FastAPI docs: `curl -sf -o /dev/null -w '%{http_code}' http://100.88.75.47:8888/docs` → 200
 
 ## 2. 로컬 서버 기본 헬스
 - [ ] 디스크 사용량 90% 미만인지 확인 (`df -h /`)
