@@ -8,7 +8,7 @@
 - 3011은 **HTTPS 전용** (자체서명 인증서) — 반드시 `https://` + `-k` (인증서 검증 무시) 사용
 - [ ] 테스트 서버 접속: `curl -ksf -o /dev/null -w '%{http_code}' https://100.108.86.92:3011` → 200 또는 30x
 - [ ] Spring API: `curl -ksf -o /dev/null -w '%{http_code}' https://100.108.86.92:3011/api/health` → 200 (실패 시 `http://100.108.86.92:8080` 직접 시도)
-- [ ] FastAPI: `curl -sf -o /dev/null -w '%{http_code}' http://100.108.86.92:8001/docs` → 200
+- [ ] FastAPI: `curl -ksf -o /dev/null -w '%{http_code}' https://100.108.86.92:3011/ai/docs` → 200 (포트 8001은 방화벽 차단, nginx 경유 확인)
 
 ## 2. 로컬 서버 기본 헬스
 - [ ] 디스크 사용량 90% 미만인지 확인 (`df -h /`)
