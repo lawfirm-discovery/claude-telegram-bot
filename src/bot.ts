@@ -20,6 +20,26 @@ import { handleDelegateApprovalCallback } from "./worker-api";
 import { mkdtemp, writeFile, unlink, readFile } from "fs/promises";
 import { join } from "path";
 import { tmpdir } from "os";
+import { getStockReport } from "./stock";
+import {
+  loadWatchlist, addToWatchlist, removeFromWatchlist,
+  isMarketHours, CFG, isMonitorRunning, isSellMonitorRunning, getSellMonitorStatus,
+  isWbMonitorRunning, getWbMonitorStatus,
+} from "./stock-monitor";
+import { LEADING_STOCKS } from "./sell-signal";
+import {
+  detectGaduri, formatGaduriReport,
+  startOptionMonitor, stopOptionMonitor, isOptionMonitorRunning,
+} from "./option-monitor";
+import {
+  ytSessions,
+  searchYouTube,
+  fetchVideoDetails,
+  buildYTKeyboard,
+  buildYTResultMessage,
+  formatDuration,
+  type YouTubeSession,
+} from "./youtube";
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!BOT_TOKEN) {
@@ -573,6 +593,271 @@ bot.command("ralph_now", async (ctx) => {
   }
 });
 
+// ── YouTube Search ──
+bot.command("youtube", async (ctx) => {
+  const chatId = ctx.chat.id.toString();
+  const query = ctx.match?.trim();
+  if (query) {
+    await runYTSearch(ctx, chatId, query);
+  } else {
+    ytSessions.set(chatId, { state: "awaiting_query", query: "", results: [], selected: new Set() });
+    await ctx.reply("🔍 YouTube 검색어를 입력하세요:");
+  }
+});
+
+bot.command("stock", async (ctx) => {
+  const symbol = ctx.match?.trim().toUpperCase();
+  if (!symbol) {
+    await ctx.reply("사용법: /stock [종목코드]\n예) /stock 005930 (삼성전자)\n예) /stock AAPL (미국주식)");
+    return;
+  }
+  const msg = await ctx.reply("📊 조회 중...", { parse_mode: "HTML" });
+  try {
+    const report = await getStockReport(symbol);
+    await ctx.api.editMessageText(ctx.chat.id, msg.message_id, report, { parse_mode: "HTML" });
+  } catch (e: any) {
+    await ctx.api.editMessageText(ctx.chat.id, msg.message_id, `❌ 조회 실패: ${e.message}`);
+  }
+});
+
+bot.command("watch", async (ctx) => {
+  const symbol = ctx.match?.trim().toUpperCase();
+  if (!symbol) {
+    await ctx.reply("사용법: /watch [종목코드]\n예) /watch 005930");
+    return;
+  }
+  const added = addToWatchlist(symbol);
+  const list = loadWatchlist();
+  if (added) {
+    await ctx.reply(`✅ <b>${symbol}</b> 모니터링 추가\n현재 감시 목록: ${list.join(", ")} (${list.length}종목)`, { parse_mode: "HTML" });
+  } else {
+    await ctx.reply(`ℹ️ <b>${symbol}</b>은 이미 감시 목록에 있습니다.\n현재: ${list.join(", ")}`, { parse_mode: "HTML" });
+  }
+});
+
+bot.command("unwatch", async (ctx) => {
+  const symbol = ctx.match?.trim().toUpperCase();
+  if (!symbol) {
+    await ctx.reply("사용법: /unwatch [종목코드]\n예) /unwatch 005930");
+    return;
+  }
+  const removed = removeFromWatchlist(symbol);
+  const list = loadWatchlist();
+  if (removed) {
+    const remaining = list.length > 0 ? list.join(", ") : "없음";
+    await ctx.reply(`✅ <b>${symbol}</b> 모니터링 제거\n남은 감시 목록: ${remaining}`, { parse_mode: "HTML" });
+  } else {
+    await ctx.reply(`ℹ️ <b>${symbol}</b>은 감시 목록에 없습니다.`, { parse_mode: "HTML" });
+  }
+});
+
+bot.command("watchlist", async (ctx) => {
+  const list = loadWatchlist();
+  const running = isMonitorRunning();
+  const market = isMarketHours();
+
+  if (list.length === 0) {
+    await ctx.reply(
+      `📋 감시 목록이 비어있습니다.\n/watch [종목코드] 로 추가하세요.\n\n` +
+      `모니터: ${running ? "🟢 실행중" : "🔴 중지"} | 장: ${market ? "🟢 개장" : "⚪ 마감"}`,
+      { parse_mode: "HTML" },
+    );
+    return;
+  }
+
+  const sellRunning = isSellMonitorRunning();
+  const sellStatus = getSellMonitorStatus();
+  const wbRunning = isWbMonitorRunning();
+  const wbStatus = getWbMonitorStatus();
+
+  const lines = [
+    `📋 <b>실시간 감시 목록</b> (${list.length}종목)`,
+    `매수 모니터: ${running ? "🟢 실행중" : "🔴 중지"} | 장: ${market ? "🟢 개장" : "⚪ 마감"}`,
+    `매도 모니터: ${sellRunning ? "🟢 실행중" : "🔴 중지"} (주도주 ${sellStatus.stocks}종목, ${sellStatus.interval} 주기)`,
+    `WB 모니터: ${wbRunning ? "🟢 실행중" : "🔴 중지"} (${wbStatus.stocks}종목, ${wbStatus.interval} 주기)`,
+    ``,
+    `<b>📈 매수 조건</b> (체크 ${CFG.intervalMs / 1000}초)`,
+    `  전일 대비 +${CFG.minChangePct}% 이상`,
+    `  코스피 대비 +${CFG.minExcessPct}% 이상 초과수익`,
+    `  거래대금 ${CFG.minValueBillion}억원 이상`,
+    ``,
+    `<b>📉 매도 조건</b> (주봉 기반 — 하승훈 규칙)`,
+    `  🪤 트랩 패턴 (신고가 돌파 후 회귀)`,
+    `  💥 가속 추세 붕괴 (파라볼릭 후 하락장악)`,
+    `  📍 윗꼬리 트랩 (돌파 실패)`,
+    ``,
+    `<b>📊 WB 신호 조건</b> (더블BB, 체크 ${wbStatus.interval})`,
+    `  🟢 변곡 매수: BB22↓+BB44↓ 동시 이탈 후 BB22 재진입`,
+    `  🔵 원비 매수: 22EMA↑ + BB44 단독 터치 후 재진입`,
+    `  🔴 변곡 매도: BB22↑+BB44↑ 동시 이탈 후 BB22 재진입`,
+    `  🟠 원비 매도: 22EMA↓ + BB44 단독 터치 후 재진입`,
+    ``,
+    `<b>매수 감시 종목</b>`,
+    ...list.map((s, i) => `  ${i + 1}. ${s}`),
+    ``,
+    `<b>매도 감시 주도주</b> (🇰🇷 ${LEADING_STOCKS.filter(s => s.market === "KR").length} + 🇺🇸 ${LEADING_STOCKS.filter(s => s.market === "US").length})`,
+    ...LEADING_STOCKS.map(s => `  ${s.market === "KR" ? "🇰🇷" : "🇺🇸"} ${s.name} (${s.symbol})`),
+  ];
+
+  await ctx.reply(lines.join("\n"), { parse_mode: "HTML" });
+});
+
+// ── 외인 가두리 감지기 ──────────────────────────────────────────────────────
+
+bot.command("option", async (ctx) => {
+  const msg = await ctx.reply("🔍 분석 중...", { parse_mode: "HTML" });
+  try {
+    const signal = await detectGaduri();
+    await ctx.api.editMessageText(ctx.chat.id, msg.message_id, formatGaduriReport(signal), { parse_mode: "HTML" });
+  } catch (e: any) {
+    await ctx.api.editMessageText(ctx.chat.id, msg.message_id, `❌ 분석 실패: ${e.message}`);
+  }
+});
+
+bot.command("opmon", async (ctx) => {
+  const chatId = String(ctx.chat.id);
+  const running = isOptionMonitorRunning();
+
+  if (running) {
+    stopOptionMonitor();
+    await ctx.reply("🔴 옵션 가두리 모니터 <b>중지</b>", { parse_mode: "HTML" });
+  } else {
+    const sendFn = async (cid: string, text: string) => {
+      try {
+        await bot.api.sendMessage(parseInt(cid), text, { parse_mode: "HTML" });
+      } catch {
+        await bot.api.sendMessage(parseInt(cid), text);
+      }
+    };
+    startOptionMonitor(chatId, sendFn);
+    await ctx.reply(
+      `🟢 옵션 가두리 모니터 <b>시작</b>\n\n` +
+      `CAUTION 이상 감지 시 자동 알림 (쿨다운 4시간)\n` +
+      `/option 으로 현황 즉시 조회 가능`,
+      { parse_mode: "HTML" },
+    );
+  }
+});
+
+async function runYTSearch(ctx: any, chatId: string, query: string): Promise<void> {
+  await ctx.reply("🔍 검색 중...");
+  try {
+    const results = await searchYouTube(query, 10);
+    if (results.length === 0) {
+      await ctx.reply("검색 결과가 없습니다.");
+      ytSessions.delete(chatId);
+      return;
+    }
+    const session: YouTubeSession = { state: "selecting", query, results, selected: new Set() };
+    ytSessions.set(chatId, session);
+    const msg = await ctx.reply(buildYTResultMessage(session), {
+      parse_mode: "HTML",
+      reply_markup: buildYTKeyboard(session),
+    });
+    session.messageId = msg.message_id;
+  } catch (e: any) {
+    await ctx.reply(`❌ YouTube 검색 실패: ${e.message}`);
+    ytSessions.delete(chatId);
+  }
+}
+
+async function handleYTCallback(ctx: any, data: string): Promise<void> {
+  const chatId = ctx.chat.id.toString();
+  const session = ytSessions.get(chatId);
+
+  if (data === "yt_cancel") {
+    ytSessions.delete(chatId);
+    await ctx.answerCallbackQuery({ text: "취소됨" });
+    try { await ctx.editMessageReplyMarkup({ reply_markup: undefined }); } catch {}
+    return;
+  }
+
+  if (data === "yt_new") {
+    ytSessions.set(chatId, { state: "awaiting_query", query: "", results: [], selected: new Set() });
+    await ctx.answerCallbackQuery({ text: "새 검색어를 입력하세요." });
+    await ctx.reply("🔍 새 검색어를 입력하세요:");
+    return;
+  }
+
+  if (!session || session.state !== "selecting") {
+    await ctx.answerCallbackQuery({ text: "세션이 만료되었습니다. /youtube 로 다시 시작하세요." });
+    return;
+  }
+
+  if (data.startsWith("yt_toggle:")) {
+    const idx = parseInt(data.split(":")[1] ?? "-1");
+    if (idx < 0 || idx >= session.results.length) {
+      await ctx.answerCallbackQuery({ text: "잘못된 항목" });
+      return;
+    }
+    if (session.selected.has(idx)) {
+      session.selected.delete(idx);
+      await ctx.answerCallbackQuery({ text: `⬜ ${session.results[idx]!.title.slice(0, 30)} 선택 해제` });
+    } else {
+      session.selected.add(idx);
+      await ctx.answerCallbackQuery({ text: `✅ ${session.results[idx]!.title.slice(0, 30)} 선택됨` });
+    }
+    try {
+      await ctx.editMessageText(buildYTResultMessage(session), {
+        parse_mode: "HTML",
+        reply_markup: buildYTKeyboard(session),
+      });
+    } catch {}
+    return;
+  }
+
+  if (data === "yt_analyze") {
+    if (session.selected.size === 0) {
+      await ctx.answerCallbackQuery({ text: "하나 이상 선택하세요." });
+      return;
+    }
+    await ctx.answerCallbackQuery({ text: `🤖 ${session.selected.size}개 분석 시작...` });
+
+    // 키보드 제거 후 진행 메시지
+    try {
+      await ctx.editMessageReplyMarkup({ reply_markup: undefined });
+    } catch {}
+
+    const selectedVideos = [...session.selected].sort().map(i => session.results[i]!);
+    ytSessions.delete(chatId);
+
+    const analyzeMsg = await ctx.reply(
+      `🤖 선택된 ${selectedVideos.length}개 영상 분석 중...\n(자막 포함 시 시간이 걸릴 수 있습니다.)`
+    );
+
+    try {
+      const details = await Promise.all(selectedVideos.map(v => fetchVideoDetails(v)));
+      const prompt = `다음 YouTube 영상${selectedVideos.length > 1 ? "들" : ""}을 분석해줘:\n\n` +
+        details.map((d, i) => `=== 영상 ${i + 1} ===\n${d}`).join("\n\n") +
+        `\n\n[중요] 분석 완료 후, 영상에서 언급된 주식 종목(한국/미국 주식)이 있다면 응답 맨 마지막에 반드시 아래 형식으로 추가해줘. 종목이 없으면 이 태그를 생략해.
+[STOCKS: 종목1, 종목2, 종목3]
+예시: [STOCKS: 삼성전자, 테슬라, NVDA, SK하이닉스]
+- 종목명은 정식 명칭 또는 널리 알려진 티커를 사용
+- 단순 언급이 아닌, 실질적으로 분석/추천/논의된 종목만 포함`;
+
+      const response = await askClaude(chatId, prompt);
+
+      // 종목 태그 파싱 및 표시
+      const stockTagRe = /\[STOCKS:\s*([^\]]+)\]/i;
+      const stockMatch = stockTagRe.exec(response);
+      let finalResponse = response.replace(/\[STOCKS:[^\]]*\]/gi, "").trim();
+
+      if (stockMatch?.[1]) {
+        const stocks = stockMatch[1].split(",").map(s => s.trim()).filter(Boolean);
+        if (stocks.length > 0) {
+          const hashtags = stocks.map(s => `#${s.replace(/\s+/g, "_")}`).join("  ");
+          finalResponse = `📊 **종목 태그:** ${hashtags}\n\n${finalResponse}`;
+        }
+      }
+
+      await sendResponse(ctx, finalResponse, chatId);
+    } catch (e: any) {
+      await ctx.reply(`❌ 분석 실패: ${e.message}`);
+    }
+    return;
+  }
+}
+
 // Pending orchestration approvals
 const pendingOrchestrations = new Map<string, string>();
 
@@ -601,6 +886,12 @@ bot.on("callback_query:data", async (ctx) => {
   // 위임 작업 승인/거절 먼저 체크
   if (data.startsWith("delegate_approve:") || data.startsWith("delegate_reject:")) {
     await handleDelegateApprovalCallback(data, ctx);
+    return;
+  }
+
+  // ── YouTube 선택 콜백 ──
+  if (data.startsWith("yt_toggle:") || data === "yt_analyze" || data === "yt_cancel" || data === "yt_new") {
+    await handleYTCallback(ctx, data);
     return;
   }
 
@@ -1029,6 +1320,13 @@ bot.on("message:text", async (ctx) => {
   // Group: only respond when mentioned (use cached bot info)
   if (ctx.chat.type !== "private") {
     if (!isBotMentioned(text, ctx.me.username)) return;
+  }
+
+  // ── YouTube 검색어 대기 상태 처리 ──
+  const ytSession = ytSessions.get(chatId);
+  if (ytSession?.state === "awaiting_query") {
+    await runYTSearch(ctx, chatId, text.trim());
+    return;
   }
 
   // === Orchestrator: 승인/취소 처리 (Lead) ===

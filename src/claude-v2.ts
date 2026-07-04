@@ -413,6 +413,9 @@ async function runWithSDKInner(
     resume: session.isFirstTurn ? undefined : session.sessionId,
     ...(session.isFirstTurn ? { sessionId: session.sessionId } : {}),
     pathToClaudeCodeExecutable: CLAUDE_PATH,
+    // SDK child process must not inherit the bot token; otherwise Claude's Telegram plugin can
+    // start a second getUpdates poller and steal/conflict with @pylon_M4_openclaw_bot (409).
+    env: { ...process.env, NO_COLOR: "1", TELEGRAM_BOT_TOKEN: "" },
     allowDangerouslySkipPermissions: true,
     stderr: (data: string) => {
       if (data.includes("error") || data.includes("Error")) {

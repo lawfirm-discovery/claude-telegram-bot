@@ -20,6 +20,8 @@ import { markdownToTelegramHtml, splitMessage } from "./src/format";
 import { startWorkerApi, stopWorkerApi } from "./src/worker-api";
 import { BOT_ROLE, stopHealthCheck } from "./src/orchestrator";
 import { initBuildInfo } from "./src/build-info";
+import { startStockMonitor, stopStockMonitor } from "./src/stock-monitor";
+import { startOptionMonitor, stopOptionMonitor } from "./src/option-monitor";
 import { existsSync, writeFileSync, readFileSync, unlinkSync } from "fs";
 import { execSync } from "child_process";
 import { join } from "path";
@@ -212,6 +214,18 @@ async function startServices(): Promise<void> {
     startSshProxy();
   }
 
+  // 주식/옵션 실시간 모니터 (모든 봇)
+  const alertChatId =
+    process.env.STOCK_ALERT_CHAT_ID ||
+    (process.env.ALLOWED_USERS ? process.env.ALLOWED_USERS.split(",")[0]?.trim() : "") ||
+    "";
+  if (alertChatId) {
+    startStockMonitor(alertChatId, sendTelegram);
+    startOptionMonitor(alertChatId, sendTelegram);
+  } else {
+    console.warn("[StockMonitor] STOCK_ALERT_CHAT_ID 또는 ALLOWED_USERS 미설정 — 모니터 비활성");
+  }
+
   // Ralph Loop: 미완료 태스크 재개 (워커만 — 리드는 직접 작업 안 함)
   if (BOT_ROLE === "worker") {
     const { resumeInProgressTasks } = await import("./src/ralph-loop");
@@ -251,13 +265,16 @@ async function startBot(): Promise<void> {
       } catch (e: any) {
         const is409 = e.error_code === 409 || String(e.message || "").includes("409");
         if (is409 && attempt < maxAttempts) {
-          console.log(`[Bot] 409 conflict (round ${round}, attempt ${attempt}/${maxAttempts}) — waiting for slot...`);
+          console.log(`[Bot] 409 conflict (round ${round}, attempt ${attempt}/${maxAttempts}) — stopping stale poller and waiting for slot...`);
+          try { bot.stop(); } catch {}
+          await new Promise(r => setTimeout(r, 1500));
           if (token) await waitForPollingSlot(token, 35_000);
           continue;
         }
         if (is409) {
-          // 409로 모든 시도 소진 — exit하지 않고 60초 대기 후 처음부터 재시도
-          console.error(`[Bot] 409 persisted through ${maxAttempts} attempts (round ${round}) — waiting 60s then retry`);
+          // 409로 모든 시도 소진 — stale polling을 정리한 뒤 60초 대기 후 처음부터 재시도
+          console.error(`[Bot] 409 persisted through ${maxAttempts} attempts (round ${round}) — stopping stale poller, waiting 60s then retry`);
+          try { bot.stop(); } catch {}
           break;
         }
         // 409가 아닌 에러 — 진짜 문제이므로 exit
@@ -314,6 +331,8 @@ const shutdown = async (signal: string) => {
   stopLemonClaw();
   stopHealthCheck();
   stopWorkerApi();
+  stopStockMonitor();
+  stopOptionMonitor();
   // ssh-proxy 정리 (동적 import — 워커에선 로드 안 됨)
   try { const { stopSshProxy } = await import("./src/ssh-proxy"); stopSshProxy(); } catch {}
   await killActiveProcesses();
