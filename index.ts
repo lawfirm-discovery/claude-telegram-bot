@@ -22,6 +22,7 @@ import { BOT_ROLE, stopHealthCheck } from "./src/orchestrator";
 import { initBuildInfo } from "./src/build-info";
 import { startStockMonitor, stopStockMonitor } from "./src/stock-monitor";
 import { startOptionMonitor, stopOptionMonitor } from "./src/option-monitor";
+import { startOptionsMonitor, stopOptionsMonitor } from "./src/options-analysis";
 import { existsSync, writeFileSync, readFileSync, unlinkSync } from "fs";
 import { execSync } from "child_process";
 import { join } from "path";
@@ -222,6 +223,7 @@ async function startServices(): Promise<void> {
   if (alertChatId) {
     startStockMonitor(alertChatId, sendTelegram);
     startOptionMonitor(alertChatId, sendTelegram);
+    startOptionsMonitor(alertChatId, sendTelegram);
   } else {
     console.warn("[StockMonitor] STOCK_ALERT_CHAT_ID 또는 ALLOWED_USERS 미설정 — 모니터 비활성");
   }
@@ -333,6 +335,7 @@ const shutdown = async (signal: string) => {
   stopWorkerApi();
   stopStockMonitor();
   stopOptionMonitor();
+  stopOptionsMonitor();
   // ssh-proxy 정리 (동적 import — 워커에선 로드 안 됨)
   try { const { stopSshProxy } = await import("./src/ssh-proxy"); stopSshProxy(); } catch {}
   await killActiveProcesses();

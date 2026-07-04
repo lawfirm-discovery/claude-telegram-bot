@@ -32,6 +32,9 @@ import {
   startOptionMonitor, stopOptionMonitor, isOptionMonitorRunning,
 } from "./option-monitor";
 import {
+  buildOptionsSignal, formatOptionsReport, loadCachedSignal,
+} from "./options-analysis";
+import {
   ytSessions,
   searchYouTube,
   fetchVideoDetails,
@@ -736,6 +739,24 @@ bot.command("opmon", async (ctx) => {
       `/option 으로 현황 즉시 조회 가능`,
       { parse_mode: "HTML" },
     );
+  }
+});
+
+// ── T+1 옵션 수급 신호 ──────────────────────────────────────────────────────
+
+bot.command("options", async (ctx) => {
+  // 캐시된 데이터 있으면 즉시 반환
+  const cached = loadCachedSignal();
+  if (cached) {
+    await ctx.reply(formatOptionsReport(cached), { parse_mode: "HTML" });
+    return;
+  }
+  const msg = await ctx.reply("📊 KRX 옵션 데이터 수집 중...", { parse_mode: "HTML" });
+  try {
+    const signal = await buildOptionsSignal();
+    await ctx.api.editMessageText(ctx.chat.id, msg.message_id, formatOptionsReport(signal), { parse_mode: "HTML" });
+  } catch (e: any) {
+    await ctx.api.editMessageText(ctx.chat.id, msg.message_id, `❌ 옵션 분석 실패: ${e.message}`);
   }
 });
 
