@@ -43,6 +43,7 @@ import {
   formatDuration,
   type YouTubeSession,
 } from "./youtube";
+import { fetchMarketFundFlow, formatMarketFundReport } from "./freesis";
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!BOT_TOKEN) {
@@ -703,6 +704,18 @@ bot.command("watchlist", async (ctx) => {
   ];
 
   await ctx.reply(lines.join("\n"), { parse_mode: "HTML" });
+});
+
+// ── 증시자금추이 (FreeSIS) ───────────────────────────────────────────────────
+
+bot.command("funds", async (ctx) => {
+  const msg = await ctx.reply("📊 FreeSIS 조회 중...", { parse_mode: "HTML" });
+  try {
+    const rows = await fetchMarketFundFlow(7);
+    await ctx.api.editMessageText(ctx.chat.id, msg.message_id, formatMarketFundReport(rows), { parse_mode: "HTML" });
+  } catch (e: any) {
+    await ctx.api.editMessageText(ctx.chat.id, msg.message_id, `❌ 조회 실패: ${e.message}`);
+  }
 });
 
 // ── 외인 가두리 감지기 ──────────────────────────────────────────────────────
