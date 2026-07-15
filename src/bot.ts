@@ -44,6 +44,7 @@ import {
   type YouTubeSession,
 } from "./youtube";
 import { fetchMarketFundFlow, formatMarketFundReport } from "./freesis";
+import { runAagagPipeline, formatAagagReport, isAagagMonitorRunning } from "./aagag-signal";
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!BOT_TOKEN) {
@@ -715,6 +716,19 @@ bot.command("funds", async (ctx) => {
     await ctx.api.editMessageText(ctx.chat.id, msg.message_id, formatMarketFundReport(rows), { parse_mode: "HTML" });
   } catch (e: any) {
     await ctx.api.editMessageText(ctx.chat.id, msg.message_id, `❌ 조회 실패: ${e.message}`);
+  }
+});
+
+// ── AAGAG 커뮤니티 심리 분석 ────────────────────────────────────────────────
+
+bot.command("aagag", async (ctx) => {
+  const monitorStatus = isAagagMonitorRunning() ? "🟢 스케줄 실행중 (09:00/16:00)" : "🔴 스케줄 중지";
+  const msg = await ctx.reply(`🧠 AAGAG 커뮤니티 심리 분석 중...\n${monitorStatus}`, { parse_mode: "HTML" });
+  try {
+    const result = await runAagagPipeline();
+    await ctx.api.editMessageText(ctx.chat.id, msg.message_id, formatAagagReport(result), { parse_mode: "HTML" });
+  } catch (e: any) {
+    await ctx.api.editMessageText(ctx.chat.id, msg.message_id, `❌ AAGAG 분석 실패: ${e.message}`);
   }
 });
 

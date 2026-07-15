@@ -8,6 +8,9 @@ import {
   formatSellAlertGroup,
 } from "./sell-signal";
 import { detectWbSignals, formatWbAlert } from "./wb-signal";
+import { detectBottomSignals, formatBottomAlert } from "./bottom-signal";
+import { generateBBChart } from "./chart";
+import { startAagagMonitor, stopAagagMonitor, isAagagMonitorRunning } from "./aagag-signal";
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -112,6 +115,7 @@ type DedupState = {
   buyAlerts:  Record<string, string>;   // symbol → YYYY-MM-DD
   sellAlerts: Record<string, number>;   // "symbol:weekDate:type" → timestamp
   wbAlerts:   Record<string, number>;   // "wb:symbol:date:type" → timestamp
+  bottomAlerts: Record<string, number>; // "btm:symbol:date" → timestamp
 };
 
 function loadDedup(): DedupState {
@@ -122,12 +126,13 @@ function loadDedup(): DedupState {
         buyAlerts:  saved.buyAlerts  ?? {},
         sellAlerts: saved.sellAlerts ?? {},
         wbAlerts:   saved.wbAlerts   ?? {},
+        bottomAlerts: saved.bottomAlerts ?? {},
       };
     }
   } catch (e: any) {
     console.warn(`[StockMonitor] dedup 로드 실패 (초기화): ${e.message}`);
   }
-  return { buyAlerts: {}, sellAlerts: {}, wbAlerts: {} };
+  return { buyAlerts: {}, sellAlerts: {}, wbAlerts: {}, bottomAlerts: {} };
 }
 
 function saveDedup(): void {
@@ -136,6 +141,7 @@ function saveDedup(): void {
       buyAlerts:  Object.fromEntries(alertedDates),
       sellAlerts: Object.fromEntries(sellAlertedKeys),
       wbAlerts:   Object.fromEntries(wbAlertedKeys),
+      bottomAlerts: Object.fromEntries(bottomAlertedKeys),
     };
     writeFileSync(DEDUP_FILE, JSON.stringify(state, null, 2));
   } catch (e: any) {
@@ -149,6 +155,11 @@ const _savedDedup = loadDedup();
 // WB 신호 dedup (영속화)
 const wbAlertedKeys = new Map<string, number>(
   Object.entries(_savedDedup.wbAlerts).map(([k, v]) => [k, v as number]),
+);
+
+// 바닥 신호 dedup (영속화)
+const bottomAlertedKeys = new Map<string, number>(
+  Object.entries(_savedDedup.bottomAlerts).map(([k, v]) => [k, v as number]),
 );
 
 // ── Per-symbol check ──────────────────────────────────────────────────────────
@@ -214,6 +225,7 @@ async function checkSymbol(symbol: string, kospiChangePct: number): Promise<stri
 let monitorTimer: ReturnType<typeof setInterval> | null = null;
 let monitorChatId = "";
 let monitorSend: ((chatId: string, text: string) => Promise<void>) | null = null;
+let monitorSendPhoto: ((chatId: string, image: Buffer, caption: string) => Promise<void>) | null = null;
 
 async function tick(): Promise<void> {
   if (!isMarketHours()) return;
@@ -362,9 +374,21 @@ async function wbSignalTick(): Promise<void> {
       });
 
       for (const signal of newSignals) {
-        if (monitorSend && monitorChatId) {
+        if (monitorChatId) {
           console.log(`[WbMonitor] ${signal.direction === "buy" ? "매수" : "매도"} 신호: ${signal.name} (${signal.type})`);
-          await monitorSend(monitorChatId, formatWbAlert(signal));
+          const alertText = formatWbAlert(signal);
+          if (monitorSendPhoto) {
+            try {
+              const chartTitle = `${signal.name} (${signal.symbol}) — ${signal.date}`;
+              const image = await generateBBChart(dailyCandles, chartTitle);
+              await monitorSendPhoto(monitorChatId, image, alertText);
+            } catch (chartErr: any) {
+              console.error(`[WbMonitor] 차트 생성 실패: ${chartErr.message}`);
+              if (monitorSend) await monitorSend(monitorChatId, alertText);
+            }
+          } else if (monitorSend) {
+            await monitorSend(monitorChatId, alertText);
+          }
         }
       }
     } catch (e: any) {
@@ -383,22 +407,99 @@ async function wbSignalTick(): Promise<void> {
   if (dedupDirty) saveDedup();
 }
 
+// ── 기관형 바닥 저점 포착 모니터 (일봉 기반) ──────────────────────────────────
+
+const BOTTOM_CHECK_INTERVAL_MS = parseInt(process.env.BOTTOM_CHECK_INTERVAL_MS || "14400000"); // 4시간
+let bottomMonitorTimer: ReturnType<typeof setInterval> | null = null;
+
+async function bottomSignalTick(): Promise<void> {
+  const allSymbols = new Map<string, { name: string; market: "KR" | "US" }>();
+
+  for (const stock of LEADING_STOCKS) {
+    allSymbols.set(stock.symbol, { name: stock.name, market: stock.market });
+  }
+  for (const sym of loadWatchlist()) {
+    if (!allSymbols.has(sym)) {
+      const isUS = /^[A-Z]{1,5}$/.test(sym) && !/^\d+$/.test(sym);
+      allSymbols.set(sym, { name: sym, market: isUS ? "US" : "KR" });
+    }
+  }
+
+  console.log(`[BottomMonitor] tick — ${allSymbols.size}종목 바닥 저점 포착 분석`);
+  let dedupDirty = false;
+
+  for (const [symbol, info] of allSymbols) {
+    try {
+      const dailyCandles = await getCandles(symbol, "1d", 200);
+      if (dailyCandles.length < 50) continue;
+
+      const signals = detectBottomSignals(symbol, info.name, info.market, dailyCandles);
+
+      const newSignals = signals.filter(signal => {
+        const key = `btm:${signal.symbol}:${signal.date}`;
+        if (bottomAlertedKeys.has(key)) return false;
+        bottomAlertedKeys.set(key, Date.now());
+        dedupDirty = true;
+        const ageMs = Date.now() - new Date(signal.date).getTime();
+        if (ageMs > 3 * 86_400_000) {
+          console.log(`[BottomMonitor] 지난 신호 무시 (${signal.date}): ${signal.name}`);
+          return false;
+        }
+        return true;
+      });
+
+      for (const signal of newSignals) {
+        if (monitorChatId) {
+          console.log(`[BottomMonitor] 바닥 매수 신호: ${signal.name} (${signal.symbol})`);
+          const alertText = formatBottomAlert(signal);
+          if (monitorSendPhoto) {
+            try {
+              const chartTitle = `${signal.name} (${signal.symbol}) — 바닥 저점 ${signal.date}`;
+              const image = await generateBBChart(dailyCandles, chartTitle);
+              await monitorSendPhoto(monitorChatId, image, alertText);
+            } catch (chartErr: any) {
+              console.error(`[BottomMonitor] 차트 생성 실패: ${chartErr.message}`);
+              if (monitorSend) await monitorSend(monitorChatId, alertText);
+            }
+          } else if (monitorSend) {
+            await monitorSend(monitorChatId, alertText);
+          }
+        }
+      }
+    } catch (e: any) {
+      console.error(`[BottomMonitor] ${symbol} 실패: ${e.message}`);
+    }
+
+    await new Promise(r => setTimeout(r, 800));
+  }
+
+  const cutoff = Date.now() - MAX_SIGNAL_AGE_DAYS * 86_400_000;
+  for (const [key, ts] of bottomAlertedKeys) {
+    if (ts < cutoff) { bottomAlertedKeys.delete(key); dedupDirty = true; }
+  }
+
+  if (dedupDirty) saveDedup();
+}
+
 // ── Start / Stop ────────────────────────────────────────────────────────────
 
 export function startStockMonitor(
   chatId: string,
   sendFn: (chatId: string, text: string) => Promise<void>,
+  sendPhotoFn?: (chatId: string, image: Buffer, caption: string) => Promise<void>,
 ): void {
   if (monitorTimer) return;
 
   monitorChatId = chatId;
   monitorSend = sendFn;
+  monitorSendPhoto = sendPhotoFn ?? null;
 
   const intervalSec  = CFG.intervalMs / 1000;
   const sellIntervalH = SELL_CHECK_INTERVAL_MS / 3_600_000;
   const wbIntervalH   = WB_CHECK_INTERVAL_MS   / 3_600_000;
+  const btmIntervalH  = BOTTOM_CHECK_INTERVAL_MS / 3_600_000;
   console.log(
-    `[StockMonitor] 시작 — 매수 주기 ${intervalSec}s, 매도 주기 ${sellIntervalH}h, WB 주기 ${wbIntervalH}h, ` +
+    `[StockMonitor] 시작 — 매수 주기 ${intervalSec}s, 매도 주기 ${sellIntervalH}h, WB 주기 ${wbIntervalH}h, 바닥 주기 ${btmIntervalH}h, ` +
     `조건: 상승>=${CFG.minChangePct}%, 초과>=${CFG.minExcessPct}%, 거래대금>=${CFG.minValueBillion}억, ` +
     `매수감시: ${loadWatchlist().length}개, 매도감시(주도주): ${LEADING_STOCKS.length}개`,
   );
@@ -429,6 +530,19 @@ export function startStockMonitor(
     () => wbSignalTick().catch(e => console.error(`[WbMonitor] tick 실패: ${e.message}`)),
     WB_CHECK_INTERVAL_MS,
   );
+
+  // 기관형 바닥 저점 포착 루프 (일봉 기반, 50초 뒤 첫 실행)
+  setTimeout(
+    () => bottomSignalTick().catch(e => console.error(`[BottomMonitor] 초기 체크 실패: ${e.message}`)),
+    50_000,
+  );
+  bottomMonitorTimer = setInterval(
+    () => bottomSignalTick().catch(e => console.error(`[BottomMonitor] tick 실패: ${e.message}`)),
+    BOTTOM_CHECK_INTERVAL_MS,
+  );
+
+  // AAGAG 커뮤니티 심리 모니터 (09:00/16:00 KST 스케줄)
+  startAagagMonitor(chatId, sendFn);
 }
 
 export function stopStockMonitor(): void {
@@ -444,7 +558,12 @@ export function stopStockMonitor(): void {
     clearInterval(wbMonitorTimer);
     wbMonitorTimer = null;
   }
-  console.log("[StockMonitor] 매수+매도+WB 모니터 중지");
+  if (bottomMonitorTimer) {
+    clearInterval(bottomMonitorTimer);
+    bottomMonitorTimer = null;
+  }
+  stopAagagMonitor();
+  console.log("[StockMonitor] 매수+매도+WB+바닥+AAGAG 모니터 중지");
 }
 
 export function isMonitorRunning(): boolean {
@@ -472,5 +591,17 @@ export function getWbMonitorStatus(): { stocks: number; interval: string; alerts
     stocks: LEADING_STOCKS.length + loadWatchlist().length,
     interval: `${WB_CHECK_INTERVAL_MS / 3_600_000}시간`,
     alerts: wbAlertedKeys.size,
+  };
+}
+
+export function isBottomMonitorRunning(): boolean {
+  return bottomMonitorTimer !== null;
+}
+
+export function getBottomMonitorStatus(): { stocks: number; interval: string; alerts: number } {
+  return {
+    stocks: LEADING_STOCKS.length + loadWatchlist().length,
+    interval: `${BOTTOM_CHECK_INTERVAL_MS / 3_600_000}시간`,
+    alerts: bottomAlertedKeys.size,
   };
 }
