@@ -453,7 +453,7 @@ export function isAagagMonitorRunning(): boolean {
 
 // ── PostgreSQL (n100) ─────────────────────────────────────────────────────────
 
-const AAGAG_DB_URL = process.env.AAGAG_DB_URL || "postgres://pylon:415416@100.65.20.81:5432/pylon";
+const AAGAG_DB_URL = process.env.AAGAG_DB_URL || "postgres://pylon:415416@192.168.0.61:5432/pylon";
 const sql = postgres(AAGAG_DB_URL, { max: 3, idle_timeout: 30, connect_timeout: 10 });
 
 let _tableReady = false;
