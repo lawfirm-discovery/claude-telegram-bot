@@ -1,4 +1,4 @@
-import { Bot, InlineKeyboard } from "grammy";
+import { Bot, InlineKeyboard, InputFile } from "grammy";
 import { askClaude, askClaudeWithProgress, clearSession, getSessionStats, getHudInfo, killActiveProcesses, loadInterruptedContext, hasInterruptedContext, getCurrentPlan, saveCheckpoint, type ProgressInfo } from "./claude-engine";
 import { appendMemoryLog, appendSharedMemory, appendChatNote, clearChatNotes, loadChatNotes, loadActiveWorking, archiveActiveWorking, clearActiveWorking } from "./lemonclaw";
 import {
@@ -44,7 +44,7 @@ import {
   type YouTubeSession,
 } from "./youtube";
 import { fetchMarketFundFlow, formatMarketFundReport } from "./freesis";
-import { runAagagPipeline, formatAagagReport, isAagagMonitorRunning } from "./aagag-signal";
+import { runAagagPipeline, formatAagagReport, isAagagMonitorRunning, saveAagagResult, generateAagagChart } from "./aagag-signal";
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!BOT_TOKEN) {
@@ -726,7 +726,17 @@ bot.command("aagag", async (ctx) => {
   const msg = await ctx.reply(`🧠 AAGAG 커뮤니티 심리 분석 중...\n${monitorStatus}`, { parse_mode: "HTML" });
   try {
     const result = await runAagagPipeline();
+    saveAagagResult(result);
     await ctx.api.editMessageText(ctx.chat.id, msg.message_id, formatAagagReport(result), { parse_mode: "HTML" });
+    // 차트 전송
+    try {
+      const chartImage = await generateAagagChart(60);
+      await ctx.replyWithPhoto(new InputFile(chartImage, "aagag-chart.png"), {
+        caption: "AAGAG 심리 추이 (최근 60일)",
+      });
+    } catch (chartErr: any) {
+      console.warn(`[AAGAG] 차트 생성/전송 실패: ${chartErr.message}`);
+    }
   } catch (e: any) {
     await ctx.api.editMessageText(ctx.chat.id, msg.message_id, `❌ AAGAG 분석 실패: ${e.message}`);
   }

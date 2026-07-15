@@ -542,7 +542,7 @@ export function startStockMonitor(
   );
 
   // AAGAG 커뮤니티 심리 모니터 (09:00/16:00 KST 스케줄)
-  startAagagMonitor(chatId, sendFn);
+  startAagagMonitor(chatId, sendFn, sendPhotoFn);
 }
 
 export function stopStockMonitor(): void {

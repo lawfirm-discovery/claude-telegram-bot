@@ -1,8 +1,10 @@
 // AAGAG (aagag.com) 커뮤니티 빅데이터 주식 심리 분석
 // SII (주식 관심 지수) + SBI (감성 편향 지수) 기반 역발상 트레이딩 시그널
-// Playwright 기반 봇탐지 우회 크롤링
+// Playwright 기반 봇탐지 우회 크롤링 + SQLite 데이터 저장 + 차트 생성
 
 import { chromium } from "playwright";
+import { Database } from "bun:sqlite";
+import { join } from "path";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -363,6 +365,7 @@ export function formatAagagReport(r: AagagResult): string {
 let schedulerTimer: ReturnType<typeof setInterval> | null = null;
 let schedulerChatId = "";
 let schedulerSendFn: ((chatId: string, text: string) => Promise<void>) | null = null;
+let schedulerSendPhotoFn: ((chatId: string, image: Buffer, caption: string) => Promise<void>) | null = null;
 let lastRunDate = "";
 let lastRunHour = -1;
 let isRunning = false;
@@ -395,8 +398,17 @@ async function schedulerTick(): Promise<void> {
 
   try {
     const result = await runAagagPipeline();
+    saveAagagResult(result);
     if (schedulerSendFn && schedulerChatId) {
       await schedulerSendFn(schedulerChatId, formatAagagReport(result));
+      try {
+        const chartImage = await generateAagagChart(60);
+        if (schedulerSendPhotoFn) {
+          await schedulerSendPhotoFn(schedulerChatId, chartImage, "AAGAG 심리 추이 (최근 60일)");
+        }
+      } catch (chartErr: any) {
+        console.warn(`[AAGAG] 차트 전송 실패: ${chartErr.message}`);
+      }
     }
   } catch (e: any) {
     console.error(`[AAGAG] 스케줄 실행 실패: ${e.message}`);
@@ -411,11 +423,13 @@ async function schedulerTick(): Promise<void> {
 export function startAagagMonitor(
   chatId: string,
   sendFn: (chatId: string, text: string) => Promise<void>,
+  sendPhotoFn?: (chatId: string, image: Buffer, caption: string) => Promise<void>,
 ): void {
   if (schedulerTimer) return;
 
   schedulerChatId = chatId;
   schedulerSendFn = sendFn;
+  schedulerSendPhotoFn = sendPhotoFn ?? null;
 
   console.log("[AAGAG] 심리 모니터 시작 — 09:00/16:00 KST 스케줄");
 
@@ -436,4 +450,311 @@ export function stopAagagMonitor(): void {
 
 export function isAagagMonitorRunning(): boolean {
   return schedulerTimer !== null;
+}
+
+// ── SQLite DB ─────────────────────────────────────────────────────────────────
+
+const DB_PATH = join(import.meta.dir, "../.lemonclaw/aagag.db");
+let _db: InstanceType<typeof Database> | null = null;
+
+function getDb(): InstanceType<typeof Database> {
+  if (_db) return _db;
+  _db = new Database(DB_PATH, { create: true });
+  _db.run(`CREATE TABLE IF NOT EXISTS aagag_daily (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    date TEXT NOT NULL,
+    time TEXT NOT NULL,
+    sii REAL NOT NULL,
+    sbi REAL NOT NULL,
+    signal TEXT NOT NULL,
+    reason TEXT,
+    sell_폭등 INTEGER DEFAULT 0, sell_급등 INTEGER DEFAULT 0, sell_급상승 INTEGER DEFAULT 0,
+    buy_폭락 INTEGER DEFAULT 0, buy_급락 INTEGER DEFAULT 0, buy_급하락 INTEGER DEFAULT 0,
+    sell_폭등_comments INTEGER DEFAULT 0, sell_급등_comments INTEGER DEFAULT 0, sell_급상승_comments INTEGER DEFAULT 0,
+    buy_폭락_comments INTEGER DEFAULT 0, buy_급락_comments INTEGER DEFAULT 0, buy_급하락_comments INTEGER DEFAULT 0,
+    general_json TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(date, time)
+  )`);
+  return _db;
+}
+
+export function saveAagagResult(r: AagagResult): void {
+  const db = getDb();
+  const sellMap: Record<string, { posts: number; comments: number }> = {};
+  r.sellStats.forEach(s => { sellMap[s.keyword] = { posts: s.posts, comments: s.totalComments }; });
+  const buyMap: Record<string, { posts: number; comments: number }> = {};
+  r.buyStats.forEach(s => { buyMap[s.keyword] = { posts: s.posts, comments: s.totalComments }; });
+
+  db.run(
+    `INSERT OR REPLACE INTO aagag_daily
+     (date, time, sii, sbi, signal, reason,
+      sell_폭등, sell_급등, sell_급상승,
+      buy_폭락, buy_급락, buy_급하락,
+      sell_폭등_comments, sell_급등_comments, sell_급상승_comments,
+      buy_폭락_comments, buy_급락_comments, buy_급하락_comments,
+      general_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      r.date, r.time, r.stockInterestIndex, r.sentimentBiasIndex, r.signal, r.reason,
+      sellMap["폭등"]?.posts ?? 0, sellMap["급등"]?.posts ?? 0, sellMap["급상승"]?.posts ?? 0,
+      buyMap["폭락"]?.posts ?? 0, buyMap["급락"]?.posts ?? 0, buyMap["급하락"]?.posts ?? 0,
+      sellMap["폭등"]?.comments ?? 0, sellMap["급등"]?.comments ?? 0, sellMap["급상승"]?.comments ?? 0,
+      buyMap["폭락"]?.comments ?? 0, buyMap["급락"]?.comments ?? 0, buyMap["급하락"]?.comments ?? 0,
+      JSON.stringify(r.generalStats),
+    ],
+  );
+  console.log(`[AAGAG] DB 저장 완료: ${r.date} ${r.time}`);
+}
+
+export interface AagagDailyRow {
+  date: string;
+  time: string;
+  sii: number;
+  sbi: number;
+  signal: string;
+  sell_폭등: number; sell_급등: number; sell_급상승: number;
+  buy_폭락: number; buy_급락: number; buy_급하락: number;
+  sell_폭등_comments: number; sell_급등_comments: number; sell_급상승_comments: number;
+  buy_폭락_comments: number; buy_급락_comments: number; buy_급하락_comments: number;
+}
+
+export function getAagagHistory(days = 60): AagagDailyRow[] {
+  const db = getDb();
+  const rows = db.query(
+    `SELECT * FROM aagag_daily ORDER BY date DESC, time DESC LIMIT ?`,
+  ).all(days * 2) as AagagDailyRow[];
+  return rows.reverse();
+}
+
+// ── Chart Generation (Bar + Line Combo) ───────────────────────────────────────
+
+const CHART_W = 1000, CHART_H = 560;
+const CPAD = { l: 60, r: 60, t: 48, b: 60 };
+
+function buildAagagChartHtml(rows: AagagDailyRow[]): string {
+  return `<!DOCTYPE html><html><head><style>
+body { margin:0; background:#131722; }
+canvas { display:block; }
+</style></head><body>
+<canvas id="c" width="${CHART_W}" height="${CHART_H}"></canvas>
+<script>
+(function() {
+const data = ${JSON.stringify(rows)};
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+const W = ${CHART_W}, H = ${CHART_H};
+const PAD = {l:${CPAD.l}, r:${CPAD.r}, t:${CPAD.t}, b:${CPAD.b}};
+const CW = W - PAD.l - PAD.r;
+const CH = H - PAD.t - PAD.b;
+const n = data.length;
+if (n === 0) return;
+
+// background
+ctx.fillStyle = '#131722';
+ctx.fillRect(0, 0, W, H);
+
+// ── SII range (bars, left Y axis) ──
+const siiVals = data.map(d => d.sii);
+const maxSii = Math.max(...siiVals, 20) * 1.15;
+
+// ── SBI range (line, right Y axis) ──
+const sbiMin = -1, sbiMax = 1;
+
+const colW = CW / n;
+const barW = Math.max(4, colW * 0.7);
+
+function xAt(i) { return PAD.l + (i + 0.5) * colW; }
+function yLeftAt(v) { return PAD.t + (1 - v / maxSii) * CH; }
+function yRightAt(v) { return PAD.t + (sbiMax - v) / (sbiMax - sbiMin) * CH; }
+
+// ── Grid ──
+ctx.setLineDash([]);
+for (let i = 0; i <= 5; i++) {
+  const y = PAD.t + i * CH / 5;
+  ctx.strokeStyle = '#252540';
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(PAD.l, y); ctx.lineTo(W - PAD.r, y); ctx.stroke();
+
+  // left Y labels (SII)
+  const siiVal = maxSii * (1 - i / 5);
+  ctx.fillStyle = '#778ca3';
+  ctx.font = '11px monospace';
+  ctx.textAlign = 'right';
+  ctx.fillText(siiVal.toFixed(0), PAD.l - 6, y + 4);
+
+  // right Y labels (SBI)
+  const sbiVal = sbiMax - i * (sbiMax - sbiMin) / 5;
+  ctx.textAlign = 'left';
+  ctx.fillText(sbiVal.toFixed(1), W - PAD.r + 6, y + 4);
+}
+
+// ── SBI trigger lines ──
+[{v: 0.30, c: '#ef5350', label: 'SELL 0.30'}, {v: -0.30, c: '#26a69a', label: 'BUY -0.30'}].forEach(trig => {
+  const y = yRightAt(trig.v);
+  ctx.strokeStyle = trig.c;
+  ctx.lineWidth = 1;
+  ctx.setLineDash([6, 4]);
+  ctx.beginPath(); ctx.moveTo(PAD.l, y); ctx.lineTo(W - PAD.r, y); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = trig.c;
+  ctx.font = '10px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText(trig.label, W - PAD.r + 4, y - 4);
+});
+
+// ── SBI zero line ──
+const y0 = yRightAt(0);
+ctx.strokeStyle = '#555';
+ctx.lineWidth = 1;
+ctx.setLineDash([2, 2]);
+ctx.beginPath(); ctx.moveTo(PAD.l, y0); ctx.lineTo(W - PAD.r, y0); ctx.stroke();
+ctx.setLineDash([]);
+
+// ── X-axis date labels ──
+ctx.fillStyle = '#778ca3';
+ctx.font = '10px monospace';
+ctx.textAlign = 'center';
+const labelStep = Math.max(1, Math.floor(n / 12));
+for (let i = 0; i < n; i += labelStep) {
+  const d = data[i];
+  const label = d.date.slice(5) + ' ' + d.time;
+  ctx.save();
+  ctx.translate(xAt(i), H - PAD.b + 14);
+  ctx.rotate(-0.5);
+  ctx.fillText(label, 0, 0);
+  ctx.restore();
+}
+
+// ── Stacked bars (SII = total bar height, sell/buy keyword counts overlaid inside) ──
+data.forEach((d, i) => {
+  const x = xAt(i);
+  const barTop = yLeftAt(d.sii);
+  const barBottom = yLeftAt(0);
+  const barH = barBottom - barTop;
+
+  // Full SII bar (dark blue)
+  ctx.fillStyle = 'rgba(66,133,244,0.35)';
+  ctx.fillRect(x - barW/2, barTop, barW, barH);
+  ctx.strokeStyle = 'rgba(66,133,244,0.6)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x - barW/2, barTop, barW, barH);
+
+  // Sell keyword overlay (red, from top)
+  const sellTotal = (d.sell_폭등 || 0) + (d.sell_급등 || 0) + (d.sell_급상승 || 0);
+  // Buy keyword overlay (green, from bottom)
+  const buyTotal = (d.buy_폭락 || 0) + (d.buy_급락 || 0) + (d.buy_급하락 || 0);
+  const totalKw = sellTotal + buyTotal;
+
+  if (totalKw > 0 && barH > 4) {
+    // Sell portion (red, top of bar)
+    if (sellTotal > 0) {
+      const sellH = Math.max(2, (sellTotal / Math.max(totalKw, 1)) * barH * 0.8);
+      ctx.fillStyle = 'rgba(239,83,80,0.55)';
+      ctx.fillRect(x - barW/2 + 1, barTop + 1, barW - 2, Math.min(sellH, barH - 2));
+    }
+    // Buy portion (green, bottom of bar)
+    if (buyTotal > 0) {
+      const buyH = Math.max(2, (buyTotal / Math.max(totalKw, 1)) * barH * 0.8);
+      ctx.fillStyle = 'rgba(38,166,154,0.55)';
+      ctx.fillRect(x - barW/2 + 1, barBottom - Math.min(buyH, barH - 2) - 1, barW - 2, Math.min(buyH, barH - 2));
+    }
+
+    // Keyword count text inside bar (if bar is tall enough)
+    if (barH > 28 && colW > 16) {
+      ctx.font = 'bold 9px monospace';
+      ctx.textAlign = 'center';
+      if (sellTotal > 0) {
+        ctx.fillStyle = '#ff9999';
+        ctx.fillText(sellTotal.toString(), x, barTop + 14);
+      }
+      if (buyTotal > 0) {
+        ctx.fillStyle = '#80e5d8';
+        ctx.fillText(buyTotal.toString(), x, barBottom - 6);
+      }
+    }
+  }
+});
+
+// ── SBI line (right Y axis) ──
+ctx.strokeStyle = '#ffd700';
+ctx.lineWidth = 2.5;
+ctx.setLineDash([]);
+ctx.beginPath();
+data.forEach((d, i) => {
+  const x = xAt(i);
+  const y = yRightAt(d.sbi);
+  if (i === 0) ctx.moveTo(x, y);
+  else ctx.lineTo(x, y);
+});
+ctx.stroke();
+
+// ── SBI dots colored by signal ──
+data.forEach((d, i) => {
+  const x = xAt(i);
+  const y = yRightAt(d.sbi);
+  ctx.beginPath();
+  ctx.arc(x, y, 3, 0, Math.PI * 2);
+  ctx.fillStyle = d.signal === 'BUY' ? '#26a69a' : d.signal === 'SELL' ? '#ef5350' : '#ffd700';
+  ctx.fill();
+});
+
+// ── Title ──
+ctx.fillStyle = '#ffffff';
+ctx.font = 'bold 14px monospace';
+ctx.textAlign = 'left';
+ctx.fillText('AAGAG 커뮤니티 심리 지수 (최근 ' + n + '회)', PAD.l, 28);
+
+// ── Axis labels ──
+ctx.font = '11px monospace';
+ctx.fillStyle = '#4285f4';
+ctx.textAlign = 'right';
+ctx.fillText('SII ▲', PAD.l - 6, PAD.t - 8);
+ctx.fillStyle = '#ffd700';
+ctx.textAlign = 'left';
+ctx.fillText('▲ SBI', W - PAD.r + 6, PAD.t - 8);
+
+// ── Legend ──
+const legends = [
+  {label: 'SII (관심도)', color: 'rgba(66,133,244,0.6)', type: 'rect'},
+  {label: '매도 키워드', color: 'rgba(239,83,80,0.7)', type: 'rect'},
+  {label: '매수 키워드', color: 'rgba(38,166,154,0.7)', type: 'rect'},
+  {label: 'SBI (감성편향)', color: '#ffd700', type: 'line'},
+];
+let lx = PAD.l + 10;
+legends.forEach(l => {
+  if (l.type === 'rect') {
+    ctx.fillStyle = l.color;
+    ctx.fillRect(lx, 36, 12, 8);
+  } else {
+    ctx.strokeStyle = l.color;
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(lx, 40); ctx.lineTo(lx + 12, 40); ctx.stroke();
+  }
+  ctx.fillStyle = '#aaa';
+  ctx.font = '10px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText(l.label, lx + 16, 44);
+  lx += l.label.length * 7 + 36;
+});
+
+})();
+</script></body></html>`;
+}
+
+export async function generateAagagChart(days = 60): Promise<Buffer> {
+  const rows = getAagagHistory(days);
+  if (rows.length === 0) throw new Error("AAGAG 데이터가 없습니다. 첫 스캔 후 그래프가 생성됩니다.");
+
+  const html = buildAagagChartHtml(rows);
+  const browser = await chromium.launch({ args: ["--no-sandbox"] });
+  try {
+    const page = await browser.newPage();
+    await page.setViewportSize({ width: CHART_W, height: CHART_H });
+    await page.setContent(html, { waitUntil: "networkidle" });
+    const shot = await page.screenshot({ type: "png" });
+    return Buffer.from(shot);
+  } finally {
+    await browser.close();
+  }
 }
