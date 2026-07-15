@@ -726,7 +726,7 @@ bot.command("aagag", async (ctx) => {
   const msg = await ctx.reply(`🧠 AAGAG 커뮤니티 심리 분석 중...\n${monitorStatus}`, { parse_mode: "HTML" });
   try {
     const result = await runAagagPipeline();
-    saveAagagResult(result);
+    await saveAagagResult(result);
     await ctx.api.editMessageText(ctx.chat.id, msg.message_id, formatAagagReport(result), { parse_mode: "HTML" });
     // 차트 전송
     try {

@@ -3,8 +3,7 @@
 // Playwright 기반 봇탐지 우회 크롤링 + SQLite 데이터 저장 + 차트 생성
 
 import { chromium } from "playwright";
-import { Database } from "bun:sqlite";
-import { join } from "path";
+import postgres from "postgres";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -398,7 +397,7 @@ async function schedulerTick(): Promise<void> {
 
   try {
     const result = await runAagagPipeline();
-    saveAagagResult(result);
+    await saveAagagResult(result);
     if (schedulerSendFn && schedulerChatId) {
       await schedulerSendFn(schedulerChatId, formatAagagReport(result));
       try {
@@ -452,59 +451,73 @@ export function isAagagMonitorRunning(): boolean {
   return schedulerTimer !== null;
 }
 
-// ── SQLite DB ─────────────────────────────────────────────────────────────────
+// ── PostgreSQL (n100) ─────────────────────────────────────────────────────────
 
-const DB_PATH = join(import.meta.dir, "../.lemonclaw/aagag.db");
-let _db: InstanceType<typeof Database> | null = null;
+const AAGAG_DB_URL = process.env.AAGAG_DB_URL || "postgres://pylon:415416@100.65.20.81:5432/pylon";
+const sql = postgres(AAGAG_DB_URL, { max: 3, idle_timeout: 30, connect_timeout: 10 });
 
-function getDb(): InstanceType<typeof Database> {
-  if (_db) return _db;
-  _db = new Database(DB_PATH, { create: true });
-  _db.run(`CREATE TABLE IF NOT EXISTS aagag_daily (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    date TEXT NOT NULL,
-    time TEXT NOT NULL,
-    sii REAL NOT NULL,
-    sbi REAL NOT NULL,
-    signal TEXT NOT NULL,
-    reason TEXT,
-    sell_폭등 INTEGER DEFAULT 0, sell_급등 INTEGER DEFAULT 0, sell_급상승 INTEGER DEFAULT 0,
-    buy_폭락 INTEGER DEFAULT 0, buy_급락 INTEGER DEFAULT 0, buy_급하락 INTEGER DEFAULT 0,
-    sell_폭등_comments INTEGER DEFAULT 0, sell_급등_comments INTEGER DEFAULT 0, sell_급상승_comments INTEGER DEFAULT 0,
-    buy_폭락_comments INTEGER DEFAULT 0, buy_급락_comments INTEGER DEFAULT 0, buy_급하락_comments INTEGER DEFAULT 0,
-    general_json TEXT,
-    created_at TEXT DEFAULT (datetime('now')),
-    UNIQUE(date, time)
-  )`);
-  return _db;
+let _tableReady = false;
+
+async function ensureTable(): Promise<void> {
+  if (_tableReady) return;
+  try {
+    await sql`CREATE TABLE IF NOT EXISTS aagag_daily (
+      id SERIAL PRIMARY KEY,
+      date TEXT NOT NULL,
+      time TEXT NOT NULL,
+      sii DOUBLE PRECISION NOT NULL,
+      sbi DOUBLE PRECISION NOT NULL,
+      signal TEXT NOT NULL,
+      reason TEXT,
+      sell_폭등 INTEGER DEFAULT 0, sell_급등 INTEGER DEFAULT 0, sell_급상승 INTEGER DEFAULT 0,
+      buy_폭락 INTEGER DEFAULT 0, buy_급락 INTEGER DEFAULT 0, buy_급하락 INTEGER DEFAULT 0,
+      sell_폭등_comments INTEGER DEFAULT 0, sell_급등_comments INTEGER DEFAULT 0, sell_급상승_comments INTEGER DEFAULT 0,
+      buy_폭락_comments INTEGER DEFAULT 0, buy_급락_comments INTEGER DEFAULT 0, buy_급하락_comments INTEGER DEFAULT 0,
+      general_json JSONB,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      UNIQUE(date, time)
+    )`;
+    _tableReady = true;
+  } catch (e: any) {
+    console.error(`[AAGAG] 테이블 생성 실패: ${e.message}`);
+  }
 }
 
-export function saveAagagResult(r: AagagResult): void {
-  const db = getDb();
-  const sellMap: Record<string, { posts: number; comments: number }> = {};
-  r.sellStats.forEach(s => { sellMap[s.keyword] = { posts: s.posts, comments: s.totalComments }; });
-  const buyMap: Record<string, { posts: number; comments: number }> = {};
-  r.buyStats.forEach(s => { buyMap[s.keyword] = { posts: s.posts, comments: s.totalComments }; });
+export async function saveAagagResult(r: AagagResult): Promise<void> {
+  try {
+    await ensureTable();
+    const sellMap: Record<string, { posts: number; comments: number }> = {};
+    r.sellStats.forEach(s => { sellMap[s.keyword] = { posts: s.posts, comments: s.totalComments }; });
+    const buyMap: Record<string, { posts: number; comments: number }> = {};
+    r.buyStats.forEach(s => { buyMap[s.keyword] = { posts: s.posts, comments: s.totalComments }; });
 
-  db.run(
-    `INSERT OR REPLACE INTO aagag_daily
-     (date, time, sii, sbi, signal, reason,
-      sell_폭등, sell_급등, sell_급상승,
-      buy_폭락, buy_급락, buy_급하락,
-      sell_폭등_comments, sell_급등_comments, sell_급상승_comments,
-      buy_폭락_comments, buy_급락_comments, buy_급하락_comments,
-      general_json)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      r.date, r.time, r.stockInterestIndex, r.sentimentBiasIndex, r.signal, r.reason,
-      sellMap["폭등"]?.posts ?? 0, sellMap["급등"]?.posts ?? 0, sellMap["급상승"]?.posts ?? 0,
-      buyMap["폭락"]?.posts ?? 0, buyMap["급락"]?.posts ?? 0, buyMap["급하락"]?.posts ?? 0,
-      sellMap["폭등"]?.comments ?? 0, sellMap["급등"]?.comments ?? 0, sellMap["급상승"]?.comments ?? 0,
-      buyMap["폭락"]?.comments ?? 0, buyMap["급락"]?.comments ?? 0, buyMap["급하락"]?.comments ?? 0,
-      JSON.stringify(r.generalStats),
-    ],
-  );
-  console.log(`[AAGAG] DB 저장 완료: ${r.date} ${r.time}`);
+    await sql`INSERT INTO aagag_daily
+      (date, time, sii, sbi, signal, reason,
+       sell_폭등, sell_급등, sell_급상승,
+       buy_폭락, buy_급락, buy_급하락,
+       sell_폭등_comments, sell_급등_comments, sell_급상승_comments,
+       buy_폭락_comments, buy_급락_comments, buy_급하락_comments,
+       general_json)
+      VALUES (
+        ${r.date}, ${r.time}, ${r.stockInterestIndex}, ${r.sentimentBiasIndex}, ${r.signal}, ${r.reason},
+        ${sellMap["폭등"]?.posts ?? 0}, ${sellMap["급등"]?.posts ?? 0}, ${sellMap["급상승"]?.posts ?? 0},
+        ${buyMap["폭락"]?.posts ?? 0}, ${buyMap["급락"]?.posts ?? 0}, ${buyMap["급하락"]?.posts ?? 0},
+        ${sellMap["폭등"]?.comments ?? 0}, ${sellMap["급등"]?.comments ?? 0}, ${sellMap["급상승"]?.comments ?? 0},
+        ${buyMap["폭락"]?.comments ?? 0}, ${buyMap["급락"]?.comments ?? 0}, ${buyMap["급하락"]?.comments ?? 0},
+        ${JSON.stringify(r.generalStats)}
+      )
+      ON CONFLICT (date, time) DO UPDATE SET
+        sii = EXCLUDED.sii, sbi = EXCLUDED.sbi, signal = EXCLUDED.signal, reason = EXCLUDED.reason,
+        sell_폭등 = EXCLUDED.sell_폭등, sell_급등 = EXCLUDED.sell_급등, sell_급상승 = EXCLUDED.sell_급상승,
+        buy_폭락 = EXCLUDED.buy_폭락, buy_급락 = EXCLUDED.buy_급락, buy_급하락 = EXCLUDED.buy_급하락,
+        sell_폭등_comments = EXCLUDED.sell_폭등_comments, sell_급등_comments = EXCLUDED.sell_급등_comments, sell_급상승_comments = EXCLUDED.sell_급상승_comments,
+        buy_폭락_comments = EXCLUDED.buy_폭락_comments, buy_급락_comments = EXCLUDED.buy_급락_comments, buy_급하락_comments = EXCLUDED.buy_급하락_comments,
+        general_json = EXCLUDED.general_json
+    `;
+    console.log(`[AAGAG] DB 저장 완료: ${r.date} ${r.time}`);
+  } catch (e: any) {
+    console.error(`[AAGAG] DB 저장 실패: ${e.message}`);
+  }
 }
 
 export interface AagagDailyRow {
@@ -519,12 +532,19 @@ export interface AagagDailyRow {
   buy_폭락_comments: number; buy_급락_comments: number; buy_급하락_comments: number;
 }
 
-export function getAagagHistory(days = 60): AagagDailyRow[] {
-  const db = getDb();
-  const rows = db.query(
-    `SELECT * FROM aagag_daily ORDER BY date DESC, time DESC LIMIT ?`,
-  ).all(days * 2) as AagagDailyRow[];
-  return rows.reverse();
+export async function getAagagHistory(days = 60): Promise<AagagDailyRow[]> {
+  try {
+    await ensureTable();
+    const rows = await sql`
+      SELECT * FROM aagag_daily
+      ORDER BY date DESC, time DESC
+      LIMIT ${days * 2}
+    `;
+    return (Array.from(rows) as AagagDailyRow[]).reverse();
+  } catch (e: any) {
+    console.error(`[AAGAG] DB 조회 실패: ${e.message}`);
+    return [];
+  }
 }
 
 // ── Chart Generation (Bar + Line Combo) ───────────────────────────────────────
@@ -743,7 +763,7 @@ legends.forEach(l => {
 }
 
 export async function generateAagagChart(days = 60): Promise<Buffer> {
-  const rows = getAagagHistory(days);
+  const rows = await getAagagHistory(days);
   if (rows.length === 0) throw new Error("AAGAG 데이터가 없습니다. 첫 스캔 후 그래프가 생성됩니다.");
 
   const html = buildAagagChartHtml(rows);
