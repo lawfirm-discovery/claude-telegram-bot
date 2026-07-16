@@ -208,9 +208,13 @@
 
 ### 빌드 & 실행
 ```bash
-# Spring 실행 (올바른 방법)
-sudo systemctl restart lemon-spring-api
-# 수동: cd /home/angrylawyer/lemon-api-server-spring && LEMON_FORK_JAVAC=true ./gradlew bootRun
+# Spring 반영 (올바른 방법): 직접 재시작 금지 — push 만 하면 됨
+#   rtx6000 auto-pull 이 blue-green(8080/8081) 무중단 배포로 자동 반영 (1분 내).
+#   ⛔ 'sudo systemctl restart lemon-spring-api[-green]' 직접 실행 금지 —
+#      활성 슬롯 다운·여러 워커 동시 재시작 시 전면 502 (2026-07-15 하루 5회 동시다운 사고).
+#      dangerous-cmd 훅이 비-rtx6000 봇에서 차단함.
+#   강제 재시작이 꼭 필요하면 rtx6000 봇(@rtx6000_claude_style_bot)에게 요청.
+# 로컬 컴파일 검증만: cd /home/angrylawyer/lemon-api-server-spring && LEMON_FORK_JAVAC=true ./gradlew --no-daemon compileJava
 
 # Frontend — pm2 dev-server 없음. nginx가 build/를 직접 서빙.
 # lemon-front-build (pm2)가 소스 변경 감지하여 자동 재빌드.
