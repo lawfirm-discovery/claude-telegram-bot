@@ -515,7 +515,7 @@ async function reseedSessionWithSummary(
     const note = summary
       ? "🔄 이전 대화 컨텍스트가 만료되어 핵심을 자동 요약해 이어갑니다..."
       : "🔄 이전 대화 컨텍스트가 만료되어 새 세션으로 시작합니다 (요약 실패).";
-    try { await onProgress(note); } catch {}
+    try { await onProgress({ type: "text_chunk", text: note, turnNumber: 0 }); } catch {}
   }
 }
 

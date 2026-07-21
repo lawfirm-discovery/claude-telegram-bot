@@ -101,7 +101,7 @@ const PATTERNS: Pattern[] = [
   {
     name: "lemon-gradle-build",
     re: /\.\/gradlew\s+(build|bootJar|jar)\b/,
-    reason: "Spring 절대 규칙: bootJar/build 금지. './gradlew bootRun' 사용. 또는 'sudo systemctl restart lemon-spring-api'.",
+    reason: "Spring 절대 규칙: bootJar/build 금지. 로컬 검증은 './gradlew compileJava'. 코드 반영은 push → rtx6000 auto-pull 이 blue-green 무중단 배포로 처리 (직접 systemctl restart 금지).",
   },
   {
     name: "lemon-ddl-update",
@@ -135,6 +135,17 @@ const PATTERNS: Pattern[] = [
     re: /\bflutter\s+build\s+web\b/,
     reason: "Flutter 절대 규칙: 'flutter build web' 은 rtx6000 만 실행. 다른 봇은 코드 push 만, 빌드는 rtx6000 의 auto-pull 이 처리.",
     // 동적 검사 — BOT_NAME 이 rtx6000 이면 false positive 아님
+    skipIfBot: ["rtx6000", "lead", "rtx6000-pylon"],
+  },
+  {
+    // Spring 슬롯 직접 restart/stop 차단 (rtx6000 외). blue-green(8080/8081) 구조에서
+    // 워커가 활성 슬롯을 직접 restart 하거나, 여러 워커가 동시에 양 슬롯을 건드리면
+    // "한 슬롯은 항상 생존" 불변식이 깨져 전면 502 (2026-07-15 하루 5회 동시다운 사고).
+    // 코드 반영은 rtx6000 auto-pull 이 inactive 슬롯 재시작→swap 으로 무중단 처리한다.
+    // 재시작이 꼭 필요하면 rtx6000 봇(@rtx6000_claude_style_bot)에게 요청.
+    name: "lemon-spring-direct-restart-non-rtx6000",
+    re: /systemctl\s+(restart|stop)\s+lemon-spring-api(-green)?\b/,
+    reason: "Spring 절대 규칙: 슬롯(lemon-spring-api / -green) 직접 restart/stop 금지. blue-green 무중단 배포는 rtx6000 auto-pull 이 자동 처리하며, 워커가 직접 재시작하면 활성 슬롯 다운·동시다운(502)을 유발한다. 코드는 push 만 하면 1분 내 반영. 강제 재시작이 필요하면 rtx6000 봇에게 요청.",
     skipIfBot: ["rtx6000", "lead", "rtx6000-pylon"],
   },
 ];
