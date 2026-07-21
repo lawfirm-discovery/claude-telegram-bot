@@ -14,6 +14,7 @@
 })();
 
 import { bot } from "./src/bot";
+import { InputFile } from "grammy";
 import { askClaude, killActiveProcesses } from "./src/claude-engine";
 import { startHeartbeat, startCron, fireHook, stopLemonClaw, appendMemoryLog, startSharedMemorySync } from "./src/lemonclaw";
 import { markdownToTelegramHtml, splitMessage } from "./src/format";
@@ -171,6 +172,20 @@ console.log(
 );
 
 // Telegram send helper for LemonClaw autonomous messages
+async function sendTelegramPhoto(chatId: string, image: Buffer, caption: string): Promise<void> {
+  const { markdownToTelegramHtml } = await import("./src/format");
+  const html = markdownToTelegramHtml(caption);
+  try {
+    await bot.api.sendPhoto(parseInt(chatId), new InputFile(image, "chart.png"), {
+      caption: html,
+      parse_mode: "HTML",
+    });
+  } catch (e: any) {
+    console.error(`[sendTelegramPhoto] failed: ${e.message}`);
+    await sendTelegram(chatId, caption);
+  }
+}
+
 async function sendTelegram(chatId: string, text: string): Promise<void> {
   const chunks = splitMessage(text);
   for (const chunk of chunks) {
@@ -221,7 +236,7 @@ async function startServices(): Promise<void> {
     (process.env.ALLOWED_USERS ? process.env.ALLOWED_USERS.split(",")[0]?.trim() : "") ||
     "";
   if (alertChatId) {
-    startStockMonitor(alertChatId, sendTelegram);
+    startStockMonitor(alertChatId, sendTelegram, sendTelegramPhoto);
     startOptionMonitor(alertChatId, sendTelegram);
     startOptionsMonitor(alertChatId, sendTelegram);
   } else {

@@ -42,7 +42,7 @@ async function getTossToken(): Promise<string> {
   return tossToken.value;
 }
 
-async function getKisToken(): Promise<string> {
+export async function getKisToken(): Promise<string> {
   const appKey = process.env.KIS_APP_KEY;
   const appSecret = process.env.KIS_APP_SECRET;
   if (!appKey || !appSecret) throw new Error("KIS_APP_KEY / KIS_APP_SECRET 미설정");
