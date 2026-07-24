@@ -45,6 +45,9 @@ import {
 } from "./youtube";
 import { fetchMarketFundFlow, formatMarketFundReport } from "./freesis";
 import { runAagagPipeline, formatAagagReport, isAagagMonitorRunning, saveAagagResult, generateAagagChart } from "./aagag-signal";
+import { detectBottomSignals, formatBottomAlert } from "./bottom-signal";
+import { generateBBChart } from "./chart";
+import { fetchKisCandles } from "./stock-support";
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!BOT_TOKEN) {
@@ -739,6 +742,69 @@ bot.command("aagag", async (ctx) => {
     }
   } catch (e: any) {
     await ctx.api.editMessageText(ctx.chat.id, msg.message_id, `❌ AAGAG 분석 실패: ${e.message}`);
+  }
+});
+
+// ── 기관형 바닥 저점 스캔 ───────────────────────────────────────────────────
+
+bot.command("bottom", async (ctx) => {
+  const krStocks = LEADING_STOCKS.filter(s => s.market === "KR");
+  const msg = await ctx.reply(`📊 바닥 저점 스캔 중... (KR 주도주 ${krStocks.length}종목)`, { parse_mode: "HTML" });
+  try {
+    const now = new Date(Date.now() + 9 * 3600_000);
+    const todayStr = now.toISOString().slice(0, 10);
+    const weekAgo = new Date(now.getTime() - 7 * 86400_000).toISOString().slice(0, 10);
+
+    const toCandles = (kis: { date: string; open: number; high: number; low: number; close: number; volume: number }[]) =>
+      kis.map(c => ({
+        timestamp: `${c.date.slice(0, 4)}-${c.date.slice(4, 6)}-${c.date.slice(6, 8)}`,
+        openPrice: c.open,
+        highPrice: c.high,
+        lowPrice: c.low,
+        closePrice: c.close,
+        volume: c.volume,
+      }));
+
+    const allSignals: { signal: ReturnType<typeof detectBottomSignals>[number]; kisCandles: Awaited<ReturnType<typeof fetchKisCandles>> }[] = [];
+
+    for (const stock of krStocks) {
+      const kisCandles = await fetchKisCandles(stock.symbol, 200);
+      const signals = detectBottomSignals(stock.symbol, stock.name, "KR", toCandles(kisCandles));
+      const recent = signals.filter(s => s.date >= weekAgo && s.date <= todayStr);
+      for (const signal of recent) allSignals.push({ signal, kisCandles });
+      await new Promise(r => setTimeout(r, 350));
+    }
+
+    if (allSignals.length === 0) {
+      await ctx.api.editMessageText(
+        ctx.chat.id, msg.message_id,
+        `📊 <b>바닥 저점 스캔 완료</b>\n\n최근 7일 내 신호 없음 (${todayStr} 기준)\n스캔: ${krStocks.length}종목`,
+        { parse_mode: "HTML" },
+      );
+      return;
+    }
+
+    await ctx.api.editMessageText(
+      ctx.chat.id, msg.message_id,
+      `🏛️ <b>바닥 저점 스캔 완료</b> — ${allSignals.length}건 신호 발견\n최근 7일 (${weekAgo} ~ ${todayStr})`,
+      { parse_mode: "HTML" },
+    );
+
+    for (const { signal, kisCandles } of allSignals) {
+      await ctx.reply(formatBottomAlert(signal), { parse_mode: "HTML" });
+      try {
+        const chartBuf = await generateBBChart(
+          toCandles(kisCandles),
+          `${signal.name} (${signal.symbol}) — BB 스퀴즈`,
+          80,
+        );
+        await ctx.replyWithPhoto(new InputFile(chartBuf, `bb_${signal.symbol}.png`));
+      } catch (chartErr: any) {
+        console.warn(`[BOTTOM] 차트 생성 실패 ${signal.symbol}: ${chartErr.message}`);
+      }
+    }
+  } catch (e: any) {
+    await ctx.api.editMessageText(ctx.chat.id, msg.message_id, `❌ 스캔 실패: ${e.message}`);
   }
 });
 
