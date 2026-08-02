@@ -20,7 +20,7 @@ import { handleDelegateApprovalCallback } from "./worker-api";
 import { mkdtemp, writeFile, unlink, readFile } from "fs/promises";
 import { join } from "path";
 import { tmpdir } from "os";
-import { getStockReport } from "./stock";
+import { getStockReport, getInvestorTrend } from "./stock";
 import {
   loadWatchlist, addToWatchlist, removeFromWatchlist,
   isMarketHours, CFG, isMonitorRunning, isSellMonitorRunning, getSellMonitorStatus,
@@ -48,6 +48,14 @@ import { runAagagPipeline, formatAagagReport, isAagagMonitorRunning, saveAagagRe
 import { detectBottomSignals, formatBottomAlert } from "./bottom-signal";
 import { generateBBChart } from "./chart";
 import { fetchKisCandles } from "./stock-support";
+import {
+  detectSupplyDivergence,
+  detectCorrelatedCrash,
+  detectForcedLiquidation,
+  evaluateDeleverageAlert,
+  formatDeleverageAlert,
+  type DeleverageSignal,
+} from "./deleverage-signal";
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!BOT_TOKEN) {
@@ -803,6 +811,74 @@ bot.command("bottom", async (ctx) => {
         console.warn(`[BOTTOM] 차트 생성 실패 ${signal.symbol}: ${chartErr.message}`);
       }
     }
+  } catch (e: any) {
+    await ctx.api.editMessageText(ctx.chat.id, msg.message_id, `❌ 스캔 실패: ${e.message}`);
+  }
+});
+
+// ── 기관 청산 조기경보 (디레버리징 스캔) ───────────────────────────────────────
+
+bot.command("delev", async (ctx) => {
+  const krStocks = LEADING_STOCKS.filter(s => s.market === "KR");
+  const msg = await ctx.reply(`🔍 기관 청산 조기경보 스캔 중... (KR ${krStocks.length}종목)`, { parse_mode: "HTML" });
+  try {
+    const allSignals: DeleverageSignal[] = [];
+    const dailyReturns: { symbol: string; name: string; market: "KR" | "US"; dailyReturn: number }[] = [];
+
+    const toCandles = (kis: { date: string; open: number; high: number; low: number; close: number; volume: number }[]) =>
+      kis.map(c => ({
+        timestamp: `${c.date.slice(0, 4)}-${c.date.slice(4, 6)}-${c.date.slice(6, 8)}`,
+        openPrice: c.open,
+        highPrice: c.high,
+        lowPrice: c.low,
+        closePrice: c.close,
+        volume: c.volume,
+      }));
+
+    for (const stock of krStocks) {
+      try {
+        const kisCandles = await fetchKisCandles(stock.symbol, 30);
+        const candles = toCandles(kisCandles);
+        if (candles.length < 10) continue;
+
+        const sorted = [...candles].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+        const last = sorted[sorted.length - 1]!;
+        const prev = sorted[sorted.length - 2]!;
+        const dailyReturn = (last.closePrice - prev.closePrice) / prev.closePrice * 100;
+        dailyReturns.push({ symbol: stock.symbol, name: stock.name, market: stock.market, dailyReturn });
+
+        // 신호① 수급 괴리
+        let investorTrends;
+        try { investorTrends = await getInvestorTrend(stock.symbol); } catch {}
+        const supplySignal = detectSupplyDivergence(stock.symbol, stock.name, stock.market, candles, investorTrends);
+        if (supplySignal) allSignals.push(supplySignal);
+
+        // 신호③ 투매 시그니처
+        const forcedSignal = detectForcedLiquidation(stock.symbol, stock.name, stock.market, candles);
+        if (forcedSignal) allSignals.push(forcedSignal);
+
+        await new Promise(r => setTimeout(r, 350));
+      } catch (e: any) {
+        console.warn(`[DELEV] ${stock.symbol} 실패: ${e.message}`);
+      }
+    }
+
+    // 신호② 상관 급락
+    const crashSignals = detectCorrelatedCrash(dailyReturns);
+    allSignals.push(...crashSignals);
+
+    // 종합 판정
+    const alert = evaluateDeleverageAlert(allSignals);
+    if (!alert) {
+      await ctx.api.editMessageText(
+        ctx.chat.id, msg.message_id,
+        `✅ <b>기관 청산 조기경보</b> — 이상 없음\n\n스캔: KR ${krStocks.length}종목\n신호 발동: 0건`,
+        { parse_mode: "HTML" },
+      );
+      return;
+    }
+
+    await ctx.api.editMessageText(ctx.chat.id, msg.message_id, formatDeleverageAlert(alert), { parse_mode: "HTML" });
   } catch (e: any) {
     await ctx.api.editMessageText(ctx.chat.id, msg.message_id, `❌ 스캔 실패: ${e.message}`);
   }
