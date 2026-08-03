@@ -1,12 +1,11 @@
-// 내일 코스피 방향 예측 — 구현된 3개 엔진 종합
-// 1. AAGAG 커뮤니티 심리 (역발상)
-// 2. 옵션 시그널 (MaxPain / GEX / PCR / 외인flow)
-// 3. 기관 디레버리징 조기경보 (주요 종목)
-// 4. 바닥 신호 (Bottom Squeeze)
+// 내일 코스피 방향 예측
+// 1. 옵션 시그널 (MaxPain / GEX / PCR / 외인flow)
+// 2. 기관 디레버리징 조기경보 (주요 종목)
+// 3. 바닥 신호 (Bottom Squeeze)
+// 4. 코스피200 야간선물 (kred.dev)
 
 import { readFileSync, existsSync } from "fs";
 import { join } from "path";
-import postgres from "postgres";
 
 for (const line of readFileSync(".env", "utf-8").split("\n")) {
   const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*)\s*$/);
@@ -81,23 +80,6 @@ function lastDailyReturn(candles: Candle[]): number {
   const last = sorted[sorted.length - 1]!;
   const prev = sorted[sorted.length - 2]!;
   return (last.closePrice - prev.closePrice) / prev.closePrice * 100;
-}
-
-// ── AAGAG DB 최근 신호 ─────────────────────────────────────────────────────
-async function getAagagLatest(): Promise<{ date: string; time: string; sii: number; sbi: number; signal: string } | null> {
-  const DB_URL = process.env.AAGAG_DB_URL || "postgres://pylon:415416@100.65.20.81:5432/pylon";
-  const sql = postgres(DB_URL, { max: 1, idle_timeout: 10, connect_timeout: 8 });
-  try {
-    const rows = await sql<{ date: string; time: string; sii: number; sbi: number; signal: string }[]>`
-      SELECT date, time, sii, sbi, signal FROM aagag_daily ORDER BY date DESC, time DESC LIMIT 3
-    `;
-    await sql.end();
-    return rows[0] ?? null;
-  } catch (e: any) {
-    console.error(`[AAGAG] DB 조회 실패: ${e.message}`);
-    await sql.end().catch(() => {});
-    return null;
-  }
 }
 
 // ── 옵션 캐시 로드 ─────────────────────────────────────────────────────────
@@ -177,11 +159,8 @@ async function predictKospi() {
   console.log(`\n📊 코스피 방향 예측 — ${tomorrowStr} (내일)`);
   console.log("=".repeat(50));
 
-  // 1. AAGAG 심리 + 야간선물 병렬 조회
-  const [aagag, nightFutures] = await Promise.all([
-    getAagagLatest(),
-    fetchKredNightFutures(),
-  ]);
+  // 1. 야간선물 조회
+  const nightFutures = await fetchKredNightFutures();
   if (nightFutures) {
     console.log(`  야간선물 세션 ${nightFutures.sessionDate}: day_close=${nightFutures.dayClose} → ${nightFutures.lastClose} (${nightFutures.changePct > 0 ? "+" : ""}${nightFutures.changePct.toFixed(2)}%)`);
   } else {
@@ -262,21 +241,7 @@ async function predictKospi() {
     ? stockReturns.reduce((s, r) => s + r.dailyReturn, 0) / stockReturns.length
     : 0;
 
-  // [A] AAGAG 심리 (역발상)
-  if (aagag) {
-    const sbi = aagag.sbi;
-    // SBI > 0 = BUY keywords(폭락/급락) 우세 = 공포 = 역발상 매수
-    // SBI < 0 = SELL keywords(급등/폭등) 우세 = 낙관 = 역발상 매도
-    if (aagag.signal === "BUY") {
-      scores.push({ factor: "AAGAG 심리 (역발상)", score: +1, detail: `공포 우세 BUY 신호 | SII=${aagag.sii} SBI=${aagag.sbi}` });
-    } else if (aagag.signal === "SELL") {
-      scores.push({ factor: "AAGAG 심리 (역발상)", score: -1, detail: `낙관 과열 SELL 신호 | SII=${aagag.sii} SBI=${aagag.sbi}` });
-    } else {
-      scores.push({ factor: "AAGAG 심리 (역발상)", score: 0, detail: `HOLD — 중립 | SII=${aagag.sii}` });
-    }
-  }
-
-  // [B] 옵션 시그널
+  // [A] 옵션 시그널
   if (opts) {
     // 오늘 날짜 기준으로 만기까지 남은 거래일 동적 계산
     const expiryMs = new Date(opts.weeklyExpiry).getTime();
@@ -452,7 +417,7 @@ async function predictKospi() {
   console.log("\n" + "=".repeat(50));
   console.log("⚠️ 면책: 이 예측은 구현된 시그널 엔진 출력이며 투자 조언이 아닙니다.");
 
-  return { verdict, totalScore, scores, aagag, opts, alert, bottomSignals, stockReturns, nightFutures };
+  return { verdict, totalScore, scores, opts, alert, bottomSignals, stockReturns, nightFutures };
 }
 
 await predictKospi();
