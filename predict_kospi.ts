@@ -107,6 +107,62 @@ function loadOptionsSignal(): any {
   try { return JSON.parse(readFileSync(path, "utf-8")); } catch { return null; }
 }
 
+// ── kred.dev 코스피200 야간선물 ─────────────────────────────────────────────
+interface NightFuturesData {
+  sessionDate: string;
+  dayClose: number;
+  lastClose: number;
+  firstOpen: number;
+  changePct: number;
+  barCount: number;
+}
+
+async function fetchKredNightFutures(): Promise<NightFuturesData | null> {
+  try {
+    const headers = {
+      "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+      "Referer": "https://kred.dev/ko/kospi-200-night-futures",
+    };
+    const signal = AbortSignal.timeout(10000);
+
+    const [statusRes, barsRes] = await Promise.all([
+      fetch("https://kred.dev/futures-api/ohlc/status", { headers, signal }),
+      fetch("https://kred.dev/futures-api/ohlc/bars", { headers, signal }),
+    ]);
+
+    if (!statusRes.ok || !barsRes.ok) return null;
+
+    const status = await statusRes.json() as {
+      session_date: string; day_close: number; bar_count: number;
+    };
+    const barsData = await barsRes.json() as {
+      bars: { time: number; open: number; high: number; low: number; close: number; volume: number }[];
+    };
+
+    const bars = barsData.bars;
+    if (!bars || bars.length < 30) return null;
+
+    const sorted = [...bars].sort((a, b) => a.time - b.time);
+    const firstBar = sorted[0]!;
+    const lastBar = sorted[sorted.length - 1]!;
+    const changePct = status.day_close > 0
+      ? (lastBar.close - status.day_close) / status.day_close * 100
+      : 0;
+
+    return {
+      sessionDate: status.session_date,
+      dayClose: status.day_close,
+      lastClose: lastBar.close,
+      firstOpen: firstBar.open,
+      changePct,
+      barCount: bars.length,
+    };
+  } catch (e: any) {
+    console.error(`[야간선물] kred.dev 조회 실패: ${e.message}`);
+    return null;
+  }
+}
+
 // ── 메인 예측 로직 ─────────────────────────────────────────────────────────
 async function predictKospi() {
   const now = new Date(Date.now() + 9 * 3600_000);
@@ -121,8 +177,16 @@ async function predictKospi() {
   console.log(`\n📊 코스피 방향 예측 — ${tomorrowStr} (내일)`);
   console.log("=".repeat(50));
 
-  // 1. AAGAG 심리
-  const aagag = await getAagagLatest();
+  // 1. AAGAG 심리 + 야간선물 병렬 조회
+  const [aagag, nightFutures] = await Promise.all([
+    getAagagLatest(),
+    fetchKredNightFutures(),
+  ]);
+  if (nightFutures) {
+    console.log(`  야간선물 세션 ${nightFutures.sessionDate}: day_close=${nightFutures.dayClose} → ${nightFutures.lastClose} (${nightFutures.changePct > 0 ? "+" : ""}${nightFutures.changePct.toFixed(2)}%)`);
+  } else {
+    console.log("  야간선물: 데이터 없음 (세션 오프라인 또는 조회 실패)");
+  }
 
   // 2. 옵션 시그널
   const opts = loadOptionsSignal();
@@ -331,6 +395,25 @@ async function predictKospi() {
     scores.push({ factor: "바닥 신호 (Bottom Squeeze)", score: +0.3, detail: `${bottomSignals[0]!.name} 바닥 신호` });
   }
 
+  // [F] 코스피200 야간선물 (kred.dev)
+  if (nightFutures) {
+    const { changePct, lastClose, dayClose, barCount, sessionDate } = nightFutures;
+    let score: number;
+    if (changePct >= 1.5)       score = +1.5;
+    else if (changePct >= 0.7)  score = +1.0;
+    else if (changePct >= 0.3)  score = +0.5;
+    else if (changePct <= -1.5) score = -1.5;
+    else if (changePct <= -0.7) score = -1.0;
+    else if (changePct <= -0.3) score = -0.5;
+    else                        score = 0;
+
+    scores.push({
+      factor: "코스피200 야간선물 (kred.dev)",
+      score,
+      detail: `세션 ${sessionDate} | 전일종가 ${dayClose} → 야간종가 ${lastClose} (${changePct > 0 ? "+" : ""}${changePct.toFixed(2)}%) | ${barCount}봉`,
+    });
+  }
+
   // ── 최종 판정 ──────────────────────────────────────────────────────────────
   const totalScore = scores.reduce((s, f) => s + f.score, 0);
   const maxScore = scores.length;
@@ -369,7 +452,7 @@ async function predictKospi() {
   console.log("\n" + "=".repeat(50));
   console.log("⚠️ 면책: 이 예측은 구현된 시그널 엔진 출력이며 투자 조언이 아닙니다.");
 
-  return { verdict, totalScore, scores, aagag, opts, alert, bottomSignals, stockReturns };
+  return { verdict, totalScore, scores, aagag, opts, alert, bottomSignals, stockReturns, nightFutures };
 }
 
 await predictKospi();
