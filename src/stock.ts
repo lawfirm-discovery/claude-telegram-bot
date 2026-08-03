@@ -238,6 +238,55 @@ export async function getInvestorTrend(symbol: string): Promise<InvestorTrend[]>
   return [estimate, ...filtered];
 }
 
+// ── KIS 선물 투자자별 포지션 (FHPST01060000) ────────────────────────────────
+
+export type FuturesInvestorPosition = {
+  date: string;
+  foreignNet: number;   // 외인 선물 순포지션 (계약)
+  instNet: number;      // 기관 선물 순포지션
+  individualNet: number;
+};
+
+export async function getFuturesInvestorPosition(): Promise<FuturesInvestorPosition | null> {
+  const token = await getKisToken();
+  const appKey = process.env.KIS_APP_KEY!;
+  const appSecret = process.env.KIS_APP_SECRET!;
+
+  const url = new URL(`${KIS_BASE}/uapi/domestic-futureoption/v1/quotations/inquire-futures-investor`);
+  url.searchParams.set("FID_COND_MRKT_DIV_CODE", "F");
+  url.searchParams.set("FID_INPUT_ISCD", "101W09"); // KOSPI200 위클리 선물 근월물
+
+  const res = await fetch(url.toString(), {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      appkey: appKey,
+      appsecret: appSecret,
+      tr_id: "FHPST01060000",
+    },
+  });
+  if (!res.ok) return null;
+  const data = await res.json() as any;
+
+  const rows: any[] = data.output ?? [];
+  if (rows.length === 0) return null;
+
+  let foreignNet = 0, instNet = 0, individualNet = 0;
+  for (const r of rows) {
+    const nm = r.mbcr_name ?? r.invst_name ?? "";
+    const net = parseInt((r.ntby_qty ?? r.fut_ntby_qty ?? "0").replace(/,/g, ""), 10) || 0;
+    if (nm.includes("외국인") || nm.includes("외인")) foreignNet += net;
+    else if (nm.includes("기관") || nm.includes("금융투자")) instNet += net;
+    else if (nm.includes("개인")) individualNet += net;
+  }
+
+  return {
+    date: todayKST(),
+    foreignNet,
+    instNet,
+    individualNet,
+  };
+}
+
 // ── Technical Indicators ─────────────────────────────────────────────────────
 
 export type BBands = { upper: number; middle: number; lower: number };

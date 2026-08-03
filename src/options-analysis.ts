@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, existsSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { join } from "path";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -9,6 +9,8 @@ export type OptionRow = {
   putOI: number;
   callVolume: number;
   putVolume: number;
+  callClose?: number; // 콜 종가
+  putClose?: number;  // 풋 종가
 };
 
 export type InvestorOptionFlow = {
@@ -16,6 +18,12 @@ export type InvestorOptionFlow = {
   foreignPutNet: number;   // 외인 풋 순매수
   instCallNet: number;     // 기관 콜 순매수
   instPutNet: number;      // 기관 풋 순매수
+};
+
+export type OIChange = {
+  strike: number;
+  callOIDiff: number;
+  putOIDiff: number;
 };
 
 export type OptionsSignal = {
@@ -33,12 +41,20 @@ export type OptionsSignal = {
   direction: "bullish" | "bearish" | "neutral";
   details: string[];
   timestamp: string;
+  // 신규 필드
+  vkospi: number | null;
+  ivRank: number | null;
+  oiChanges: OIChange[];
+  skew: number | null;
+  foreignFutures: { foreignNet: number; instNet: number; individualNet: number } | null;
 };
 
 // ── Config ───────────────────────────────────────────────────────────────────
 
 const CACHE_DIR = join(import.meta.dir, "../.lemonclaw");
 const SIGNAL_CACHE_FILE = join(CACHE_DIR, "options_signal.json");
+const VKOSPI_HISTORY_FILE = join(CACHE_DIR, "vkospi_history.json");
+const OI_HISTORY_FILE = join(CACHE_DIR, "oi_history.json");
 const CONTRACT_MULTIPLIER = 250_000; // KOSPI200 옵션 1계약 = 250,000원
 
 // ── KRX Crawling ─────────────────────────────────────────────────────────────
@@ -71,8 +87,132 @@ async function fetchKospi200SpotFromNaver(): Promise<number> {
   if (!res.ok) throw new Error(`Naver KPI200 HTTP ${res.status}`);
   const html = await res.text();
   const match = html.match(/id="now_value"[^>]*>(?:<[^>]+>)*([0-9,.]+)/);
-  if (!match) throw new Error("Could not parse KOSPI200 spot price from Naver");
+  if (!match || !match[1]) throw new Error("Could not parse KOSPI200 spot price from Naver");
   return parseFloat(match[1].replace(/,/g, ""));
+}
+
+// ── VKOSPI (변동성지수) 크롤링 ────────────────────────────────────────────────
+
+async function fetchVkospi(): Promise<number | null> {
+  try {
+    const res = await fetch("https://finance.naver.com/sise/sise_index.naver?code=VKOSPI", {
+      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0.0.0 Safari/537.36" },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) return null;
+    const html = await res.text();
+    const m = html.match(/id="now_value"[^>]*>(?:<[^>]+>)*([0-9,.]+)/);
+    if (!m || !m[1]) return null;
+    return parseFloat(m[1].replace(/,/g, ""));
+  } catch {
+    return null;
+  }
+}
+
+// VKOSPI 히스토리 저장 + IV Rank 계산 (최근 252 거래일 대비 순위)
+function updateVkospiHistory(vkospi: number): number | null {
+  let history: { date: string; v: number }[] = [];
+  try {
+    if (existsSync(VKOSPI_HISTORY_FILE)) {
+      history = JSON.parse(readFileSync(VKOSPI_HISTORY_FILE, "utf-8"));
+    }
+  } catch {}
+
+  const today = todayKST();
+  // 오늘 값이 이미 있으면 업데이트
+  const idx = history.findIndex(h => h.date === today);
+  if (idx >= 0) history[idx]!.v = vkospi;
+  else history.push({ date: today, v: vkospi });
+
+  // 최근 260일(여유 포함)만 보관
+  history = history.sort((a, b) => a.date.localeCompare(b.date)).slice(-260);
+  try { writeFileSync(VKOSPI_HISTORY_FILE, JSON.stringify(history)); } catch {}
+
+  if (history.length < 20) return null; // 데이터 부족
+
+  const values = history.map(h => h.v);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  if (max === min) return 50;
+  return Math.round((vkospi - min) / (max - min) * 100);
+}
+
+// ── OI 변화량 감지 ────────────────────────────────────────────────────────────
+
+function calcOIChanges(chain: OptionRow[]): OIChange[] {
+  const today = todayKST();
+  let prev: { date: string; chain: OptionRow[] } | null = null;
+  try {
+    if (existsSync(OI_HISTORY_FILE)) {
+      prev = JSON.parse(readFileSync(OI_HISTORY_FILE, "utf-8"));
+    }
+  } catch {}
+
+  // 오늘 OI 저장 (다음 실행에서 비교용)
+  try { writeFileSync(OI_HISTORY_FILE, JSON.stringify({ date: today, chain })); } catch {}
+
+  if (!prev || prev.date === today) return []; // 전일 데이터 없음
+
+  const prevMap = new Map<number, OptionRow>();
+  for (const r of prev.chain) prevMap.set(r.strike, r);
+
+  const changes: OIChange[] = [];
+  for (const r of chain) {
+    const p = prevMap.get(r.strike);
+    if (!p) continue;
+    const callOIDiff = r.callOI - p.callOI;
+    const putOIDiff = r.putOI - p.putOI;
+    // 1000계약 이상 변화만 의미있는 것으로 기록
+    if (Math.abs(callOIDiff) >= 1000 || Math.abs(putOIDiff) >= 1000) {
+      changes.push({ strike: r.strike, callOIDiff, putOIDiff });
+    }
+  }
+  return changes.sort((a, b) => Math.abs(b.putOIDiff) - Math.abs(a.putOIDiff)).slice(0, 5);
+}
+
+// ── 스큐 계산 (OTM 풋 IV vs OTM 콜 IV) ──────────────────────────────────────
+// KRX 데이터에 IV가 없어서, 옵션 프리미엄 + BSM 역산으로 근사
+
+function blackScholesIV(
+  optionPrice: number,
+  spot: number,
+  strike: number,
+  T: number, // 연 단위 잔존기간
+  isCall: boolean,
+): number | null {
+  if (optionPrice <= 0 || T <= 0) return null;
+  // Newton-Raphson IV 역산 (최대 100회)
+  const r = 0; // 이자율 0 근사
+  let sigma = 0.2;
+  for (let i = 0; i < 100; i++) {
+    const sqrtT = Math.sqrt(T);
+    const d1 = (Math.log(spot / strike) + (r + sigma * sigma / 2) * T) / (sigma * sqrtT);
+    const d2 = d1 - sigma * sqrtT;
+    const nd1 = normCDF(isCall ? d1 : -d1);
+    const nd2 = normCDF(isCall ? d2 : -d2);
+    const price = isCall
+      ? spot * nd1 - strike * Math.exp(-r * T) * nd2
+      : strike * Math.exp(-r * T) * normCDF(-d2) - spot * normCDF(-d1);
+    const vega = spot * sqrtT * normPDF(d1);
+    if (vega < 1e-10) break;
+    const diff = price - optionPrice;
+    sigma -= diff / vega;
+    if (Math.abs(diff) < 0.001) return sigma > 0 ? sigma : null;
+  }
+  return sigma > 0 && sigma < 5 ? sigma : null;
+}
+
+function normCDF(x: number): number {
+  const a1=0.254829592,a2=-0.284496736,a3=1.421413741,a4=-1.453152027,a5=1.061405429,p=0.3275911;
+  const sign = x < 0 ? -1 : 1;
+  x = Math.abs(x) / Math.SQRT2;
+  const t = 1 / (1 + p * x);
+  const y = 1 - ((((a5*t+a4)*t+a3)*t+a2)*t+a1)*t*Math.exp(-x*x);
+  return 0.5 * (1 + sign * y);
+}
+
+function normPDF(x: number): number {
+  return Math.exp(-x * x / 2) / Math.sqrt(2 * Math.PI);
 }
 
 export async function fetchKrxOptionChain(date?: string): Promise<{ chain: OptionRow[]; spotPrice: number }> {
@@ -122,6 +262,8 @@ export async function fetchKrxOptionChain(date?: string): Promise<{ chain: Optio
       const putOI = parseInt((row.PUT_OPN_INT_QTY || row.PUT_SETL_OPN_INT || "0").replace(/,/g, ""), 10) || 0;
       const callVol = parseInt((row.CALL_TRDVOL || row.CALL_ACC_TRDVOL || "0").replace(/,/g, ""), 10) || 0;
       const putVol = parseInt((row.PUT_TRDVOL || row.PUT_ACC_TRDVOL || "0").replace(/,/g, ""), 10) || 0;
+      const callClose = parseFloat((row.CALL_CLSPRC || row.CALL_TDD_CLSPRC || "0").replace(/,/g, "")) || undefined;
+      const putClose = parseFloat((row.PUT_CLSPRC || row.PUT_TDD_CLSPRC || "0").replace(/,/g, "")) || undefined;
 
       const existing = chainMap.get(strike);
       if (existing) {
@@ -129,8 +271,10 @@ export async function fetchKrxOptionChain(date?: string): Promise<{ chain: Optio
         existing.putOI += putOI;
         existing.callVolume += callVol;
         existing.putVolume += putVol;
+        if (callClose) existing.callClose = callClose;
+        if (putClose) existing.putClose = putClose;
       } else {
-        chainMap.set(strike, { strike, callOI, putOI, callVolume: callVol, putVolume: putVol });
+        chainMap.set(strike, { strike, callOI, putOI, callVolume: callVol, putVolume: putVol, callClose, putClose });
       }
     }
 
@@ -447,9 +591,14 @@ function getNextWeeklyExpiry(): { date: string; days: number } {
 // ── 종합 신호 생성 ──────────────────────────────────────────────────────────
 
 export async function buildOptionsSignal(): Promise<OptionsSignal> {
-  const [chainResult, investorFlow] = await Promise.all([
+  // 선물 투자자 포지션은 동적 import로 순환 의존성 방지
+  const { getFuturesInvestorPosition } = await import("./stock.js");
+
+  const [chainResult, investorFlow, vkospiRaw, futuresPos] = await Promise.all([
     fetchKrxOptionChain(),
     fetchKrxInvestorOptions(),
+    fetchVkospi(),
+    getFuturesInvestorPosition().catch(() => null),
   ]);
 
   const { chain, spotPrice } = chainResult;
@@ -457,6 +606,26 @@ export async function buildOptionsSignal(): Promise<OptionsSignal> {
   const { gex, gammaFlip } = calcGEX(chain, spotPrice);
   const pcr = calcPCR(chain);
   const expiry = getNextWeeklyExpiry();
+
+  // IV Rank
+  const vkospi = vkospiRaw;
+  const ivRank = vkospi !== null ? updateVkospiHistory(vkospi) : null;
+
+  // OI 변화량
+  const oiChanges = calcOIChanges(chain);
+
+  // 스큐: ATM ±5% 범위의 OTM 풋/콜 IV 비교
+  let skew: number | null = null;
+  const T = Math.max(1, expiry.days) / 252;
+  const otmCalls = chain.filter(r => r.strike > spotPrice * 1.01 && r.strike <= spotPrice * 1.06 && r.callClose);
+  const otmPuts = chain.filter(r => r.strike < spotPrice * 0.99 && r.strike >= spotPrice * 0.94 && r.putClose);
+  const callIVs = otmCalls.map(r => blackScholesIV(r.callClose!, spotPrice, r.strike, T, true)).filter((v): v is number => v !== null);
+  const putIVs = otmPuts.map(r => blackScholesIV(r.putClose!, spotPrice, r.strike, T, false)).filter((v): v is number => v !== null);
+  if (callIVs.length > 0 && putIVs.length > 0) {
+    const avgCallIV = callIVs.reduce((s, v) => s + v, 0) / callIVs.length;
+    const avgPutIV = putIVs.reduce((s, v) => s + v, 0) / putIVs.length;
+    skew = Math.round((avgPutIV - avgCallIV) * 100 * 10) / 10; // % 단위, 소수점 1자리
+  }
 
   const maxPainDiffPct = spotPrice > 0 ? (spotPrice - maxPain) / maxPain * 100 : 0;
 
@@ -520,6 +689,71 @@ export async function buildOptionsSignal(): Promise<OptionsSignal> {
     }
   }
 
+  // 6. 외인 선물 순포지션 (가장 빠른 선행 지표)
+  if (futuresPos) {
+    if (futuresPos.foreignNet > 2000) {
+      score += 2;
+      details.push(`외인선물↑: 선물 순매수 +${futuresPos.foreignNet.toLocaleString()}계약 → 강세 포지션`);
+    } else if (futuresPos.foreignNet > 500) {
+      score += 1;
+      details.push(`외인선물+: 선물 순매수 +${futuresPos.foreignNet.toLocaleString()}계약`);
+    } else if (futuresPos.foreignNet < -2000) {
+      score -= 2;
+      details.push(`외인선물↓: 선물 순매도 ${futuresPos.foreignNet.toLocaleString()}계약 → 약세 포지션`);
+    } else if (futuresPos.foreignNet < -500) {
+      score -= 1;
+      details.push(`외인선물-: 선물 순매도 ${futuresPos.foreignNet.toLocaleString()}계약`);
+    } else {
+      details.push(`외인선물≈: 선물 순포지션 ${futuresPos.foreignNet > 0 ? "+" : ""}${futuresPos.foreignNet}계약 (중립)`);
+    }
+  }
+
+  // 7. IV Rank — 변동성 수준
+  if (ivRank !== null && vkospi !== null) {
+    if (ivRank >= 80) {
+      // 극단적 공포 → 역발상 매수
+      score += 1;
+      details.push(`IVRank ${ivRank}: VKOSPI ${vkospi.toFixed(1)} — 극단 공포, 역발상 매수 신호`);
+    } else if (ivRank >= 60) {
+      details.push(`IVRank ${ivRank}: VKOSPI ${vkospi.toFixed(1)} — 높은 변동성 기대`);
+    } else if (ivRank <= 20) {
+      details.push(`IVRank ${ivRank}: VKOSPI ${vkospi.toFixed(1)} — 조용한 장, 방향성 약`);
+    } else {
+      details.push(`IVRank ${ivRank}: VKOSPI ${vkospi.toFixed(1)}`);
+    }
+  }
+
+  // 8. OI 대량 변화 (기관 신규 베팅)
+  if (oiChanges.length > 0) {
+    const bigPutInflow = oiChanges.filter(c => c.putOIDiff > 2000);
+    const bigCallInflow = oiChanges.filter(c => c.callOIDiff > 2000);
+    if (bigPutInflow.length > 0) {
+      score -= 1;
+      const strikes = bigPutInflow.map(c => `${c.strike}p+${c.putOIDiff.toLocaleString()}`).join(", ");
+      details.push(`OI↑풋: ${strikes} → 하락 헤지 신규 유입`);
+    }
+    if (bigCallInflow.length > 0) {
+      score += 1;
+      const strikes = bigCallInflow.map(c => `${c.strike}c+${c.callOIDiff.toLocaleString()}`).join(", ");
+      details.push(`OI↑콜: ${strikes} → 상승 베팅 신규 유입`);
+    }
+  }
+
+  // 9. 스큐 (OTM 풋 IV - OTM 콜 IV)
+  if (skew !== null) {
+    if (skew > 5) {
+      score -= 1;
+      details.push(`Skew ${skew.toFixed(1)}%p: OTM풋 IV 크게 우위 → 실질 하락 헤지 수요`);
+    } else if (skew > 2) {
+      details.push(`Skew ${skew.toFixed(1)}%p: 풋 IV 소폭 우위 (정상 범위)`);
+    } else if (skew < -2) {
+      score += 1;
+      details.push(`Skew ${skew.toFixed(1)}%p: 콜 IV 우위 → 상승 기대 과잉`);
+    } else {
+      details.push(`Skew ${skew.toFixed(1)}%p: 균형`);
+    }
+  }
+
   // 방향 결정
   let direction: "bullish" | "bearish" | "neutral";
   if (score >= 3) direction = "bullish";
@@ -544,6 +778,11 @@ export async function buildOptionsSignal(): Promise<OptionsSignal> {
     direction,
     details,
     timestamp,
+    vkospi,
+    ivRank,
+    oiChanges,
+    skew,
+    foreignFutures: futuresPos,
   };
 
   // 캐시 저장
@@ -590,6 +829,28 @@ export function formatOptionsReport(s: OptionsSignal): string {
     `  풋 순매수: <b>${fmtNum(s.foreignFlow.foreignPutNet)}</b>계약`,
     `  기관 콜: ${fmtNum(s.foreignFlow.instCallNet)} | 풋: ${fmtNum(s.foreignFlow.instPutNet)}`,
   ];
+
+  // 신규 지표 블록
+  if (s.foreignFutures) {
+    const fn = s.foreignFutures.foreignNet;
+    lines.push(``, `<b>📈 외인 선물 포지션</b>`);
+    lines.push(`  순포지션: <b>${fn > 0 ? "+" : ""}${fn.toLocaleString()}</b>계약  기관: ${s.foreignFutures.instNet > 0 ? "+" : ""}${s.foreignFutures.instNet.toLocaleString()}`);
+  }
+
+  lines.push(``, `<b>📊 변동성 / 스큐 / OI</b>`);
+  if (s.vkospi !== null) lines.push(`  VKOSPI: <b>${s.vkospi?.toFixed(1)}</b>  IVRank: <b>${s.ivRank ?? "?"}%ile</b>`);
+  if (s.skew !== null) lines.push(`  Skew (풋IV-콜IV): <b>${s.skew! > 0 ? "+" : ""}${s.skew?.toFixed(1)}%p</b>`);
+  if (s.oiChanges.length > 0) {
+    lines.push(`  OI 대량 변화 (전일 대비):`);
+    for (const c of s.oiChanges.slice(0, 3)) {
+      const parts: string[] = [];
+      if (Math.abs(c.callOIDiff) >= 1000) parts.push(`콜${c.callOIDiff > 0 ? "+" : ""}${c.callOIDiff.toLocaleString()}`);
+      if (Math.abs(c.putOIDiff) >= 1000) parts.push(`풋${c.putOIDiff > 0 ? "+" : ""}${c.putOIDiff.toLocaleString()}`);
+      lines.push(`    K${c.strike}: ${parts.join(" / ")}`);
+    }
+  } else {
+    lines.push(`  OI 변화: 전일 데이터 없음 (첫 실행 후 내일부터 표시)`);
+  }
 
   if (s.details.length > 0) {
     lines.push(``, `<b>🔍 분석</b>`);

@@ -248,12 +248,60 @@ async function predictKospi() {
         scores.push({ factor: "GEX (Gamma)", score: 0, detail: `GEX ${opts.gex.toFixed(1)}B 음수 → 방향 미결정, 증폭 대기 (중립)` });
       }
     }
-    // 외인 flow
+    // 외인 옵션 플로우
     const foreignBias = opts.foreignFlow.foreignCallNet - opts.foreignFlow.foreignPutNet;
     if (foreignBias > 50) {
       scores.push({ factor: "외인 옵션 플로우", score: +0.5, detail: `외인 콜 우위 +${foreignBias}계약 → 상승 베팅` });
     } else if (foreignBias < -50) {
       scores.push({ factor: "외인 옵션 플로우", score: -0.5, detail: `외인 풋 우위 ${foreignBias}계약 → 하락 헤지` });
+    }
+
+    // 외인 선물 포지션 (가장 빠른 선행 지표)
+    if (opts.foreignFutures) {
+      const fn = opts.foreignFutures.foreignNet;
+      if (fn > 2000) {
+        scores.push({ factor: "외인 선물 포지션", score: +1.0, detail: `선물 순매수 +${fn.toLocaleString()}계약 — 강세 포지션` });
+      } else if (fn > 500) {
+        scores.push({ factor: "외인 선물 포지션", score: +0.5, detail: `선물 순매수 +${fn.toLocaleString()}계약` });
+      } else if (fn < -2000) {
+        scores.push({ factor: "외인 선물 포지션", score: -1.0, detail: `선물 순매도 ${fn.toLocaleString()}계약 — 약세 포지션` });
+      } else if (fn < -500) {
+        scores.push({ factor: "외인 선물 포지션", score: -0.5, detail: `선물 순매도 ${fn.toLocaleString()}계약` });
+      } else {
+        scores.push({ factor: "외인 선물 포지션", score: 0, detail: `선물 순포지션 ${fn > 0 ? "+" : ""}${fn}계약 — 중립` });
+      }
+    }
+
+    // IV Rank
+    if (opts.ivRank !== null && opts.ivRank !== undefined) {
+      const ir = opts.ivRank;
+      if (ir >= 80) {
+        scores.push({ factor: "IV Rank (변동성 순위)", score: +0.5, detail: `IVRank ${ir} — 극단 공포, VKOSPI ${opts.vkospi?.toFixed(1) ?? "?"}` });
+      } else if (ir <= 20) {
+        scores.push({ factor: "IV Rank (변동성 순위)", score: -0.2, detail: `IVRank ${ir} — 저변동성, 방향성 약` });
+      }
+    }
+
+    // 스큐
+    if (opts.skew !== null && opts.skew !== undefined) {
+      const sk = opts.skew;
+      if (sk > 5) {
+        scores.push({ factor: "옵션 스큐", score: -0.5, detail: `스큐 +${sk}%p — OTM풋 IV 크게 우위, 실질 하락 헤지 수요` });
+      } else if (sk < -2) {
+        scores.push({ factor: "옵션 스큐", score: +0.3, detail: `스큐 ${sk}%p — 콜 IV 우위, 상승 기대` });
+      }
+    }
+
+    // OI 변화량 (대량 신규 베팅)
+    if (opts.oiChanges && opts.oiChanges.length > 0) {
+      const bigPuts = opts.oiChanges.filter((c: any) => c.putOIDiff > 2000);
+      const bigCalls = opts.oiChanges.filter((c: any) => c.callOIDiff > 2000);
+      if (bigPuts.length > 0) {
+        scores.push({ factor: "OI 변화 (풋)", score: -0.5, detail: `${bigPuts[0].strike}행사가 풋 +${bigPuts[0].putOIDiff.toLocaleString()}계약 신규 유입` });
+      }
+      if (bigCalls.length > 0) {
+        scores.push({ factor: "OI 변화 (콜)", score: +0.5, detail: `${bigCalls[0].strike}행사가 콜 +${bigCalls[0].callOIDiff.toLocaleString()}계약 신규 유입` });
+      }
     }
   }
 
