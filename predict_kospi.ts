@@ -420,4 +420,5 @@ async function predictKospi() {
   return { verdict, totalScore, scores, opts, alert, bottomSignals, stockReturns, nightFutures };
 }
 
-await predictKospi();
+const _result = await predictKospi();
+process.stdout.write("\n__PREDICTION_JSON__\n" + JSON.stringify(_result, null, 2) + "\n");
