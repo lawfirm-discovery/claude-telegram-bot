@@ -14,6 +14,7 @@ for (const line of readFileSync(".env", "utf-8").split("\n")) {
 
 import type { Candle, InvestorTrend } from "./src/stock";
 import { getKisToken, getCandles, getInvestorTrend } from "./src/stock";
+import { getRecentEarningsSurprise } from "./src/earnings-collector";
 import { detectSupplyDivergence, detectCorrelatedCrash, detectForcedLiquidation, evaluateDeleverageAlert } from "./src/deleverage-signal";
 import { detectBottomSignals } from "./src/bottom-signal";
 
@@ -262,11 +263,12 @@ async function predictKospi() {
   console.log(`\n📊 코스피 방향 예측 — ${tomorrowStr} (내일)`);
   console.log("=".repeat(50));
 
-  // 1. 야간선물 조회 + 미국장 병렬 수집
-  console.log("  야간선물 + 미국장 데이터 수집 중...");
-  const [nightFutures, usMarket] = await Promise.all([
+  // 1. 야간선물 + 미국장 + 최근 실적 서프라이즈 병렬 수집
+  console.log("  야간선물 + 미국장 + 실적 데이터 수집 중...");
+  const [nightFutures, usMarket, recentEarnings] = await Promise.all([
     fetchKredNightFutures(),
     fetchUSMarket(),
+    getRecentEarningsSurprise(30),
   ]);
 
   if (nightFutures) {
@@ -608,7 +610,31 @@ async function predictKospi() {
   console.log("\n" + "=".repeat(50));
   console.log("⚠️ 면책: 이 예측은 구현된 시그널 엔진 출력이며 투자 조언이 아닙니다.");
 
-  return { verdict, totalScore, scores, opts, alert, bottomSignals, stockReturns, nightFutures, usMarket };
+  // [H] 최근 실적 서프라이즈 (AI 반도체 섹터)
+  if (recentEarnings?.hasData) {
+    const { weightedSurprisePct, records } = recentEarnings;
+    let earningsScore: number;
+    // NVDA/TSM 가중치 2배 반영된 서프라이즈 평균
+    if      (weightedSurprisePct >= 10) earningsScore = +2.0;
+    else if (weightedSurprisePct >= 5)  earningsScore = +1.5;
+    else if (weightedSurprisePct >= 2)  earningsScore = +1.0;
+    else if (weightedSurprisePct >= 0)  earningsScore = +0.3;
+    else if (weightedSurprisePct >= -2) earningsScore = -0.5;
+    else if (weightedSurprisePct >= -5) earningsScore = -1.0;
+    else                                earningsScore = -2.0;
+
+    const summary = records.slice(0, 4)
+      .map(r => `${r.symbol} ${r.surprisePct > 0 ? "+" : ""}${r.surprisePct.toFixed(1)}%`)
+      .join(" · ");
+
+    scores.push({
+      factor: "AI 반도체 실적 서프라이즈 (최근 30일)",
+      score: earningsScore,
+      detail: `${summary} → 가중평균 ${weightedSurprisePct > 0 ? "+" : ""}${weightedSurprisePct.toFixed(1)}% | ${records.length}종목`,
+    });
+  }
+
+  return { verdict, totalScore, scores, opts, alert, bottomSignals, stockReturns, nightFutures, usMarket, recentEarnings };
 }
 
 const _result = await predictKospi();
