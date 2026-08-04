@@ -33,8 +33,8 @@ const US_STOCKS = [
 
 const KR_STOCKS = [
   { symbol: "005930", name: "삼성전자",   weight: 2.0, dartCode: "00126380" },
-  { symbol: "000660", name: "SK하이닉스", weight: 2.0, dartCode: "00278Post" },
-  { symbol: "042700", name: "한미반도체", weight: 1.0, dartCode: "00264529" },
+  { symbol: "000660", name: "SK하이닉스", weight: 2.0, dartCode: "00164779" },
+  // 한미반도체(042700): DART 연결재무 없음 — 추후 추가
 ];
 
 // ── Alpha Vantage: 미국 실적 수집 ────────────────────────────────────────────
@@ -128,33 +128,42 @@ async function fetchDartFinancials(dartCode: string, symbol: string, name: strin
     return 0;
   }
 
+  // reprt_code: 11011=1Q, 11012=반기(2Q), 11013=3Q, 11014=사업보고서(4Q/연간)
+  const quarterMap: Record<string, { month: string; label: string }> = {
+    "11011": { month: "03-31", label: "1Q" },
+    "11012": { month: "06-30", label: "2Q" },
+    "11013": { month: "09-30", label: "3Q" },
+    "11014": { month: "12-31", label: "4Q" },
+  };
+  const currentYear = new Date().getFullYear();
+
   let saved = 0;
-  // 최근 3년치 분기보고서 조회
-  for (const year of [2024, 2023, 2022]) {
-    for (const quarter of ["11013", "11012", "11014", "11011"]) {
-      // 11011=1Q, 11012=반기, 11013=3Q, 11014=사업보고서
+  for (const year of [currentYear, currentYear - 1, currentYear - 2]) {
+    for (const [reprtCode, info] of Object.entries(quarterMap)) {
       try {
-        const url = `https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json?crtfc_key=${dartKey}&corp_code=${dartCode}&bsns_year=${year}&reprt_code=${quarter}&fs_div=CFS`;
+        await new Promise(r => setTimeout(r, 300));
+        const url = `https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json?crtfc_key=${dartKey}&corp_code=${dartCode}&bsns_year=${year}&reprt_code=${reprtCode}&fs_div=CFS`;
         const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
         if (!res.ok) continue;
         const data = await res.json() as any;
         if (data.status !== "000" || !data.list?.length) continue;
 
-        // 매출액 / 영업이익 추출
-        const revenue = data.list.find((r: any) => r.account_nm?.includes("매출액") && r.fs_nm?.includes("연결"));
-        const operatingIncome = data.list.find((r: any) => r.account_nm?.includes("영업이익") && r.fs_nm?.includes("연결"));
+        const list: any[] = data.list;
 
-        const revenueVal = revenue ? parseInt(revenue.thstrm_amount?.replace(/,/g, "") ?? "0") : null;
-        const opIncomeVal = operatingIncome ? parseInt(operatingIncome.thstrm_amount?.replace(/,/g, "") ?? "0") : null;
+        // 손익계산서 항목만 필터 (account_id 기준)
+        const revenue = list.find(r =>
+          r.account_nm === "매출액" || r.account_id === "ifrs-full_Revenue"
+        );
+        const opIncome = list.find(r =>
+          r.account_nm === "영업이익" || r.account_id === "dart_OperatingIncomeLoss"
+        );
 
-        // 분기 → 날짜 변환
-        const quarterMap: Record<string, string> = {
-          "11011": `${year}-03-31`,
-          "11012": `${year}-06-30`,
-          "11013": `${year}-09-30`,
-          "11014": `${year}-12-31`,
-        };
-        const fiscalDate = quarterMap[quarter]!;
+        const toNum = (v: string | undefined) =>
+          v ? parseInt(v.replace(/,/g, ""), 10) || null : null;
+
+        const revenueVal = toNum(revenue?.thstrm_amount);
+        const opIncomeVal = toNum(opIncome?.thstrm_amount);
+        const fiscalDate = `${year}-${info.month}`;
 
         if (revenueVal) {
           await sql`
@@ -166,9 +175,9 @@ async function fetchDartFinancials(dartCode: string, symbol: string, name: strin
               reported_revenue = EXCLUDED.reported_revenue,
               weight = EXCLUDED.weight
           `;
+          console.log(`    ${info.label} ${year}: 매출 ${(revenueVal / 1e12).toFixed(1)}조 저장`);
           saved++;
         }
-        await new Promise(r => setTimeout(r, 500));
       } catch {}
     }
   }
