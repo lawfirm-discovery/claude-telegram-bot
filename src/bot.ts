@@ -21,6 +21,7 @@ import { mkdtemp, writeFile, unlink, readFile } from "fs/promises";
 import { join } from "path";
 import { tmpdir } from "os";
 import { getStockReport, getInvestorTrend } from "./stock";
+import { getDailyMajorBrokers, formatMajorBrokers, startBrokerPolling, stopBrokerPolling, isBrokerPolling, listBrokerPolling } from "./kiwoom";
 import {
   loadWatchlist, addToWatchlist, removeFromWatchlist,
   isMarketHours, CFG, isMonitorRunning, isSellMonitorRunning, getSellMonitorStatus,
@@ -1057,6 +1058,72 @@ async function handleYTCallback(ctx: any, data: string): Promise<void> {
     return;
   }
 }
+
+// ── 키움 거래원 모니터 ────────────────────────────────────────────────────────
+
+bot.command("broker", async (ctx) => {
+  const args = ctx.match?.trim().split(/\s+/) ?? [];
+  const sub = args[0]?.toLowerCase();
+  const stkCd = args[1]?.toUpperCase() ?? "005930";
+
+  // /broker stop [종목코드]
+  if (sub === "stop" || sub === "정지") {
+    const target = args[1]?.toUpperCase();
+    if (target) {
+      stopBrokerPolling(target);
+      await ctx.reply(`🔴 <b>${target}</b> 거래원 모니터 중지`, { parse_mode: "HTML" });
+    } else {
+      const running = listBrokerPolling();
+      if (running.length === 0) {
+        await ctx.reply("실행 중인 거래원 모니터 없음");
+      } else {
+        for (const cd of running) stopBrokerPolling(cd);
+        await ctx.reply(`🔴 거래원 모니터 전체 중지: ${running.join(", ")}`, { parse_mode: "HTML" });
+      }
+    }
+    return;
+  }
+
+  // /broker mon [종목코드] — 폴링 모니터
+  if (sub === "mon" || sub === "모니터") {
+    const cd = args[1]?.toUpperCase() ?? "005930";
+    if (isBrokerPolling(cd)) {
+      stopBrokerPolling(cd);
+      await ctx.reply(`🔴 <b>${cd}</b> 거래원 모니터 중지`, { parse_mode: "HTML" });
+      return;
+    }
+    const INTERVAL_MS = 10_000; // 10초 (키움 제한: 초당 1회)
+    const chatId = ctx.chat.id;
+    startBrokerPolling(
+      cd,
+      INTERVAL_MS,
+      async (result, changed) => {
+        if (!changed) return;
+        try {
+          await bot.api.sendMessage(chatId, formatMajorBrokers(result, cd), { parse_mode: "HTML" });
+        } catch {}
+      },
+      async (err) => {
+        try { await bot.api.sendMessage(chatId, `❌ 거래원 모니터 오류: ${err.message}`); } catch {}
+      },
+    );
+    await ctx.reply(
+      `🟢 <b>${cd}</b> 거래원 모니터 시작\n외국계 순매수 변화 시 자동 알림 (10초 주기)\n/broker stop ${cd} 로 중지`,
+      { parse_mode: "HTML" },
+    );
+    return;
+  }
+
+  // /broker [종목코드] — 즉시 조회
+  const cd = (sub && sub !== "stop") ? sub.toUpperCase() : "005930";
+  const msg = await ctx.reply("🔍 거래원 조회 중...");
+  try {
+    const result = await getDailyMajorBrokers(cd);
+    await ctx.api.editMessageText(ctx.chat.id, msg.message_id, formatMajorBrokers(result, cd), { parse_mode: "HTML" });
+  } catch (e: any) {
+    await ctx.api.editMessageText(ctx.chat.id, msg.message_id, `❌ 조회 실패: ${e.message}`);
+  }
+});
 
 // Pending orchestration approvals
 const pendingOrchestrations = new Map<string, string>();
