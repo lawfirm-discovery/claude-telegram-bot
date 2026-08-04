@@ -10,6 +10,8 @@ import postgres from "postgres";
 export interface AagagPost {
   title: string;
   commentCount: number;
+  timeStr?: string;
+  ageInHours?: number;
 }
 
 export interface KeywordStat {
@@ -40,7 +42,8 @@ const MOBILE_UA =
   "Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1";
 
 const BETA = 0.5;         // 댓글 로그 가중 상수
-const LIMIT_SII = 10.0;  // 최소 시장 활성 관심도 기준선
+const LIMIT_SII = 5.0;   // 최소 시장 활성 관심도 기준선 (24~36시간 신규 글 필터링 적용)
+const MAX_POST_AGE_HOURS = 36; // 최근 36시간(약 1.5일) 이내 작성된 신규 글만 카운트
 const BUY_SBI = -0.30;   // 매수 트리거 임계값 (폭락/급락 공포 과열)
 const SELL_SBI = 0.30;   // 매도 트리거 임계값 (급등/과연 낙관 과열)
 
@@ -120,66 +123,74 @@ async function fetchKeywordPosts(keyword: string, retries = 2): Promise<AagagPos
       await page.waitForTimeout(delay);
 
       // page.evaluate 는 브라우저 컨텍스트에서 실행 — DOM API는 런타임에 존재하므로 any 캐스팅
-      const posts = await page.evaluate((): { title: string; commentCount: number }[] => {
-        const doc = (globalThis as any).document as {
-          querySelectorAll: (s: string) => ArrayLike<any>;
-        };
-        const results: { title: string; commentCount: number }[] = [];
+      const posts = await page.evaluate(
+        new Function(
+          "maxAgeHours",
+          `
+        function parseAgeInHours(timeStr) {
+          if (!timeStr) return 9999;
+          var s = timeStr.trim();
+          if (s.includes("방금") || s.includes("분전")) return 0.5;
+          var hMatch = s.match(/(\\d+)\\s*시간\\s*전/);
+          if (hMatch) return parseInt(hMatch[1], 10);
+          var dMatch = s.match(/(\\d+)\\s*일\\s*전/);
+          if (dMatch) return parseInt(dMatch[1], 10) * 24;
+          return 9999;
+        }
 
-        // 1순위: #left_side 내 링크 (문서 명세 기준)
-        const primaryLinks = doc.querySelectorAll(
-          "#left_side div.la.tleft a, #left_side > div.la.tleft > * a"
-        );
+        var results = [];
+        var primaryLinks = Array.from(document.querySelectorAll(
+          "#left_side div.la.tleft a, #left_side > div.la.tleft > * a, div.issue_list a, .la.tleft a"
+        ));
+        var allIssueLinks = Array.from(document.querySelectorAll('a')).filter(function(a) {
+          var href = a.getAttribute('href') || '';
+          return href.includes('/issue/?idx=') || href.includes('/issue/');
+        });
 
-        // 2순위: 일반 리스트 컨테이너
-        const fallbackLinks = doc.querySelectorAll(
-          "div.issue_list a, ul.list_container li a, .list_title a, li.issue a, .la.tleft a"
-        );
+        var linkSet = primaryLinks.length > 0 ? primaryLinks : allIssueLinks;
 
-        const linkSet = primaryLinks.length > 0 ? primaryLinks : fallbackLinks;
-
-        Array.from(linkSet).forEach((el: any) => {
-          const rawText: string = el.textContent?.trim() || "";
+        linkSet.forEach(function(el) {
+          var rawText = el.textContent ? el.textContent.trim() : "";
           if (!rawText || rawText.length < 2) return;
 
-          let commentCount = 0;
-          const parent: any = el.closest("li, div.item, div.row, tr, article") || el.parentElement;
+          var lines = rawText.split('\\n').map(function(s) { return s.trim(); }).filter(Boolean);
+          var titleLine = lines[0] || "";
+          var timeStr = lines[lines.length - 1] || "";
+          var ageInHours = parseAgeInHours(timeStr);
+
+          if (ageInHours > maxAgeHours) return;
+
+          var commentCount = 0;
+          var parent = el.closest("li, div.item, div.row, tr, article") || el.parentElement;
 
           if (parent) {
-            // span 기반 댓글 수 파싱
-            const cSpan: any = parent.querySelector(
+            var cSpan = parent.querySelector(
               "span.comment_num, span.reply_count, span.c_count, em.num, span.num_reply, b.num, strong.num"
             );
             if (cSpan) {
-              const raw: string = (cSpan.textContent || "").replace(/[^0-9]/g, "") || "0";
+              var raw = (cSpan.textContent || "").replace(/[^0-9]/g, "") || "0";
               commentCount = raw ? parseInt(raw, 10) : 0;
             }
 
-            // 제목 안 [숫자] 패턴 백업 파싱
             if (commentCount === 0) {
-              const m = rawText.match(/\[(\d+)\]$/);
-              if (m) commentCount = parseInt(m[1]!, 10);
+              var m = titleLine.match(/\\[(\\d+)\\]$/);
+              if (m) commentCount = parseInt(m[1], 10);
             }
           }
 
-          // 꼬리 [숫자] 제거 후 제목 정제
-          const cleanTitle = rawText.replace(/\[\d+\]$/, "").trim();
+          var cleanTitle = titleLine.replace(/\\[\\d+\\]$/, "").trim();
           if (cleanTitle.length >= 2) {
-            results.push({ title: cleanTitle, commentCount });
+            results.push({ title: cleanTitle, commentCount: commentCount, timeStr: timeStr, ageInHours: ageInHours });
           }
         });
 
         return results;
-      });
+        `
+        ) as any,
+        MAX_POST_AGE_HOURS
+      );
 
       await browser.close();
-
-      // 파싱 결과가 없으면 재시도 (WAF 막힌 경우)
-      if (posts.length === 0 && attempt < retries) {
-        console.warn(`[AAGAG] "${keyword}" 파싱 결과 없음, 재시도 (${attempt}/${retries})`);
-        await new Promise(r => setTimeout(r, 3000 * attempt));
-        continue;
-      }
 
       return posts;
     } catch (e: any) {
