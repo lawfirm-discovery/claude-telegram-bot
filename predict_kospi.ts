@@ -17,6 +17,7 @@ import { getKisToken, getCandles, getInvestorTrend } from "./src/stock";
 import { getRecentEarningsSurprise } from "./src/earnings-collector";
 import { detectSupplyDivergence, detectCorrelatedCrash, detectForcedLiquidation, evaluateDeleverageAlert } from "./src/deleverage-signal";
 import { detectBottomSignals } from "./src/bottom-signal";
+import { getEconCalendar } from "./src/econ-calendar";
 
 // ── Yahoo Finance 단일 종목 시세 ─────────────────────────────────────────────
 async function fetchYahooQuote(symbol: string): Promise<{ price: number; prevClose: number } | null> {
@@ -263,12 +264,13 @@ async function predictKospi() {
   console.log(`\n📊 코스피 방향 예측 — ${tomorrowStr} (내일)`);
   console.log("=".repeat(50));
 
-  // 1. 야간선물 + 미국장 + 최근 실적 서프라이즈 병렬 수집
-  console.log("  야간선물 + 미국장 + 실적 데이터 수집 중...");
-  const [nightFutures, usMarket, recentEarnings] = await Promise.all([
+  // 1. 야간선물 + 미국장 + 최근 실적 서프라이즈 + 경제 캘린더 병렬 수집
+  console.log("  야간선물 + 미국장 + 실적 + 경제지표 데이터 수집 중...");
+  const [nightFutures, usMarket, recentEarnings, econCalendar] = await Promise.all([
     fetchKredNightFutures(),
     fetchUSMarket(),
     getRecentEarningsSurprise(30),
+    getEconCalendar(),
   ]);
 
   if (nightFutures) {
@@ -569,6 +571,19 @@ async function predictKospi() {
     }
   }
 
+  // [I] 당일 고위험 USD 경제지표 (CPI·FOMC·PPI·NFP 등)
+  if (econCalendar && econCalendar.events.length > 0) {
+    scores.push({
+      factor: "미국 경제지표 (Forex Factory)",
+      score: econCalendar.score,
+      detail: econCalendar.detail,
+    });
+    // 발표/미발표 여부 로그
+    const relN = econCalendar.released.length;
+    const penN = econCalendar.pending.length;
+    console.log(`  경제지표: 고위험 이벤트 ${econCalendar.events.length}건 (발표 ${relN}건 · 미발표 ${penN}건)`);
+  }
+
   // ── 최종 판정 ──────────────────────────────────────────────────────────────
   const totalScore = scores.reduce((s, f) => s + f.score, 0);
   const maxScore = scores.reduce((s, f) => s + Math.abs(f.score), 0);
@@ -634,7 +649,7 @@ async function predictKospi() {
     });
   }
 
-  return { verdict, totalScore, scores, opts, alert, bottomSignals, stockReturns, nightFutures, usMarket, recentEarnings };
+  return { verdict, totalScore, scores, opts, alert, bottomSignals, stockReturns, nightFutures, usMarket, recentEarnings, econCalendar };
 }
 
 const _result = await predictKospi();

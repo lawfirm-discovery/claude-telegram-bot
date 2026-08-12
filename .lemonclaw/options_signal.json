@@ -1,0 +1,31 @@
+{
+  "date": "2026-08-07",
+  "spotPrice": 982.92,
+  "maxPain": 982.5,
+  "maxPainDiffPct": 0.04274809160304927,
+  "gex": -117.1298123461893,
+  "gammaFlip": 985,
+  "pcr": 1.4219249781913348,
+  "foreignFlow": {
+    "foreignCallNet": -90,
+    "foreignPutNet": 237,
+    "instCallNet": -37,
+    "instPutNet": -69
+  },
+  "weeklyExpiry": "2026-08-13",
+  "daysToExpiry": 4,
+  "score": -1,
+  "direction": "neutral",
+  "details": [
+    "MaxPain≈: 현재가(982.92) ≈ MaxPain(982.50) 수렴 구간",
+    "GEX-: -117.1B (음수 → 추세장, 방향 증폭 구간)",
+    "외인중립: 콜(-90) / 풋(237) 균형",
+    "PCR 1.42 (높음 → 풋 우위, 약세/헤지)"
+  ],
+  "timestamp": "2026-08-07 08:31 KST",
+  "vkospi": 6296.38,
+  "ivRank": null,
+  "oiChanges": [],
+  "skew": null,
+  "foreignFutures": null
+}
