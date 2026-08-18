@@ -301,7 +301,7 @@ NODE_OPTIONS=--max-old-space-size=102400
 
 ### 모바일 UX (필수 체크)
 - 모든 UI 변경 시 **모바일 뷰포트(375px)에서 가독성 및 터치 영역** 반드시 확인
-- 터치 타겟 최소 44px (버튼, 링크, 탭)
+- 터치 타겟: 주요 컨트롤(독립 버튼·FAB·아이콘버튼) 44px+ 권장 / 하드 최소 24×24px (WCAG 2.2 AA SC 2.5.8). 문장 내 인라인 텍스트 링크·대체 컨트롤 존재 시 예외
 - 긴 텍스트: `truncate` 또는 `line-clamp` 적용
 - 가로 스크롤 방지: `overflow-x-hidden` 또는 `flex-wrap`
 - 모달/패널: 모바일에서 전체 너비 또는 최소 90vw
@@ -315,7 +315,7 @@ NODE_OPTIONS=--max-old-space-size=102400
 - [ ] 모달 z-index 문제 없음?
 - [ ] 드롭다운: CustomSelect 사용?
 - [ ] 모바일 375px에서 가독성 확인?
-- [ ] 터치 타겟 44px 이상?
+- [ ] 터치 타겟 주요 컨트롤 44px+ 권장 / 하드 최소 24px (인라인 링크 예외)?
 
 ---
 
@@ -369,4 +369,4 @@ curl -u "$CONFIG_VAULT_AUTH" -X POST "http://100.117.168.53:8070/api/configs/MY_
 2. **파일 비대화 방지 / 컴포넌트 분리 (우선순위)**: 단일 파일이 과도하게 커지지 않게 하위 컴포넌트·로직을 의미 단위로 분리하고 폴더 구조로 정리. 비대 파일은 분할 리팩토링 우선. 단 사소 변경/조기 분해/1회성 wrapper 남발은 예외(최소변경·과도엔지니어링 규칙 우선).
 3. **ERP 사이드바: v1=deprecated, v2(신규 DB 구조)=실제 활성**. 메뉴 추가·변경·라우팅은 v2 DB 구조 기반. v1 수정·확장 금지 — 작업 전 v1/v2 확인.
 4. **DB 작업 (Flyway 없음)**: 자격증명은 문서/채팅/git/로그에 절대 평문 기재 금지 — rtx6000 `lemon-api-server-spring/.env.development` 런타임 로드(워커는 Tailscale SSH 경유). 모든 변경은 `BEGIN; … 검증 SELECT … COMMIT;` 트랜잭션. **새 테이블: 기존 prefix 컨벤션 검증(provider별 `payment_<provider>_*`, 단독 provider prefix 금지) + 반드시 호성님(@legalmonster) 보고 후 진행** — 자동 진행 금지. `ddl-auto=validate`, `update` 절대 금지.
-5. **🌐 브라우저 테스트 — Playwright MCP 표준 (2026-05-21, 2026-05-22 모바일 의무)**: 브라우저 자동화·E2E·스크린샷은 **Playwright MCP 만 사용** (`mcp__playwright__browser_*`). 직접 playwright/puppeteer 스크립트 작성 금지(기존 운영 코드 예외). 테스트 계정은 **`$TEST_ACCOUNT_EMAIL` / `$TEST_ACCOUNT_PASSWORD` 환경변수**만 — 평문 코드/문서/로그/채팅 노출 금지. 출처: `~/.claude/test-accounts.env` (mode 600). 누락 시 작업 중단·호성님 보고. **실서비스 사용자 계정 사용 금지** — 운영 데이터 사이드 이펙트 회피. Config Vault 인증은 `$CONFIG_VAULT_AUTH` env (형식 `bot:비밀번호`, `~/.claude/config-vault.env`, mode 600). **🚨 모바일 UX·모바일 전용 기능도 반드시 함께 테스트** — `mcp__playwright__browser_resize({width:375,height:667})`로 모바일 viewport도 동일 시나리오 반복. 터치 타겟 44px+, 풀스크린 모달, FAB/햄버거 메뉴/swipe 등 모바일 전용 동작 검증. 데스크탑만 확인된 보고는 미완료로 간주. `/sync feat/orchestrator` 가 워커들에 자동 배포.
+5. **🌐 브라우저 테스트 — Playwright MCP 표준 (2026-05-21, 2026-05-22 모바일 의무)**: 브라우저 자동화·E2E·스크린샷은 **Playwright MCP 만 사용** (`mcp__playwright__browser_*`). 직접 playwright/puppeteer 스크립트 작성 금지(기존 운영 코드 예외). 테스트 계정은 **`$TEST_ACCOUNT_EMAIL` / `$TEST_ACCOUNT_PASSWORD` 환경변수**만 — 평문 코드/문서/로그/채팅 노출 금지. 출처: `~/.claude/test-accounts.env` (mode 600). 누락 시 작업 중단·호성님 보고. **실서비스 사용자 계정 사용 금지** — 운영 데이터 사이드 이펙트 회피. Config Vault 인증은 `$CONFIG_VAULT_AUTH` env (형식 `bot:비밀번호`, `~/.claude/config-vault.env`, mode 600). **🚨 모바일 UX·모바일 전용 기능도 반드시 함께 테스트** — `mcp__playwright__browser_resize({width:375,height:667})`로 모바일 viewport도 동일 시나리오 반복. 터치 타겟(주요 컨트롤=독립 버튼/FAB/아이콘버튼: **44px+ 권장**, **하드 최소 24×24px** — WCAG 2.2 AA SC 2.5.8. **문장 내 인라인 텍스트 링크·인접 간격 충분·동일 기능 대체 컨트롤 존재 시는 예외**. 44px는 하드 게이트 아님), 풀스크린 모달, FAB/햄버거 메뉴/swipe 등 모바일 전용 동작 검증. 데스크탑만 확인된 보고는 미완료로 간주. `/sync feat/orchestrator` 가 워커들에 자동 배포.
