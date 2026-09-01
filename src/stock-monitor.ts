@@ -44,7 +44,7 @@ function todayKST(): string {
 }
 
 function candleDateKST(timestamp: string): string {
-  // Toss API timestamp may be KST without timezone suffix — use Intl to extract KST date safely
+  // KIS timestamp은 "YYYY-MM-DD" 형태, Intl로 KST 날짜 추출
   return new Date(timestamp).toLocaleDateString("sv-SE", { timeZone: "Asia/Seoul" });
 }
 

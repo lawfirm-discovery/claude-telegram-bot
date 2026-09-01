@@ -1,9 +1,7 @@
-const TOSS_BASE = "https://openapi.tossinvest.com";
 const KIS_BASE = "https://openapi.koreainvestment.com:9443";
 
 // ── Token Cache ──────────────────────────────────────────────────────────────
 
-let tossToken: { value: string; expiresAt: number } | null = null;
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 
@@ -19,28 +17,6 @@ try {
     }
   }
 } catch {}
-
-async function getTossToken(): Promise<string> {
-  if (tossToken && Date.now() < tossToken.expiresAt - 60_000) return tossToken.value;
-
-  const apiKey = process.env.TOSS_API_KEY;
-  const secretKey = process.env.TOSS_SECRET_KEY;
-  if (!apiKey || !secretKey) throw new Error("TOSS_API_KEY / TOSS_SECRET_KEY 미설정");
-
-  const res = await fetch(`${TOSS_BASE}/oauth2/token`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "client_credentials",
-      client_id: apiKey,
-      client_secret: secretKey,
-    }),
-  });
-  if (!res.ok) throw new Error(`Toss 토큰 발급 실패: ${res.status}`);
-  const data = await res.json() as { access_token: string; expires_in: number };
-  tossToken = { value: data.access_token, expiresAt: Date.now() + data.expires_in * 1000 };
-  return tossToken.value;
-}
 
 export async function getKisToken(): Promise<string> {
   const appKey = process.env.KIS_APP_KEY;
@@ -61,21 +37,47 @@ export async function getKisToken(): Promise<string> {
   return kisToken.value;
 }
 
-// ── Toss API ─────────────────────────────────────────────────────────────────
+// ── KIS GET helper ────────────────────────────────────────────────────────────
 
-async function tossGet(path: string, params: Record<string, string>): Promise<any> {
-  const token = await getTossToken();
-  const url = new URL(`${TOSS_BASE}${path}`);
+async function kisGet(path: string, trId: string, params: Record<string, string>): Promise<any> {
+  const token = await getKisToken();
+  const appKey = process.env.KIS_APP_KEY!;
+  const appSecret = process.env.KIS_APP_SECRET!;
+
+  const url = new URL(`${KIS_BASE}${path}`);
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
+
   const res = await fetch(url.toString(), {
-    headers: { Authorization: `Bearer ${token}` },
+    headers: {
+      Authorization: `Bearer ${token}`,
+      appkey: appKey,
+      appsecret: appSecret,
+      tr_id: trId,
+    },
   });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({})) as any;
-    throw new Error(err?.error?.message ?? `Toss API 오류: ${res.status}`);
-  }
-  return res.json();
+  if (!res.ok) throw new Error(`KIS API 오류 [${trId}]: HTTP ${res.status}`);
+  const data = await res.json() as any;
+  if (data.rt_cd !== "0") throw new Error(`KIS API 오류 [${trId}]: ${data.msg1}`);
+  return data;
 }
+
+// ── Symbol helpers ────────────────────────────────────────────────────────────
+
+function isKrSymbol(symbol: string): boolean {
+  return /^\d{6}$/.test(symbol);
+}
+
+function dateToStr(date: Date): string {
+  return date.toISOString().slice(0, 10).replace(/-/g, "");
+}
+
+function daysAgo(n: number): Date {
+  const d = new Date();
+  d.setDate(d.getDate() - n);
+  return d;
+}
+
+// ── Types ─────────────────────────────────────────────────────────────────────
 
 export type Candle = {
   timestamp: string;
@@ -96,9 +98,145 @@ export type PriceInfo = {
 export type OrderbookLevel = { price: number; volume: number };
 export type Orderbook = { asks: OrderbookLevel[]; bids: OrderbookLevel[] };
 
+// ── getPrices ─────────────────────────────────────────────────────────────────
+
 export async function getPrices(symbols: string[]): Promise<PriceInfo[]> {
-  const data = await tossGet("/api/v1/prices", { symbols: symbols.join(",") });
-  return (data.prices ?? data) as PriceInfo[];
+  const results: PriceInfo[] = [];
+  for (const symbol of symbols) {
+    if (isKrSymbol(symbol)) {
+      const data = await kisGet(
+        "/uapi/domestic-stock/v1/quotations/inquire-price",
+        "FHKST01010100",
+        { FID_COND_MRKT_DIV_CODE: "J", FID_INPUT_ISCD: symbol },
+      );
+      results.push({
+        symbol,
+        lastPrice: parseInt(data.output?.stck_prpr || "0", 10),
+        currency: "KRW",
+        timestamp: new Date().toISOString(),
+      });
+    } else {
+      // US 주식
+      const data = await kisGet(
+        "/uapi/overseas-price/v1/quotations/price",
+        "HHDFS00000300",
+        { AUTH: "", EXCD: "NAS", SYMB: symbol },
+      );
+      results.push({
+        symbol,
+        lastPrice: parseFloat(data.output?.last || "0"),
+        currency: "USD",
+        timestamp: new Date().toISOString(),
+      });
+    }
+  }
+  return results;
+}
+
+// ── getCandles ────────────────────────────────────────────────────────────────
+
+// YYYYMMDD → "YYYY-MM-DD" (KIS 일봉 timestamp)
+function kisDailyTs(yyyymmdd: string): string {
+  return `${yyyymmdd.slice(0, 4)}-${yyyymmdd.slice(4, 6)}-${yyyymmdd.slice(6, 8)}`;
+}
+
+// Naver 분봉 XML 파싱 (YYYYMMDDHHmm|open|high|low|close|volume)
+// Naver는 close/volume만 제공하므로 open/high/low = close로 설정
+async function getNaverIntraday(symbol: string, count: number): Promise<Candle[]> {
+  const res = await fetch(
+    `https://fchart.stock.naver.com/sise.nhn?symbol=${symbol}&timeframe=minute&count=${count}&requestType=0`,
+    { headers: { "User-Agent": "Mozilla/5.0 (compatible; bot)" }, signal: AbortSignal.timeout(15_000) },
+  );
+  if (!res.ok) throw new Error(`Naver 분봉 오류: ${res.status}`);
+
+  const xml = await res.text();
+  const matches = xml.matchAll(/<item data="([^"]+)"/g);
+  const candles: Candle[] = [];
+
+  for (const m of matches) {
+    const parts = m[1]!.split("|");
+    if (parts.length < 6) continue;
+
+    const dt = parts[0]!; // YYYYMMDDHHmm (12 chars)
+    const closeStr = parts[4];
+    const volStr = parts[5];
+    if (!closeStr || closeStr === "null") continue;
+
+    const close = parseFloat(closeStr);
+    const vol = parseInt(volStr === "null" ? "0" : (volStr ?? "0"), 10);
+    if (close <= 0) continue;
+
+    // KST 타임스탬프로 변환
+    const ts = `${dt.slice(0, 4)}-${dt.slice(4, 6)}-${dt.slice(6, 8)}T${dt.slice(8, 10)}:${dt.slice(10, 12)}:00+09:00`;
+    candles.push({ timestamp: ts, openPrice: close, highPrice: close, lowPrice: close, closePrice: close, volume: vol });
+  }
+
+  // Naver는 오래된 것부터 반환 → 최신 우선으로 뒤집기
+  candles.reverse();
+  return candles.slice(0, count);
+}
+
+// 국내 일봉 — 150일 단위로 최대 2페이지 (총 ~200 영업일)
+async function getKrDailyCandles(symbol: string, count: number): Promise<Candle[]> {
+  const candles: Candle[] = [];
+  const pages = count > 100 ? 2 : 1;
+
+  for (let i = 0; i < pages && candles.length < count; i++) {
+    const end = daysAgo(i * 150);
+    const start = daysAgo((i + 1) * 150);
+
+    const data = await kisGet(
+      "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
+      "FHKST03010100",
+      {
+        FID_COND_MRKT_DIV_CODE: "J",
+        FID_INPUT_ISCD: symbol,
+        FID_INPUT_DATE_1: dateToStr(start),
+        FID_INPUT_DATE_2: dateToStr(end),
+        FID_PERIOD_DIV_CODE: "D",
+        FID_ORG_ADJ_PRC: "0",
+      },
+    );
+
+    const rows: any[] = data.output2 ?? [];
+    for (const r of rows) {
+      if (!r.stck_bsop_date) continue;
+      candles.push({
+        timestamp: kisDailyTs(r.stck_bsop_date),
+        openPrice: parseInt(r.stck_oprc || "0", 10),
+        highPrice: parseInt(r.stck_hgpr || "0", 10),
+        lowPrice: parseInt(r.stck_lwpr || "0", 10),
+        closePrice: parseInt(r.stck_clpr || "0", 10),
+        volume: parseInt(r.acml_vol || "0", 10),
+      });
+    }
+
+    if (rows.length < 50) break; // 데이터 없으면 중단
+  }
+
+  return candles.slice(0, count); // KIS는 이미 최신 우선 반환
+}
+
+// 미국 일봉 — KIS 해외 API (최대 100캔들)
+async function getUsDailyCandles(symbol: string, count: number): Promise<Candle[]> {
+  const data = await kisGet(
+    "/uapi/overseas-price/v1/quotations/dailyprice",
+    "HHDFS76240000",
+    { AUTH: "", EXCD: "NAS", SYMB: symbol, GUBN: "0", BYMD: "", MODYN: "Y", MODP: "0" },
+  );
+
+  const rows: any[] = data.output2 ?? [];
+  return rows
+    .filter(r => r.xymd)
+    .map(r => ({
+      timestamp: kisDailyTs(r.xymd),
+      openPrice: parseFloat(r.open || "0"),
+      highPrice: parseFloat(r.high || "0"),
+      lowPrice: parseFloat(r.low || "0"),
+      closePrice: parseFloat(r.clos || "0"),
+      volume: parseInt(r.tvol || "0", 10),
+    }))
+    .slice(0, count);
 }
 
 export async function getCandles(
@@ -106,28 +244,65 @@ export async function getCandles(
   interval: "1m" | "1d" = "1d",
   count = 200,
 ): Promise<Candle[]> {
-  const data = await tossGet("/api/v1/candles", {
-    symbol,
-    interval,
-    count: String(count),
-    adjusted: "true",
-  });
-  return (data.candles ?? data) as Candle[];
+  if (interval === "1m") {
+    return getNaverIntraday(symbol, count);
+  }
+  if (isKrSymbol(symbol)) {
+    return getKrDailyCandles(symbol, count);
+  }
+  return getUsDailyCandles(symbol, count);
 }
+
+// ── getOrderbook ──────────────────────────────────────────────────────────────
 
 export async function getOrderbook(symbol: string): Promise<Orderbook> {
-  const data = await tossGet("/api/v1/orderbook", { symbol });
-  return data as Orderbook;
+  const data = await kisGet(
+    "/uapi/domestic-stock/v1/quotations/inquire-asking-price-exp-ccn",
+    "FHKST01010200",
+    { FID_COND_MRKT_DIV_CODE: "J", FID_INPUT_ISCD: symbol },
+  );
+
+  const o = data.output1 ?? {};
+  const asks: OrderbookLevel[] = [];
+  const bids: OrderbookLevel[] = [];
+
+  for (let i = 1; i <= 10; i++) {
+    const ap = parseInt(o[`askp${i}`] || "0", 10);
+    const av = parseInt(o[`askp_rsqn${i}`] || "0", 10);
+    const bp = parseInt(o[`bidp${i}`] || "0", 10);
+    const bv = parseInt(o[`bidp_rsqn${i}`] || "0", 10);
+    if (ap > 0) asks.push({ price: ap, volume: av });
+    if (bp > 0) bids.push({ price: bp, volume: bv });
+  }
+
+  return { asks, bids };
 }
+
+// ── getStockInfo ──────────────────────────────────────────────────────────────
 
 export async function getStockInfo(symbol: string): Promise<any> {
-  const data = await tossGet("/api/v1/stocks", { symbol });
-  return data;
+  if (!isKrSymbol(symbol)) {
+    return { name: symbol, stockName: symbol, symbol };
+  }
+  const data = await kisGet(
+    "/uapi/domestic-stock/v1/quotations/inquire-price",
+    "FHKST01010100",
+    { FID_COND_MRKT_DIV_CODE: "J", FID_INPUT_ISCD: symbol },
+  );
+  const name = data.output?.hts_kor_isnm ?? symbol;
+  return { name, stockName: name, symbol };
 }
 
+// ── getExchangeRate ───────────────────────────────────────────────────────────
+
 export async function getExchangeRate(): Promise<number> {
-  const data = await tossGet("/api/v1/exchange-rate", { from: "USD", to: "KRW" });
-  return data.rate ?? data.exchangeRate ?? 0;
+  const res = await fetch("https://m.stock.naver.com/api/index/FX_USDKRW/basic", {
+    headers: { "User-Agent": "Mozilla/5.0 (compatible; bot)" },
+    signal: AbortSignal.timeout(5_000),
+  });
+  if (!res.ok) throw new Error(`환율 조회 실패: ${res.status}`);
+  const d = await res.json() as any;
+  return parseFloat(d.closePrice ?? d.currentPrice ?? "0");
 }
 
 // ── KIS API (수급 전용) ───────────────────────────────────────────────────────
@@ -142,9 +317,8 @@ export type InvestorTrend = {
 
 function isMarketOpen(): boolean {
   const now = new Date();
-  // KST = UTC+9
   const kst = new Date(now.getTime() + 9 * 60 * 60 * 1000);
-  const day = kst.getUTCDay(); // 0=일, 6=토
+  const day = kst.getUTCDay();
   if (day === 0 || day === 6) return false;
   const h = kst.getUTCHours();
   const m = kst.getUTCMinutes();
@@ -157,7 +331,7 @@ function todayKST(): string {
   return kst.toISOString().slice(0, 10).replace(/-/g, "");
 }
 
-// 장중 추정 수급 (HHPTJ04160200) — 09:30/11:20/13:20/14:30 갱신
+// 장중 추정 수급 (HHPTJ04160200)
 async function getInvestorTrendEstimate(symbol: string): Promise<InvestorTrend | null> {
   const token = await getKisToken();
   const appKey = process.env.KIS_APP_KEY!;
@@ -185,16 +359,10 @@ async function getInvestorTrendEstimate(symbol: string): Promise<InvestorTrend |
   const institution = parseInt(r.orgn_ntby_qty ?? r.orgn_fake_ntby_qty ?? "0", 10);
   const individual = parseInt(r.prsn_ntby_qty ?? "0", 10) || -(foreigner + institution);
 
-  return {
-    date: todayKST(),
-    foreigner,
-    institution,
-    individual,
-    isEstimate: true,
-  };
+  return { date: todayKST(), foreigner, institution, individual, isEstimate: true };
 }
 
-// 확정 일별 수급 (FHKST01010900) — 장 종료 후 확정
+// 확정 일별 수급 (FHKST01010900)
 async function getInvestorTrendDaily(symbol: string): Promise<InvestorTrend[]> {
   const token = await getKisToken();
   const appKey = process.env.KIS_APP_KEY!;
@@ -228,12 +396,10 @@ export async function getInvestorTrend(symbol: string): Promise<InvestorTrend[]>
 
   if (!isMarketOpen()) return daily;
 
-  // 장중: 추정 수급을 오늘 데이터로 prepend
   const today = todayKST();
   const estimate = await getInvestorTrendEstimate(symbol).catch(() => null);
   if (!estimate) return daily;
 
-  // 확정 데이터에 오늘 날짜가 이미 있으면 교체, 없으면 앞에 삽입
   const filtered = daily.filter(t => t.date !== today);
   return [estimate, ...filtered];
 }
@@ -242,8 +408,8 @@ export async function getInvestorTrend(symbol: string): Promise<InvestorTrend[]>
 
 export type FuturesInvestorPosition = {
   date: string;
-  foreignNet: number;   // 외인 선물 순포지션 (계약)
-  instNet: number;      // 기관 선물 순포지션
+  foreignNet: number;
+  instNet: number;
   individualNet: number;
 };
 
@@ -254,7 +420,7 @@ export async function getFuturesInvestorPosition(): Promise<FuturesInvestorPosit
 
   const url = new URL(`${KIS_BASE}/uapi/domestic-futureoption/v1/quotations/inquire-futures-investor`);
   url.searchParams.set("FID_COND_MRKT_DIV_CODE", "F");
-  url.searchParams.set("FID_INPUT_ISCD", "101W09"); // KOSPI200 위클리 선물 근월물
+  url.searchParams.set("FID_INPUT_ISCD", "101W09");
 
   const res = await fetch(url.toString(), {
     headers: {
@@ -279,12 +445,7 @@ export async function getFuturesInvestorPosition(): Promise<FuturesInvestorPosit
     else if (nm.includes("개인")) individualNet += net;
   }
 
-  return {
-    date: todayKST(),
-    foreignNet,
-    instNet,
-    individualNet,
-  };
+  return { date: todayKST(), foreignNet, instNet, individualNet };
 }
 
 // ── Technical Indicators ─────────────────────────────────────────────────────
@@ -409,7 +570,8 @@ export async function getStockReport(symbol: string): Promise<string> {
   try {
     const priceInfo = (await getPrices([upperSymbol]))[0];
     if (!priceInfo) throw new Error("가격 데이터 없음");
-    lines.push(`💰 현재가: <b>${fmt(priceInfo.lastPrice)}원</b>`);
+    const unit = priceInfo.currency === "USD" ? "$" : "₩";
+    lines.push(`💰 현재가: <b>${unit}${fmt(priceInfo.lastPrice, priceInfo.currency === "USD" ? 2 : 0)}</b>`);
   } catch (e: any) {
     lines.push(`💰 현재가: 조회 실패 (${e.message})`);
   }
@@ -446,7 +608,7 @@ export async function getStockReport(symbol: string): Promise<string> {
     const lastClose = last.closePrice;
     const bbPct = isNaN(bb22.upper) ? NaN : (lastClose - bb22.lower) / (bb22.upper - bb22.lower) * 100;
     lines.push(`  볼린저밴드(22): 상단 ${fmt(bb22.upper)} / 중심 ${fmt(bb22.middle)} / 하단 ${fmt(bb22.lower)}` +
-      (isNaN(bbPct) ? "" : ` (밴드 내 위치 ${bbPct.toFixed(0)}%)`) );
+      (isNaN(bbPct) ? "" : ` (밴드 내 위치 ${bbPct.toFixed(0)}%)`));
 
     lines.push("");
     lines.push("🏔 매물대 (상위 5구간)");
