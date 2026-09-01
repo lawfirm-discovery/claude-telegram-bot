@@ -552,7 +552,7 @@ bash scripts/i18n/flutter-arb-verify.sh
    - 모바일 뷰포트 전환: `mcp__playwright__browser_resize({ width: 375, height: 667 })`. 시나리오 전후로 양쪽 viewport 모두 거쳐야 완료.
    - **모바일 체크 항목** (변경한 화면이 모바일에서도 정상 동작):
      - 반응형 레이아웃 깨짐 없음 (잘림·overlap·가로 스크롤)
-     - 터치 타겟 ≥ 44px (버튼·링크·탭). MUI 기본 size가 44px 미달이면 보고
+     - 터치 타겟: 주요 컨트롤(독립 버튼·FAB·아이콘버튼) **44px+ 권장, 하드 최소 24×24px**(WCAG 2.2 AA SC 2.5.8). **문장 내 인라인 텍스트 링크·인접 간격 충분·동일 기능 대체 컨트롤 존재 시는 예외**(44px는 하드 게이트 아님). MUI 기본 size가 24px 미달인 독립 컨트롤이면 보고
      - 모바일 모달은 풀스크린 (`fullScreen={isMobile}`) 또는 시트 형태
      - 본문 폰트 ≥ 13px, 텍스트 truncate/wrap 정상
      - 가상 키보드 위로 입력창 가려지지 않음
