@@ -383,8 +383,8 @@ bot.command("sync", async (ctx) => {
      fi`,
     // Vault → ~/.claude/test-accounts.env (위 단계에서 CONFIG_VAULT_AUTH 가 export 됨)
     `if [ -n "$CONFIG_VAULT_AUTH" ]; then \
-       TE=$(curl -fsS -u "$CONFIG_VAULT_AUTH" http://100.117.168.53:8070/api/value/TEST_ACCOUNT_EMAIL | sed -n 's/.*"value":"\\([^"]*\\)".*/\\1/p'); \
-       TP=$(curl -fsS -u "$CONFIG_VAULT_AUTH" http://100.117.168.53:8070/api/value/TEST_ACCOUNT_PASSWORD | sed -n 's/.*"value":"\\([^"]*\\)".*/\\1/p'); \
+       TE=$(curl -fsS -u "$CONFIG_VAULT_AUTH" http://100.108.86.92:8070/api/value/TEST_ACCOUNT_EMAIL | sed -n 's/.*"value":"\\([^"]*\\)".*/\\1/p'); \
+       TP=$(curl -fsS -u "$CONFIG_VAULT_AUTH" http://100.108.86.92:8070/api/value/TEST_ACCOUNT_PASSWORD | sed -n 's/.*"value":"\\([^"]*\\)".*/\\1/p'); \
        if [ -n "$TE" ] && [ -n "$TP" ]; then \
          install -m 600 /dev/null "$HOME/.claude/test-accounts.env"; \
          printf '# Auto-fetched by /sync from Config Vault\\nTEST_ACCOUNT_EMAIL=%s\\nTEST_ACCOUNT_PASSWORD=%s\\n' "$TE" "$TP" > "$HOME/.claude/test-accounts.env"; \

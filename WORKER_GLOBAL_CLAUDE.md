@@ -204,7 +204,7 @@
 | FastAPI | /home/angrylawyer/lemon-ai-server-FastAPI (pm2: lemon-fastapi) |
 | Flutter | /home/angrylawyer/lemon_flutter |
 | 작업 브랜치 | `dev-hs-rtx6000-new` (모든 저장소) |
-| Config Vault | http://100.117.168.53:8070 (auth: `$CONFIG_VAULT_AUTH` env, 형식 `bot:비밀번호` — 평문 금지) |
+| Config Vault | http://100.108.86.92:8070 (auth: `$CONFIG_VAULT_AUTH` env, 형식 `bot:비밀번호` — 평문 금지) |
 
 ### 빌드 & 실행
 ```bash
@@ -323,13 +323,13 @@ NODE_OPTIONS=--max-old-space-size=102400
 
 ```bash
 # 값 조회
-curl -u "$CONFIG_VAULT_AUTH" http://100.117.168.53:8070/api/value/KEY_NAME
+curl -u "$CONFIG_VAULT_AUTH" http://100.108.86.92:8070/api/value/KEY_NAME
 
 # 서버별 환경변수
-curl -u "$CONFIG_VAULT_AUTH" http://100.117.168.53:8070/api/env/SERVER_NAME
+curl -u "$CONFIG_VAULT_AUTH" http://100.108.86.92:8070/api/env/SERVER_NAME
 
 # 새 키 저장
-curl -u "$CONFIG_VAULT_AUTH" -X POST "http://100.117.168.53:8070/api/configs/MY_KEY?value=xxx&category=AI"
+curl -u "$CONFIG_VAULT_AUTH" -X POST "http://100.108.86.92:8070/api/configs/MY_KEY?value=xxx&category=AI"
 ```
 
 ---

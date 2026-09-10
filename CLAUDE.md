@@ -144,7 +144,7 @@
 | 백엔드 | `backend/` (FastAPI + Python 3.14) |
 | uvicorn 포트 | 8888 (API + 정적파일 서빙) |
 | n100 DB | PostgreSQL 100.65.20.81:5432 (pylon/415416) |
-| Config Vault | http://100.117.168.53:8070 (bot:lemon2024!) |
+| Config Vault | http://100.108.86.92:8070 (bot:lemon2024!) |
 
 ### 빌드 & 실행 (맥미니에서)
 ```bash
@@ -165,10 +165,10 @@ API 키가 필요할 때는 **항상 위 파일들을 먼저 확인**할 것. �
 ### Config Vault (API 키 저장소)
 ```bash
 # 값 조회
-curl -u "bot:lemon2024!" http://100.117.168.53:8070/api/value/KEY_NAME
+curl -u "bot:lemon2024!" http://100.108.86.92:8070/api/value/KEY_NAME
 
 # 서버별 환경변수
-curl -u "bot:lemon2024!" http://100.117.168.53:8070/api/env/SERVER_NAME
+curl -u "bot:lemon2024!" http://100.108.86.92:8070/api/env/SERVER_NAME
 ```
 
 ---
