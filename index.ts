@@ -14,7 +14,7 @@
 })();
 
 import { bot } from "./src/bot";
-import { InputFile } from "grammy";
+import { Bot, InputFile } from "grammy";
 import { askClaude, killActiveProcesses } from "./src/claude-engine";
 import { startHeartbeat, startCron, fireHook, stopLemonClaw, appendMemoryLog, startSharedMemorySync } from "./src/lemonclaw";
 import { markdownToTelegramHtml, splitMessage } from "./src/format";
@@ -171,6 +171,40 @@ console.log(
   `Allowed users: ${process.env.ALLOWED_USERS || "all (no restriction)"}`
 );
 
+// ── 알림 전용 봇 (주식/옵션 알림은 별도 봇으로 전송) ──────────────────────
+const alertBot = process.env.ALERT_BOT_TOKEN
+  ? new Bot(process.env.ALERT_BOT_TOKEN)
+  : null;
+
+async function sendAlert(chatId: string, text: string): Promise<void> {
+  const target = alertBot || bot;
+  const chunks = splitMessage(text);
+  for (const chunk of chunks) {
+    try {
+      await target.api.sendMessage(parseInt(chatId), chunk, { parse_mode: "HTML" });
+    } catch {
+      try {
+        await target.api.sendMessage(parseInt(chatId), chunk.replace(/<[^>]+>/g, ""));
+      } catch (e: any) {
+        console.error(`[AlertBot] sendAlert failed: ${e.message}`);
+      }
+    }
+  }
+}
+
+async function sendAlertPhoto(chatId: string, image: Buffer, caption: string): Promise<void> {
+  const target = alertBot || bot;
+  try {
+    await target.api.sendPhoto(parseInt(chatId), new InputFile(image, "chart.png"), {
+      caption,
+      parse_mode: "HTML",
+    });
+  } catch (e: any) {
+    console.error(`[AlertBot] sendAlertPhoto failed: ${e.message}`);
+    await sendAlert(chatId, caption);
+  }
+}
+
 // Telegram send helper for LemonClaw autonomous messages
 async function sendTelegramPhoto(chatId: string, image: Buffer, caption: string): Promise<void> {
   const { markdownToTelegramHtml } = await import("./src/format");
@@ -236,9 +270,9 @@ async function startServices(): Promise<void> {
     (process.env.ALLOWED_USERS ? process.env.ALLOWED_USERS.split(",")[0]?.trim() : "") ||
     "";
   if (alertChatId) {
-    startStockMonitor(alertChatId, sendTelegram, sendTelegramPhoto);
-    startOptionMonitor(alertChatId, sendTelegram);
-    startOptionsMonitor(alertChatId, sendTelegram);
+    startStockMonitor(alertChatId, sendAlert, sendAlertPhoto);
+    startOptionMonitor(alertChatId, sendAlert);
+    startOptionsMonitor(alertChatId, sendAlert);
   } else {
     console.warn("[StockMonitor] STOCK_ALERT_CHAT_ID 또는 ALLOWED_USERS 미설정 — 모니터 비활성");
   }
