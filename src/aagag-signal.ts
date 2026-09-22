@@ -1,8 +1,7 @@
-// AAGAG (aagag.com) 커뮤니티 빅데이터 주식 심리 분석
+// Reddit 커뮤니티 빅데이터 주식 심리 분석 (aagag.com → reddit.com 전환)
 // SII (주식 관심 지수) + SBI (감성 편향 지수) 기반 역발상 트레이딩 시그널
-// Playwright 기반 봇탐지 우회 크롤링 + SQLite 데이터 저장 + 차트 생성
+// Reddit JSON API 사용 — Playwright 불필요, 무인증
 
-import { chromium } from "playwright";
 import postgres from "postgres";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -29,30 +28,32 @@ export interface AagagResult {
   signal: "BUY" | "SELL" | "HOLD";
   reason: string;
   generalStats: KeywordStat[];
-  sellStats: KeywordStat[];     // 급등/과연
-  buyStats: KeywordStat[];      // 폭락/급락
+  sellStats: KeywordStat[];     // 낙관 과열 키워드
+  buyStats: KeywordStat[];      // 공포 과열 키워드
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const ROOT_URL = "https://aagag.com/issue/";
+// 관심도 측정 서브레딧 (한국 시장 관련)
+const SUBREDDITS_GENERAL = "investing+stocks+Korea+StockMarket+SecurityAnalysis";
+// 감성 측정 서브레딧 (감정적 언어가 활발한 곳)
+const SUBREDDITS_SENTIMENT = "investing+stocks+wallstreetbets+StockMarket";
 
-// iPhone SA 모바일 UA — 안티 애드블록 검사 루틴 우회
-const MOBILE_UA =
-  "Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1";
+const BETA = 0.5;            // 댓글 로그 가중 상수
+const LIMIT_SII = 3.0;      // 최소 관심도 기준선 (Reddit 볼륨 기준, aagag 5.0에서 조정)
+const MAX_POST_AGE_HOURS = 36;
+const BUY_SBI  = -0.30;     // 공포 과열 → 역발상 매수 트리거
+const SELL_SBI =  0.30;     // 낙관 과열 → 역발상 매도 트리거
 
-const BETA = 0.5;         // 댓글 로그 가중 상수
-const LIMIT_SII = 5.0;   // 최소 시장 활성 관심도 기준선 (24~36시간 신규 글 필터링 적용)
-const MAX_POST_AGE_HOURS = 36; // 최근 36시간(약 1.5일) 이내 작성된 신규 글만 카운트
-const BUY_SBI = -0.30;   // 매수 트리거 임계값 (폭락/급락 공포 과열)
-const SELL_SBI = 0.30;   // 매도 트리거 임계값 (급등/과연 낙관 과열)
-
-// 주식 관심도 측정 키워드 (SII 계산)
-const GENERAL_KEYWORDS = ["주식", "증시", "코스피", "코스닥", "나스닥", "삼전", "매수", "매도"];
+// 주식 관심도 키워드 (SII 계산) — 한국 시장 관련 영문 키워드
+const GENERAL_KEYWORDS = [
+  "KOSPI", "Samsung", "Korea market", "SK Hynix",
+  "Korean stocks", "Hyundai", "KOSDAQ", "Kakao",
+];
 
 // 감성 편향 키워드 (SBI 계산)
-const SELL_KEYWORDS = ["폭등", "급등", "급상승"];       // 낙관 과열 → 역발상 매도
-const BUY_KEYWORDS  = ["폭락", "급락", "급하락"];       // 공포 과열 → 역발상 매수
+const SELL_KEYWORDS = ["bull run", "rally", "moon", "all time high"];  // 낙관 과열 → 역발상 매도
+const BUY_KEYWORDS  = ["crash", "bear market", "recession", "panic sell"]; // 공포 과열 → 역발상 매수
 
 // ── Math ──────────────────────────────────────────────────────────────────────
 
@@ -60,147 +61,77 @@ function logWeight(comments: number): number {
   return 1 + BETA * Math.log(comments + 1);
 }
 
-function calcSII(posts: AagagPost[]): number {
-  return posts.reduce((sum, p) => sum + logWeight(p.commentCount), 0);
-}
-
 function calcWeightedSum(posts: AagagPost[]): number {
   return posts.reduce((sum, p) => sum + logWeight(p.commentCount), 0);
 }
 
-// ── Stealth Crawler ───────────────────────────────────────────────────────────
+// ── Reddit API Fetcher ────────────────────────────────────────────────────────
 
-async function fetchKeywordPosts(keyword: string, retries = 2): Promise<AagagPost[]> {
-  const url = `${ROOT_URL}?word=${encodeURIComponent(keyword)}`;
+interface RedditChild {
+  data: {
+    title: string;
+    num_comments: number;
+    score: number;
+    subreddit: string;
+    created_utc: number;
+  };
+}
+
+interface RedditResponse {
+  data: {
+    children: RedditChild[];
+  };
+}
+
+async function fetchRedditPosts(
+  keyword: string,
+  subreddits: string,
+  retries = 2,
+): Promise<AagagPost[]> {
+  const params = new URLSearchParams({
+    q: keyword,
+    sort: "new",
+    t: "week",        // 1주 범위로 가져온 뒤 36시간 로컬 필터링
+    limit: "100",
+    restrict_sr: "on",
+  });
+  const url = `https://www.reddit.com/r/${subreddits}/search.json?${params}`;
 
   for (let attempt = 1; attempt <= retries; attempt++) {
-    const browser = await chromium.launch({
-      headless: true,
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-blink-features=AutomationControlled",
-        "--disable-features=IsolateOrigins,site-per-process",
-        "--disable-dev-shm-usage",
-      ],
-    });
-
     try {
-      const context = await browser.newContext({
-        userAgent: MOBILE_UA,
-        viewport: { width: 390, height: 844 },
-        isMobile: true,
-        hasTouch: true,
-        locale: "ko-KR",
-        extraHTTPHeaders: {
-          "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
-          "Referer": "https://aagag.com/",
-          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      const res = await fetch(url, {
+        headers: {
+          "User-Agent": "KoreaStockSentiment/1.0 (automated sentiment analysis)",
+          "Accept": "application/json",
         },
+        signal: AbortSignal.timeout(15_000),
       });
 
-      // navigator.webdriver 및 자동화 흔적 제거
-      await context.addInitScript(() => {
-        Object.defineProperty(navigator, "webdriver", { get: () => undefined });
-        Object.defineProperty(navigator, "plugins", { get: () => [1, 2, 3] });
-        Object.defineProperty(navigator, "languages", { get: () => ["ko-KR", "ko"] });
-        // Playwright 전역 제거
-        // @ts-ignore
-        delete window.__playwright;
-        // @ts-ignore
-        delete window.__pw_manual;
-        // @ts-ignore
-        delete window._playwrightGlobal;
-      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
-      const page = await context.newPage();
+      const json = (await res.json()) as RedditResponse;
+      const nowSec = Date.now() / 1000;
 
-      // 네트워크 유휴 시까지 대기
-      await page.goto(url, { waitUntil: "networkidle", timeout: 50_000 });
+      return json.data.children
+        .map((child) => {
+          const d = child.data;
+          const ageInHours = (nowSec - d.created_utc) / 3600;
+          return {
+            title: d.title,
+            commentCount: d.num_comments,
+            timeStr: `${ageInHours.toFixed(1)}h ago`,
+            ageInHours,
+          };
+        })
+        .filter((p) => (p.ageInHours ?? 9999) <= MAX_POST_AGE_HOURS);
 
-      // 스크립트 실행 분석 시간 확보 — 난수 기반 지연 (1000~2500ms)
-      const delay = Math.floor(Math.random() * 1500) + 1000;
-      await page.waitForTimeout(delay);
-
-      // page.evaluate 는 브라우저 컨텍스트에서 실행 — DOM API는 런타임에 존재하므로 any 캐스팅
-      const posts = await page.evaluate(
-        new Function(
-          "maxAgeHours",
-          `
-        function parseAgeInHours(timeStr) {
-          if (!timeStr) return 9999;
-          var s = timeStr.trim();
-          if (s.includes("방금") || s.includes("분전")) return 0.5;
-          var hMatch = s.match(/(\\d+)\\s*시간\\s*전/);
-          if (hMatch) return parseInt(hMatch[1], 10);
-          var dMatch = s.match(/(\\d+)\\s*일\\s*전/);
-          if (dMatch) return parseInt(dMatch[1], 10) * 24;
-          return 9999;
-        }
-
-        var results = [];
-        var primaryLinks = Array.from(document.querySelectorAll(
-          "#left_side div.la.tleft a, #left_side > div.la.tleft > * a, div.issue_list a, .la.tleft a"
-        ));
-        var allIssueLinks = Array.from(document.querySelectorAll('a')).filter(function(a) {
-          var href = a.getAttribute('href') || '';
-          return href.includes('/issue/?idx=') || href.includes('/issue/');
-        });
-
-        var linkSet = primaryLinks.length > 0 ? primaryLinks : allIssueLinks;
-
-        linkSet.forEach(function(el) {
-          var rawText = el.textContent ? el.textContent.trim() : "";
-          if (!rawText || rawText.length < 2) return;
-
-          var lines = rawText.split('\\n').map(function(s) { return s.trim(); }).filter(Boolean);
-          var titleLine = lines[0] || "";
-          var timeStr = lines[lines.length - 1] || "";
-          var ageInHours = parseAgeInHours(timeStr);
-
-          if (ageInHours > maxAgeHours) return;
-
-          var commentCount = 0;
-          var parent = el.closest("li, div.item, div.row, tr, article") || el.parentElement;
-
-          if (parent) {
-            var cSpan = parent.querySelector(
-              "span.comment_num, span.reply_count, span.c_count, em.num, span.num_reply, b.num, strong.num"
-            );
-            if (cSpan) {
-              var raw = (cSpan.textContent || "").replace(/[^0-9]/g, "") || "0";
-              commentCount = raw ? parseInt(raw, 10) : 0;
-            }
-
-            if (commentCount === 0) {
-              var m = titleLine.match(/\\[(\\d+)\\]$/);
-              if (m) commentCount = parseInt(m[1], 10);
-            }
-          }
-
-          var cleanTitle = titleLine.replace(/\\[\\d+\\]$/, "").trim();
-          if (cleanTitle.length >= 2) {
-            results.push({ title: cleanTitle, commentCount: commentCount, timeStr: timeStr, ageInHours: ageInHours });
-          }
-        });
-
-        return results;
-        `
-        ) as any,
-        MAX_POST_AGE_HOURS
-      );
-
-      await browser.close();
-
-      return posts;
     } catch (e: any) {
-      await browser.close();
       if (attempt < retries) {
-        console.warn(`[AAGAG] "${keyword}" 크롤링 실패, 재시도 (${attempt}/${retries}): ${e.message}`);
-        await new Promise(r => setTimeout(r, 3000 * attempt));
+        console.warn(`[Reddit] "${keyword}" 실패, 재시도 (${attempt}/${retries}): ${e.message}`);
+        await new Promise((r) => setTimeout(r, 2000 * attempt));
         continue;
       }
-      console.error(`[AAGAG] "${keyword}" 최종 실패: ${e.message}`);
+      console.error(`[Reddit] "${keyword}" 최종 실패: ${e.message}`);
       return [];
     }
   }
@@ -265,13 +196,13 @@ export function generateAagagSignal(
   let reason = "시장에 뚜렷한 감정 쏠림 현상이 관측되지 않아 관망을 추천합니다.";
 
   if (sii < LIMIT_SII) {
-    reason = "주식 시장 전반에 대한 커뮤니티 관심도가 임계 수준 미달. 노이즈 과대로 신호 생략.";
+    reason = "Reddit 한국 시장 관련 관심도가 임계 수준 미달. 신호 신뢰도 낮음.";
   } else if (sbi <= BUY_SBI) {
     signal = "BUY";
-    reason = `커뮤니티에 폭락/급락 공포 여론이 과열 누적. 역발상 관점 단기 과매도 국면으로 추정 → 매수 신호 (SBI: ${sbi.toFixed(4)})`;
+    reason = `Reddit에 crash/recession 공포 여론이 과열. 역발상 단기 과매도 국면 추정 → 매수 신호 (SBI: ${sbi.toFixed(4)})`;
   } else if (sbi >= SELL_SBI) {
     signal = "SELL";
-    reason = `커뮤니티에 급등/과연 낙관 여론이 과열 팽배. 대중 광풍 극단 상태 → 분할 매도 신호 (SBI: ${sbi.toFixed(4)})`;
+    reason = `Reddit에 bull run/moon 낙관 여론이 과열. 대중 광풍 극단 상태 → 분할 매도 신호 (SBI: ${sbi.toFixed(4)})`;
   }
 
   return { date, time, stockInterestIndex: sii, sentimentBiasIndex: sbi, signal, reason, generalStats, sellStats, buyStats };
@@ -280,21 +211,23 @@ export function generateAagagSignal(
 // ── Full Pipeline ─────────────────────────────────────────────────────────────
 
 export async function runAagagPipeline(): Promise<AagagResult> {
-  console.log("[AAGAG] 심리 분석 파이프라인 시작...");
+  console.log("[Reddit] 심리 분석 파이프라인 시작...");
 
   // 일반 관심도 키워드 병렬 크롤링 (3개씩 묶어서 과부하 방지)
   const generalMap = new Map<string, AagagPost[]>();
   for (let i = 0; i < GENERAL_KEYWORDS.length; i += 3) {
     const batch = GENERAL_KEYWORDS.slice(i, i + 3);
-    const results = await Promise.all(batch.map(kw => fetchKeywordPosts(kw)));
+    const results = await Promise.all(
+      batch.map((kw) => fetchRedditPosts(kw, SUBREDDITS_GENERAL)),
+    );
     batch.forEach((kw, idx) => generalMap.set(kw, results[idx]!));
-    if (i + 3 < GENERAL_KEYWORDS.length) await new Promise(r => setTimeout(r, 2000));
+    if (i + 3 < GENERAL_KEYWORDS.length) await new Promise((r) => setTimeout(r, 1000));
   }
 
   // 감성 편향 키워드 크롤링
   const [sellResults, buyResults] = await Promise.all([
-    Promise.all(SELL_KEYWORDS.map(kw => fetchKeywordPosts(kw))),
-    Promise.all(BUY_KEYWORDS.map(kw => fetchKeywordPosts(kw))),
+    Promise.all(SELL_KEYWORDS.map((kw) => fetchRedditPosts(kw, SUBREDDITS_SENTIMENT))),
+    Promise.all(BUY_KEYWORDS.map((kw) => fetchRedditPosts(kw, SUBREDDITS_SENTIMENT))),
   ]);
 
   const sellMap = new Map<string, AagagPost[]>();
@@ -304,8 +237,7 @@ export async function runAagagPipeline(): Promise<AagagResult> {
   BUY_KEYWORDS.forEach((kw, i) => buyMap.set(kw, buyResults[i]!));
 
   const result = generateAagagSignal(generalMap, sellMap, buyMap);
-
-  console.log(`[AAGAG] 완료 — SII: ${result.stockInterestIndex.toFixed(2)}, SBI: ${result.sentimentBiasIndex.toFixed(4)}, 신호: ${result.signal}`);
+  console.log(`[Reddit] 완료 — SII: ${result.stockInterestIndex.toFixed(2)}, SBI: ${result.sentimentBiasIndex.toFixed(4)}, 신호: ${result.signal}`);
   return result;
 }
 
@@ -335,30 +267,33 @@ export function formatAagagReport(r: AagagResult): string {
   const label = SIGNAL_LABEL[r.signal] ?? r.signal;
 
   const generalLines = r.generalStats
-    .map(s => `  <code>${s.keyword.padEnd(4)}</code> ${s.posts}건 / 댓글 ${s.totalComments}개`)
+    .map((s) => `  <code>${s.keyword.padEnd(16)}</code> ${s.posts}건 / 댓글 ${s.totalComments}개`)
     .join("\n");
 
   const sellLines = r.sellStats
-    .map(s => `  <code>${s.keyword.padEnd(4)}</code> ${s.posts}건 / 댓글 ${s.totalComments}개`)
+    .map((s) => `  <code>${s.keyword.padEnd(16)}</code> ${s.posts}건 / 댓글 ${s.totalComments}개`)
     .join("\n");
 
   const buyLines = r.buyStats
-    .map(s => `  <code>${s.keyword.padEnd(4)}</code> ${s.posts}건 / 댓글 ${s.totalComments}개`)
+    .map((s) => `  <code>${s.keyword.padEnd(16)}</code> ${s.posts}건 / 댓글 ${s.totalComments}개`)
     .join("\n");
 
   return [
-    `${emoji} <b>AAGAG 커뮤니티 심리 분석</b> — ${r.date} ${r.time} KST`,
+    `${emoji} <b>Reddit 커뮤니티 심리 분석</b> — ${r.date} ${r.time} KST`,
     ``,
     `<b>📊 주식 관심 지수 (SII)</b>`,
     `  <b>${siiDisplay}</b>  (기준선 ${LIMIT_SII})`,
     ``,
-    `<b>📈 일반 키워드 (관심도)</b>`,
+    `<b>📈 한국 시장 키워드 (관심도)</b>`,
+    `  <i>r/investing+stocks+Korea+StockMarket</i>`,
     generalLines,
     ``,
-    `<b>🔴 매도 키워드 (낙관 과열)</b>`,
+    `<b>🔴 낙관 과열 키워드 (매도 신호 역발상)</b>`,
+    `  <i>r/investing+stocks+wallstreetbets</i>`,
     sellLines,
     ``,
-    `<b>🟢 매수 키워드 (공포 과열)</b>`,
+    `<b>🟢 공포 과열 키워드 (매수 신호 역발상)</b>`,
+    `  <i>r/investing+stocks+wallstreetbets</i>`,
     buyLines,
     ``,
     `<b>🧭 감성 편향 지수 (SBI)</b>`,
@@ -414,16 +349,16 @@ async function schedulerTick(): Promise<void> {
       try {
         const chartImage = await generateAagagChart(60);
         if (schedulerSendPhotoFn) {
-          await schedulerSendPhotoFn(schedulerChatId, chartImage, "AAGAG 심리 추이 (최근 60일)");
+          await schedulerSendPhotoFn(schedulerChatId, chartImage, "Reddit 심리 추이 (최근 60일)");
         }
       } catch (chartErr: any) {
-        console.warn(`[AAGAG] 차트 전송 실패: ${chartErr.message}`);
+        console.warn(`[Reddit] 차트 전송 실패: ${chartErr.message}`);
       }
     }
   } catch (e: any) {
-    console.error(`[AAGAG] 스케줄 실행 실패: ${e.message}`);
+    console.error(`[Reddit] 스케줄 실행 실패: ${e.message}`);
     if (schedulerSendFn && schedulerChatId) {
-      await schedulerSendFn(schedulerChatId, `❌ AAGAG 심리 분석 실패: ${e.message}`);
+      await schedulerSendFn(schedulerChatId, `❌ Reddit 심리 분석 실패: ${e.message}`);
     }
   } finally {
     isRunning = false;
@@ -441,11 +376,10 @@ export function startAagagMonitor(
   schedulerSendFn = sendFn;
   schedulerSendPhotoFn = sendPhotoFn ?? null;
 
-  console.log("[AAGAG] 심리 모니터 시작 — 09:00/16:00 KST 스케줄");
+  console.log("[Reddit] 심리 모니터 시작 — 09:00/16:00 KST 스케줄");
 
-  // 1분 주기로 스케줄 체크
   schedulerTimer = setInterval(
-    () => schedulerTick().catch(e => console.error(`[AAGAG] 스케줄러 오류: ${e.message}`)),
+    () => schedulerTick().catch((e) => console.error(`[Reddit] 스케줄러 오류: ${e.message}`)),
     60_000,
   );
 }
@@ -454,7 +388,7 @@ export function stopAagagMonitor(): void {
   if (schedulerTimer) {
     clearInterval(schedulerTimer);
     schedulerTimer = null;
-    console.log("[AAGAG] 심리 모니터 중지");
+    console.log("[Reddit] 심리 모니터 중지");
   }
 }
 
@@ -490,17 +424,24 @@ async function ensureTable(): Promise<void> {
     )`;
     _tableReady = true;
   } catch (e: any) {
-    console.error(`[AAGAG] 테이블 생성 실패: ${e.message}`);
+    console.error(`[Reddit] 테이블 생성 실패: ${e.message}`);
   }
 }
 
 export async function saveAagagResult(r: AagagResult): Promise<void> {
   try {
     await ensureTable();
-    const sellMap: Record<string, { posts: number; comments: number }> = {};
-    r.sellStats.forEach(s => { sellMap[s.keyword] = { posts: s.posts, comments: s.totalComments }; });
-    const buyMap: Record<string, { posts: number; comments: number }> = {};
-    r.buyStats.forEach(s => { buyMap[s.keyword] = { posts: s.posts, comments: s.totalComments }; });
+
+    // sell/buy 첫 3개 키워드를 기존 컬럼에 매핑 (하위 호환)
+    const s = r.sellStats;
+    const b = r.buyStats;
+
+    // general_json에 전체 stats 저장 (키워드 변경 이력 보존)
+    const fullJson = {
+      general: r.generalStats,
+      sell: r.sellStats,
+      buy: r.buyStats,
+    };
 
     await sql`INSERT INTO aagag_daily
       (date, time, sii, sbi, signal, reason,
@@ -511,11 +452,11 @@ export async function saveAagagResult(r: AagagResult): Promise<void> {
        general_json)
       VALUES (
         ${r.date}, ${r.time}, ${r.stockInterestIndex}, ${r.sentimentBiasIndex}, ${r.signal}, ${r.reason},
-        ${sellMap["폭등"]?.posts ?? 0}, ${sellMap["급등"]?.posts ?? 0}, ${sellMap["급상승"]?.posts ?? 0},
-        ${buyMap["폭락"]?.posts ?? 0}, ${buyMap["급락"]?.posts ?? 0}, ${buyMap["급하락"]?.posts ?? 0},
-        ${sellMap["폭등"]?.comments ?? 0}, ${sellMap["급등"]?.comments ?? 0}, ${sellMap["급상승"]?.comments ?? 0},
-        ${buyMap["폭락"]?.comments ?? 0}, ${buyMap["급락"]?.comments ?? 0}, ${buyMap["급하락"]?.comments ?? 0},
-        ${JSON.stringify(r.generalStats)}
+        ${s[0]?.posts ?? 0}, ${s[1]?.posts ?? 0}, ${s[2]?.posts ?? 0},
+        ${b[0]?.posts ?? 0}, ${b[1]?.posts ?? 0}, ${b[2]?.posts ?? 0},
+        ${s[0]?.totalComments ?? 0}, ${s[1]?.totalComments ?? 0}, ${s[2]?.totalComments ?? 0},
+        ${b[0]?.totalComments ?? 0}, ${b[1]?.totalComments ?? 0}, ${b[2]?.totalComments ?? 0},
+        ${JSON.stringify(fullJson)}
       )
       ON CONFLICT (date, time) DO UPDATE SET
         sii = EXCLUDED.sii, sbi = EXCLUDED.sbi, signal = EXCLUDED.signal, reason = EXCLUDED.reason,
@@ -525,9 +466,9 @@ export async function saveAagagResult(r: AagagResult): Promise<void> {
         buy_폭락_comments = EXCLUDED.buy_폭락_comments, buy_급락_comments = EXCLUDED.buy_급락_comments, buy_급하락_comments = EXCLUDED.buy_급하락_comments,
         general_json = EXCLUDED.general_json
     `;
-    console.log(`[AAGAG] DB 저장 완료: ${r.date} ${r.time}`);
+    console.log(`[Reddit] DB 저장 완료: ${r.date} ${r.time}`);
   } catch (e: any) {
-    console.error(`[AAGAG] DB 저장 실패: ${e.message}`);
+    console.error(`[Reddit] DB 저장 실패: ${e.message}`);
   }
 }
 
@@ -553,7 +494,7 @@ export async function getAagagHistory(days = 60): Promise<AagagDailyRow[]> {
     `;
     return (Array.from(rows) as AagagDailyRow[]).reverse();
   } catch (e: any) {
-    console.error(`[AAGAG] DB 조회 실패: ${e.message}`);
+    console.error(`[Reddit] DB 조회 실패: ${e.message}`);
     return [];
   }
 }
@@ -581,17 +522,12 @@ const CH = H - PAD.t - PAD.b;
 const n = data.length;
 if (n === 0) return;
 
-// background
 ctx.fillStyle = '#131722';
 ctx.fillRect(0, 0, W, H);
 
-// ── SII range (bars, left Y axis) ──
 const siiVals = data.map(d => d.sii);
 const maxSii = Math.max(...siiVals, 20) * 1.15;
-
-// ── SBI range (line, right Y axis) ──
 const sbiMin = -1, sbiMax = 1;
-
 const colW = CW / n;
 const barW = Math.max(4, colW * 0.7);
 
@@ -599,7 +535,6 @@ function xAt(i) { return PAD.l + (i + 0.5) * colW; }
 function yLeftAt(v) { return PAD.t + (1 - v / maxSii) * CH; }
 function yRightAt(v) { return PAD.t + (sbiMax - v) / (sbiMax - sbiMin) * CH; }
 
-// ── Grid ──
 ctx.setLineDash([]);
 for (let i = 0; i <= 5; i++) {
   const y = PAD.t + i * CH / 5;
@@ -607,20 +542,17 @@ for (let i = 0; i <= 5; i++) {
   ctx.lineWidth = 1;
   ctx.beginPath(); ctx.moveTo(PAD.l, y); ctx.lineTo(W - PAD.r, y); ctx.stroke();
 
-  // left Y labels (SII)
   const siiVal = maxSii * (1 - i / 5);
   ctx.fillStyle = '#778ca3';
   ctx.font = '11px monospace';
   ctx.textAlign = 'right';
   ctx.fillText(siiVal.toFixed(0), PAD.l - 6, y + 4);
 
-  // right Y labels (SBI)
   const sbiVal = sbiMax - i * (sbiMax - sbiMin) / 5;
   ctx.textAlign = 'left';
   ctx.fillText(sbiVal.toFixed(1), W - PAD.r + 6, y + 4);
 }
 
-// ── SBI trigger lines ──
 [{v: 0.30, c: '#ef5350', label: 'SELL 0.30'}, {v: -0.30, c: '#26a69a', label: 'BUY -0.30'}].forEach(trig => {
   const y = yRightAt(trig.v);
   ctx.strokeStyle = trig.c;
@@ -634,7 +566,6 @@ for (let i = 0; i <= 5; i++) {
   ctx.fillText(trig.label, W - PAD.r + 4, y - 4);
 });
 
-// ── SBI zero line ──
 const y0 = yRightAt(0);
 ctx.strokeStyle = '#555';
 ctx.lineWidth = 1;
@@ -642,7 +573,6 @@ ctx.setLineDash([2, 2]);
 ctx.beginPath(); ctx.moveTo(PAD.l, y0); ctx.lineTo(W - PAD.r, y0); ctx.stroke();
 ctx.setLineDash([]);
 
-// ── X-axis date labels ──
 ctx.fillStyle = '#778ca3';
 ctx.font = '10px monospace';
 ctx.textAlign = 'center';
@@ -657,41 +587,34 @@ for (let i = 0; i < n; i += labelStep) {
   ctx.restore();
 }
 
-// ── Stacked bars (SII = total bar height, sell/buy keyword counts overlaid inside) ──
 data.forEach((d, i) => {
   const x = xAt(i);
   const barTop = yLeftAt(d.sii);
   const barBottom = yLeftAt(0);
   const barH = barBottom - barTop;
 
-  // Full SII bar (dark blue)
   ctx.fillStyle = 'rgba(66,133,244,0.35)';
   ctx.fillRect(x - barW/2, barTop, barW, barH);
   ctx.strokeStyle = 'rgba(66,133,244,0.6)';
   ctx.lineWidth = 1;
   ctx.strokeRect(x - barW/2, barTop, barW, barH);
 
-  // Sell keyword overlay (red, from top)
   const sellTotal = (d.sell_폭등 || 0) + (d.sell_급등 || 0) + (d.sell_급상승 || 0);
-  // Buy keyword overlay (green, from bottom)
   const buyTotal = (d.buy_폭락 || 0) + (d.buy_급락 || 0) + (d.buy_급하락 || 0);
   const totalKw = sellTotal + buyTotal;
 
   if (totalKw > 0 && barH > 4) {
-    // Sell portion (red, top of bar)
     if (sellTotal > 0) {
       const sellH = Math.max(2, (sellTotal / Math.max(totalKw, 1)) * barH * 0.8);
       ctx.fillStyle = 'rgba(239,83,80,0.55)';
       ctx.fillRect(x - barW/2 + 1, barTop + 1, barW - 2, Math.min(sellH, barH - 2));
     }
-    // Buy portion (green, bottom of bar)
     if (buyTotal > 0) {
       const buyH = Math.max(2, (buyTotal / Math.max(totalKw, 1)) * barH * 0.8);
       ctx.fillStyle = 'rgba(38,166,154,0.55)';
       ctx.fillRect(x - barW/2 + 1, barBottom - Math.min(buyH, barH - 2) - 1, barW - 2, Math.min(buyH, barH - 2));
     }
 
-    // Keyword count text inside bar (if bar is tall enough)
     if (barH > 28 && colW > 16) {
       ctx.font = 'bold 9px monospace';
       ctx.textAlign = 'center';
@@ -707,7 +630,6 @@ data.forEach((d, i) => {
   }
 });
 
-// ── SBI line (right Y axis) ──
 ctx.strokeStyle = '#ffd700';
 ctx.lineWidth = 2.5;
 ctx.setLineDash([]);
@@ -720,7 +642,6 @@ data.forEach((d, i) => {
 });
 ctx.stroke();
 
-// ── SBI dots colored by signal ──
 data.forEach((d, i) => {
   const x = xAt(i);
   const y = yRightAt(d.sbi);
@@ -730,13 +651,11 @@ data.forEach((d, i) => {
   ctx.fill();
 });
 
-// ── Title ──
 ctx.fillStyle = '#ffffff';
 ctx.font = 'bold 14px monospace';
 ctx.textAlign = 'left';
-ctx.fillText('AAGAG 커뮤니티 심리 지수 (최근 ' + n + '회)', PAD.l, 28);
+ctx.fillText('Reddit 주식 심리 지수 — SII/SBI (최근 ' + n + '회)', PAD.l, 28);
 
-// ── Axis labels ──
 ctx.font = '11px monospace';
 ctx.fillStyle = '#4285f4';
 ctx.textAlign = 'right';
@@ -745,11 +664,10 @@ ctx.fillStyle = '#ffd700';
 ctx.textAlign = 'left';
 ctx.fillText('▲ SBI', W - PAD.r + 6, PAD.t - 8);
 
-// ── Legend ──
 const legends = [
   {label: 'SII (관심도)', color: 'rgba(66,133,244,0.6)', type: 'rect'},
-  {label: '매도 키워드', color: 'rgba(239,83,80,0.7)', type: 'rect'},
-  {label: '매수 키워드', color: 'rgba(38,166,154,0.7)', type: 'rect'},
+  {label: '낙관 키워드', color: 'rgba(239,83,80,0.7)', type: 'rect'},
+  {label: '공포 키워드', color: 'rgba(38,166,154,0.7)', type: 'rect'},
   {label: 'SBI (감성편향)', color: '#ffd700', type: 'line'},
 ];
 let lx = PAD.l + 10;
@@ -775,8 +693,9 @@ legends.forEach(l => {
 
 export async function generateAagagChart(days = 60): Promise<Buffer> {
   const rows = await getAagagHistory(days);
-  if (rows.length === 0) throw new Error("AAGAG 데이터가 없습니다. 첫 스캔 후 그래프가 생성됩니다.");
+  if (rows.length === 0) throw new Error("Reddit 심리 데이터가 없습니다. 첫 스캔 후 그래프가 생성됩니다.");
 
+  const { chromium } = await import("playwright");
   const html = buildAagagChartHtml(rows);
   const browser = await chromium.launch({ args: ["--no-sandbox"] });
   try {
