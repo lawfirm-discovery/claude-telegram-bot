@@ -347,6 +347,8 @@ For more information, read the Bun API docs in `node_modules/bun-types/docs/**.m
 
 리걸몬스터는 Flyway를 사용하지 않는다. DB 스키마 변경 / 데이터 패치는 아래 규칙을 따른다.
 
+🗂️ **2026-11-02 개발 DB 분리**: 개발 DB 는 rtx6000 로컬 PostgreSQL `lemondev`(127.0.0.1:**5440**, 운영 데이터의 마스킹 사본)이고, RDS `lemon` 은 **운영 전용**이다(개발에서 직접 접속·변경 금지). `lawdocs`(RDS 5442)는 아직 공유. 개발 DB 에 적용한 DDL 은 운영에 자동 반영되지 않으므로 **같은 커밋에 `docs/MASTER_DEPLOY_CHECKLIST.md` 행을 추가**하고 master 배포 때 운영에 적용한다. 정본: `lemon-api-server-spring/docs/DEV_DB_SEPARATION_PHASE1.md`.
+
 🔐 **자격증명(host/user/password/db)은 본 문서·텔레그램·로그·git 어디에도 절대 기재하지 않는다.**
 접속값은 항상 **rtx6000 개발서버 환경변수에서 런타임에만** 읽는다.
 이유: 자격증명은 주기적으로 회전된다(2026-05-14 회전 사례 — 정적 값은 즉시 stale). 런타임 env 로드만이 회전에 자동 추종하며, 평문 시크릿이 git/system-prompt/로그에 남지 않는다(2026-05 GitGuardian 사고 재발 방지).
@@ -366,7 +368,7 @@ set -a; . /home/angrylawyer/lemon-api-server-spring/.env.development; set +a
 PGPASSWORD="$DB_PASSWORD" psql -h "$DB_HOST" -p "${DB_PORT:-5432}" -U "$DB_USER" -d "$DATABASE"
 ```
 
-- `DB_HOST/DB_PORT/DB_USER/DB_PASSWORD/DATABASE` 키는 `SPRING_PROFILES_ACTIVE=development` 기준 `lemon-api-server-spring/.env.development`에 존재.
+- `DB_HOST/DB_PORT/DB_USER/DB_PW/DATABASE` 키는 `SPRING_PROFILES_ACTIVE=development` 기준 `lemon-api-server-spring/.env.development`에 존재(현재 127.0.0.1:5440 — 개발 DB). 비밀번호 키 이름은 `DB_PW`(위 예시의 `DB_PASSWORD` 는 구 표기). env 백업 파일(`.env.development.bak*`)의 옛 RDS 값 사용 금지.
 - 다른 DB(lawdocs 등)도 동일 원칙 — 해당 서비스의 dev env에서 키를 읽는다. 정적 값을 절대 추측·기재하지 않는다.
 - env 값을 `echo`/로그/텔레그램으로 출력 금지. psql에 변수로만 전달.
 
